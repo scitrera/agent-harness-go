@@ -1,0 +1,92 @@
+package tools
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+)
+
+// MemoryHit is a single recalled memory.
+type MemoryHit struct {
+	ID      string  `json:"id"`
+	Content string  `json:"content"`
+	Score   float64 `json:"score"`
+}
+
+// MemoryAuthority is the per-turn OBO grant for MemoryLayer calls. A zero value
+// means "use the client's default authority" (the configured fallback grant).
+type MemoryAuthority struct {
+	GrantID     string
+	SubjectType string
+	SubjectID   string
+}
+
+// MemoryRecaller is the read surface of MemoryLayer the harness exposes to the
+// model as on-demand tools (semantic recall + fetch-by-id). Implemented by the
+// MemoryLayer SDK adapter in internal/memory. Workspace + OBO authority are
+// passed per call (the turn's chat workspace and grant) rather than baked into
+// the client.
+type MemoryRecaller interface {
+	Recall(ctx context.Context, auth MemoryAuthority, workspace, query string, limit int) ([]MemoryHit, error)
+	GetMemory(ctx context.Context, id string) (MemoryHit, error)
+}
+
+// RegisterMemory registers the memory_search and memory_get tools backed by the
+// recaller, with descriptors so they are exposed via the provider tool-API.
+func RegisterMemory(reg *Registry, recaller MemoryRecaller) error {
+	if recaller == nil {
+		return fmt.Errorf("%w: memory recaller required", ErrInvalidTool)
+	}
+	if err := reg.Register("memory_search", HandlerFunc(func(ctx context.Context, req Request) (Result, error) {
+		return memorySearch(ctx, recaller, req)
+	})); err != nil {
+		return err
+	}
+	if err := reg.Register("memory_get", HandlerFunc(func(ctx context.Context, req Request) (Result, error) {
+		return memoryGet(ctx, recaller, req)
+	})); err != nil {
+		return err
+	}
+	reg.Describe(Descriptor{
+		Name:        "memory_search",
+		Description: "Semantically search durable memory for relevant facts, decisions, and context from past turns.",
+		Parameters:  json.RawMessage(`{"type":"object","properties":{"query":{"type":"string","description":"What to recall"},"limit":{"type":"integer","description":"Max results (default 10)"}},"required":["query"]}`),
+	})
+	reg.Describe(Descriptor{
+		Name:        "memory_get",
+		Description: "Fetch the full content of a specific memory by id (from memory_search results).",
+		Parameters:  json.RawMessage(`{"type":"object","properties":{"id":{"type":"string"}},"required":["id"]}`),
+	})
+	return nil
+}
+
+func memorySearch(ctx context.Context, recaller MemoryRecaller, req Request) (Result, error) {
+	var args struct {
+		Query string `json:"query"`
+		Limit int    `json:"limit"`
+	}
+	if err := decodeArgs(req, &args); err != nil {
+		return Result{}, err
+	}
+	hits, err := recaller.Recall(ctx, req.Authority, req.Addr.WorkspaceID, args.Query, args.Limit)
+	if err != nil {
+		return Result{}, err
+	}
+	return marshalResult(req, struct {
+		Results []MemoryHit `json:"results"`
+	}{Results: hits})
+}
+
+func memoryGet(ctx context.Context, recaller MemoryRecaller, req Request) (Result, error) {
+	var args struct {
+		ID string `json:"id"`
+	}
+	if err := decodeArgs(req, &args); err != nil {
+		return Result{}, err
+	}
+	hit, err := recaller.GetMemory(ctx, args.ID)
+	if err != nil {
+		return Result{}, err
+	}
+	return marshalResult(req, hit)
+}

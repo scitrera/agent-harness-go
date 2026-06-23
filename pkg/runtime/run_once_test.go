@@ -1,0 +1,108 @@
+package runtime
+
+import (
+	"context"
+	"errors"
+	"testing"
+
+	"github.com/scitrera/agent-harness-go/pkg/channel"
+	"github.com/scitrera/agent-harness-go/pkg/protocol"
+)
+
+type fakeSource struct {
+	envelope channel.Inbound
+	err      error
+}
+
+func (s fakeSource) FetchTask(_ context.Context) (channel.Inbound, error) {
+	if s.err != nil {
+		return channel.Inbound{}, s.err
+	}
+	return s.envelope, nil
+}
+
+type fakeExecutor struct {
+	addr protocol.MessageAddress
+	msg  protocol.ChatMessage
+	err  error
+}
+
+func (e *fakeExecutor) Run(_ context.Context, addr protocol.MessageAddress, user protocol.ChatMessage) (protocol.ChatMessage, error) {
+	e.addr = addr
+	e.msg = user
+	if e.err != nil {
+		return protocol.ChatMessage{}, e.err
+	}
+	part, err := protocol.NewTextPart("done")
+	if err != nil {
+		return protocol.ChatMessage{}, err
+	}
+	return protocol.ChatMessage{ID: "assistant-1", Role: protocol.RoleAssistant, Addr: addr, Content: []protocol.ContentPart{part}}, nil
+}
+
+func Test_Runner_RunOnce_fetches_aether_task_and_executes_turn(t *testing.T) {
+	// Given
+	ctx := context.Background()
+	part, err := protocol.NewTextPart("hello")
+	if err != nil {
+		t.Fatalf("text part: %v", err)
+	}
+	executor := &fakeExecutor{}
+	runner, err := NewRunner(fakeSource{envelope: channel.Inbound{
+		Addr:    protocol.MessageAddress{ThreadID: "thread-1"},
+		Message: protocol.ChatMessage{ID: "user-1", Role: protocol.RoleUser, Content: []protocol.ContentPart{part}},
+	}}, executor)
+	if err != nil {
+		t.Fatalf("runner: %v", err)
+	}
+
+	// When
+	assistant, err := runner.RunOnce(ctx)
+
+	// Then
+	if err != nil {
+		t.Fatalf("run once: %v", err)
+	}
+	if assistant.ID != "assistant-1" || executor.addr.ThreadID != "thread-1" || executor.msg.ID != "user-1" {
+		t.Fatalf("unexpected execution: assistant=%#v addr=%#v msg=%#v", assistant, executor.addr, executor.msg)
+	}
+}
+
+func Test_Runner_RunOnce_uses_message_address_when_envelope_address_missing(t *testing.T) {
+	// Given
+	ctx := context.Background()
+	executor := &fakeExecutor{}
+	runner, err := NewRunner(fakeSource{envelope: channel.Inbound{
+		Message: protocol.ChatMessage{ID: "user-1", Role: protocol.RoleUser, Addr: protocol.MessageAddress{ThreadID: "message-thread"}},
+	}}, executor)
+	if err != nil {
+		t.Fatalf("runner: %v", err)
+	}
+
+	// When
+	_, err = runner.RunOnce(ctx)
+
+	// Then
+	if err != nil {
+		t.Fatalf("run once: %v", err)
+	}
+	if executor.addr.ThreadID != "message-thread" {
+		t.Fatalf("expected message address fallback, got %#v", executor.addr)
+	}
+}
+
+func Test_Runner_RunOnce_returns_missing_thread_when_task_has_no_thread(t *testing.T) {
+	// Given
+	runner, err := NewRunner(fakeSource{envelope: channel.Inbound{}}, &fakeExecutor{})
+	if err != nil {
+		t.Fatalf("runner: %v", err)
+	}
+
+	// When
+	_, err = runner.RunOnce(context.Background())
+
+	// Then
+	if !errors.Is(err, ErrMissingThreadID) {
+		t.Fatalf("expected ErrMissingThreadID, got %v", err)
+	}
+}

@@ -1,0 +1,19 @@
+.codegraph/
+.omo/
+.omc/
+test.env
+
+.local-test/
+
+# Runtime dirs created by cmd/agent-harness when run from the repo
+/workspace/
+.agent-harness/
+
+# Build / editor
+*.test
+*.out
+/bin/
+*.swp
+*.swo
+.idea/
+.vscode/
