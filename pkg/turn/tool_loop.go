@@ -127,6 +127,23 @@ func (r *Runner) callWithOverflowRecovery(ctx context.Context, history []protoco
 func (r *Runner) invokeProvider(ctx context.Context, req provider.ChatRequest, streamer *turnStreamer) (resp provider.ChatResponse, err error) {
 	ctx, span := telemetry.StartLLM(ctx, req.Model)
 	defer telemetry.Finish(span, &err)
+	// Log every provider call + its outcome. The LLM request is otherwise opaque
+	// in the harness logs, so a failed call (network/auth/timeout) leaves no
+	// trace beyond the task fail reason — which is exactly when we most need to
+	// know the model, transport, and error.
+	slog.InfoContext(ctx, "llm: provider call",
+		slog.String("model", req.Model),
+		slog.Int("messages", len(req.Messages)),
+		slog.Int("tools", len(req.Tools)),
+	)
+	defer func() {
+		if err != nil {
+			slog.ErrorContext(ctx, "llm: provider call failed",
+				slog.String("model", req.Model),
+				slog.Any("err", err),
+			)
+		}
+	}()
 	if sp, ok := r.provider.(StreamingProvider); ok && r.streaming {
 		textIndex := -1
 		onDelta := func(text string) error {
