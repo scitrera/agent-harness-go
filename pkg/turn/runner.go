@@ -68,6 +68,7 @@ type Runner struct {
 
 	memory             MemoryService
 	memAutoCommit      bool
+	memAutoCommitAsstOnly bool
 	memAutoRecall      bool
 	memRecallLimit     int
 	memRecallWithInput bool
@@ -107,7 +108,13 @@ type Config struct {
 	// thread-scoped recalled memories into the turn context.
 	Memory                   MemoryService
 	MemoryAutoCommit         bool
-	MemoryAutoRecall         bool
+	// MemoryAutoCommitAssistantOnly commits ONLY the assistant message on
+	// auto-commit. Use it when the host already persists the user message (e.g.
+	// the workclaw platform-server commits the inbound user turn before
+	// dispatching the chat task); committing it again here would duplicate the
+	// turn. Default false: commit user + assistant.
+	MemoryAutoCommitAssistantOnly bool
+	MemoryAutoRecall              bool
 	MemoryRecallLimit        int
 	MemoryRecallIncludeInput bool
 
@@ -169,6 +176,7 @@ func NewRunner(cfg Config) (*Runner, error) {
 		toolSpecs:          toolSpecsFrom(cfg.Registry),
 		memory:             cfg.Memory,
 		memAutoCommit:      cfg.MemoryAutoCommit,
+		memAutoCommitAsstOnly: cfg.MemoryAutoCommitAssistantOnly,
 		memAutoRecall:      cfg.MemoryAutoRecall,
 		memRecallLimit:     recallLimitOrDefault(cfg.MemoryRecallLimit),
 		memRecallWithInput: cfg.MemoryRecallIncludeInput,
@@ -368,13 +376,20 @@ func (r *Runner) dailyNotesMessage(ctx context.Context, addr protocol.MessageAdd
 	}, true
 }
 
-// commitToMemory appends the turn's user + assistant messages to the thread.
-// Best-effort: errors are logged, never returned.
+// commitToMemory appends the turn to the thread — user + assistant, or
+// assistant-only when MemoryAutoCommitAssistantOnly is set (the host persists
+// the user message). Best-effort: errors are logged, never returned.
 func (r *Runner) commitToMemory(ctx context.Context, auth tools.MemoryAuthority, addr protocol.MessageAddress, user, assistant protocol.ChatMessage) {
 	if !r.memAutoCommit || r.memory == nil {
 		return
 	}
-	if err := r.memory.AppendThreadMessages(ctx, auth, addr.WorkspaceID, addr.ThreadID, []protocol.ChatMessage{user, assistant}); err != nil {
+	msgs := []protocol.ChatMessage{user, assistant}
+	if r.memAutoCommitAsstOnly {
+		// Host owns the user-message persistence; commit only the assistant to
+		// avoid duplicating the user turn in the thread.
+		msgs = []protocol.ChatMessage{assistant}
+	}
+	if err := r.memory.AppendThreadMessages(ctx, auth, addr.WorkspaceID, addr.ThreadID, msgs); err != nil {
 		slog.WarnContext(ctx, "memory auto-commit failed", slog.Any("err", err))
 	}
 }
