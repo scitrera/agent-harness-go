@@ -69,6 +69,7 @@ type Runner struct {
 	memory             MemoryService
 	memAutoCommit      bool
 	memAutoCommitAsstOnly bool
+	memAutoCommitAsync bool
 	memAutoRecall      bool
 	memRecallLimit     int
 	memRecallWithInput bool
@@ -114,7 +115,14 @@ type Config struct {
 	// dispatching the chat task); committing it again here would duplicate the
 	// turn. Default false: commit user + assistant.
 	MemoryAutoCommitAssistantOnly bool
-	MemoryAutoRecall              bool
+	// MemoryAutoCommitAsync runs the post-turn commit in a detached goroutine so
+	// it never blocks turn completion. Use it when the commit transport may stall
+	// (e.g. a MemoryLayer ProxyHttp whose response does not yet route back through
+	// the sandbox relay — the write still lands, but the response wait would
+	// otherwise delay the turn). Only safe for long-lived runtimes (a CLI process
+	// could exit before the goroutine finishes). Default false: synchronous.
+	MemoryAutoCommitAsync bool
+	MemoryAutoRecall      bool
 	MemoryRecallLimit        int
 	MemoryRecallIncludeInput bool
 
@@ -177,6 +185,7 @@ func NewRunner(cfg Config) (*Runner, error) {
 		memory:             cfg.Memory,
 		memAutoCommit:      cfg.MemoryAutoCommit,
 		memAutoCommitAsstOnly: cfg.MemoryAutoCommitAssistantOnly,
+		memAutoCommitAsync: cfg.MemoryAutoCommitAsync,
 		memAutoRecall:      cfg.MemoryAutoRecall,
 		memRecallLimit:     recallLimitOrDefault(cfg.MemoryRecallLimit),
 		memRecallWithInput: cfg.MemoryRecallIncludeInput,
@@ -318,7 +327,15 @@ func (r *Runner) Run(ctx context.Context, addr protocol.MessageAddress, user pro
 	if err := streamer.finalize(ctx, assistant); err != nil {
 		return protocol.ChatMessage{}, fmt.Errorf("publish message_finalized: %w", err)
 	}
-	r.commitToMemory(ctx, auth, addr, user, assistant)
+	if r.memAutoCommitAsync {
+		// Detach: never block turn completion on the commit. context.WithoutCancel
+		// keeps trace values but drops the turn's cancellation/deadline so the
+		// write isn't aborted when Run returns (the commit transport applies its
+		// own timeout).
+		go r.commitToMemory(context.WithoutCancel(ctx), auth, addr, user, assistant)
+	} else {
+		r.commitToMemory(ctx, auth, addr, user, assistant)
+	}
 	return assistant, nil
 }
 
