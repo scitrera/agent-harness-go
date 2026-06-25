@@ -67,6 +67,96 @@ func TestHandleChatEnqueuesAndTouchesSession(t *testing.T) {
 	}
 }
 
+func TestHandleChatRejectsCrossOrigin(t *testing.T) {
+	srv, ch, _ := newTestServer(t)
+
+	body := strings.NewReader(`{"thread_id":"t1","text":"hello agent"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/chat", body)
+	// httptest sets Host to example.com; an Origin pointing elsewhere is cross-origin.
+	req.Header.Set("Origin", "http://evil.example:1234")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, body=%s (want 403)", rec.Code, rec.Body.String())
+	}
+	// Side effect must NOT have happened: nothing enqueued, no session touched.
+	fctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if _, err := ch.FetchTask(fctx); err == nil {
+		t.Fatal("cross-origin request enqueued a task; side effect should have been blocked")
+	}
+	if list := srv.sessions.List(); len(list) != 0 {
+		t.Fatalf("cross-origin request touched a session: %+v", list)
+	}
+}
+
+func TestHandleChatAllowsSameOrigin(t *testing.T) {
+	srv, ch, _ := newTestServer(t)
+
+	body := strings.NewReader(`{"thread_id":"t1","text":"hello agent"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/chat", body)
+	// Origin host matches the request Host (example.com) -> same-origin -> allowed.
+	req.Header.Set("Origin", "http://"+req.Host)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, body=%s (want 202)", rec.Code, rec.Body.String())
+	}
+	if _, err := ch.FetchTask(context.Background()); err != nil {
+		t.Fatalf("same-origin request did not enqueue a task: %v", err)
+	}
+}
+
+func TestHandleChatAllowsNoOrigin(t *testing.T) {
+	// curl-style client with no Origin header must still work (back-compat).
+	srv, ch, _ := newTestServer(t)
+
+	body := strings.NewReader(`{"thread_id":"t1","text":"hello agent"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/chat", body)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, body=%s (want 202)", rec.Code, rec.Body.String())
+	}
+	if _, err := ch.FetchTask(context.Background()); err != nil {
+		t.Fatalf("no-Origin request did not enqueue a task: %v", err)
+	}
+}
+
+func TestCreateSessionRejectsCrossOrigin(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/sessions", nil)
+	req.Header.Set("Origin", "http://evil.example")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d (want 403)", rec.Code)
+	}
+	// No session should have been created.
+	if list := srv.sessions.List(); len(list) != 0 {
+		t.Fatalf("cross-origin create made a session: %+v", list)
+	}
+}
+
+func TestGetUnaffectedByOriginCheck(t *testing.T) {
+	// Reads must not be subject to the same-origin guard even with a foreign Origin.
+	srv, _, _ := newTestServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/sessions", nil)
+	req.Header.Set("Origin", "http://evil.example")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET status = %d (want 200); read should be unguarded", rec.Code)
+	}
+}
+
 func TestHandleHistoryRoundTrip(t *testing.T) {
 	srv, _, fs := newTestServer(t)
 	part, _ := protocol.NewTextPart("persisted reply")

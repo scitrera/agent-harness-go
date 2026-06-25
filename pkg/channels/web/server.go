@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/scitrera/agent-harness-go/pkg/channel"
@@ -19,6 +20,11 @@ const keepaliveInterval = 15 * time.Second
 // Server is the HTTP surface for the web UI: a REST/SSE API plus the embedded
 // single-page app. It is transport glue only — turns run through the Channel and
 // the turn runner wired in cmd.
+//
+// The server has NO authentication and is intended for localhost (loopback) use.
+// State-changing endpoints carry a same-origin CSRF guard, but anyone able to
+// reach the listen address can drive the agent — do not expose it beyond
+// loopback without your own auth layer in front.
 type Server struct {
 	ch        *Channel
 	store     *store.FileStore
@@ -40,13 +46,44 @@ func (s *Server) Handler() http.Handler { return s.mux }
 
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/sessions", s.handleListSessions)
-	s.mux.HandleFunc("POST /api/sessions", s.handleCreateSession)
-	s.mux.HandleFunc("DELETE /api/sessions/{id}", s.handleDeleteSession)
+	// State-changing endpoints are guarded by a same-origin check (CSRF defense).
+	// Reads (GET/SSE/assets) are not guarded — they are not CSRF write vectors.
+	s.mux.HandleFunc("POST /api/sessions", guardCSRF(s.handleCreateSession))
+	s.mux.HandleFunc("DELETE /api/sessions/{id}", guardCSRF(s.handleDeleteSession))
 	s.mux.HandleFunc("GET /api/sessions/{id}/history", s.handleHistory)
-	s.mux.HandleFunc("POST /api/chat", s.handleChat)
+	s.mux.HandleFunc("POST /api/chat", guardCSRF(s.handleChat))
 	s.mux.HandleFunc("GET /api/stream", s.handleStream)
-	s.mux.HandleFunc("POST /api/cancel", s.handleCancel)
+	s.mux.HandleFunc("POST /api/cancel", guardCSRF(s.handleCancel))
 	s.mux.HandleFunc("/", s.handleSPA)
+}
+
+// sameOriginOK implements the standard same-origin CSRF defense for browser
+// clients: if the request carries an Origin header, its host:port must equal the
+// request's Host. Requests without an Origin (non-browser clients like curl) are
+// allowed — they are not a browser-CSRF vector. The bundled SPA is same-origin
+// and so always passes.
+func sameOriginOK(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return true // not a browser CSRF vector
+	}
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	return u.Host == r.Host
+}
+
+// guardCSRF wraps a state-changing handler with the same-origin check, rejecting
+// cross-origin browser requests with 403 before any side effect runs.
+func guardCSRF(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !sameOriginOK(r) {
+			writeError(w, http.StatusForbidden, fmt.Errorf("cross-origin request rejected"))
+			return
+		}
+		next(w, r)
+	}
 }
 
 func (s *Server) handleListSessions(w http.ResponseWriter, _ *http.Request) {
