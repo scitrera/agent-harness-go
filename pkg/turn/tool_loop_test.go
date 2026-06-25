@@ -144,3 +144,63 @@ func Test_Runner_Run_stops_when_tool_loop_exceeds_limit(t *testing.T) {
 		t.Fatalf("expected ErrToolLoopLimit, got %v", err)
 	}
 }
+
+// A tool that fails to invoke (here a handler error standing in for the real
+// "not pre-authorized" registry denial) must NOT abort the turn: the error is
+// handed back to the model as a tool_result, and the model then produces a
+// normal reply. Aborting would end the turn with no assistant message, which
+// reads to the UI as a hang.
+func Test_Runner_Run_failed_tool_call_is_returned_to_model_not_aborted(t *testing.T) {
+	ctx := context.Background()
+	registry := tools.NewRegistry()
+	if err := registry.Register("shell", tools.HandlerFunc(func(context.Context, tools.Request) (tools.Result, error) {
+		return tools.Result{}, errors.New("approval required: shell: tool is not pre-authorized")
+	})); err != nil {
+		t.Fatalf("register tool: %v", err)
+	}
+	callPart, err := protocol.NewToolCallPart(protocol.ToolInvokeEnvelope{CallID: "call-1", Name: "shell"})
+	if err != nil {
+		t.Fatalf("tool call part: %v", err)
+	}
+	finalPart, err := protocol.NewTextPart("I can't run shell here.")
+	if err != nil {
+		t.Fatalf("final text: %v", err)
+	}
+	provider := &scriptedProvider{responses: []provider.ChatResponse{
+		{Message: protocol.ChatMessage{ID: "assistant-tool", Role: protocol.RoleAssistant, Content: []protocol.ContentPart{callPart}}},
+		{Message: protocol.ChatMessage{ID: "assistant-final", Role: protocol.RoleAssistant, Content: []protocol.ContentPart{finalPart}}},
+	}}
+	publisher := &fakePublisher{}
+	runner, err := NewRunner(Config{
+		Store:             &fakeStore{},
+		Loader:            fakeLoader{},
+		Registry:          registry,
+		Provider:          provider,
+		Publisher:         publisher,
+		Assembler:         contextpack.NewAssembler(contextpack.Config{MaxHistoryMessages: 10}),
+		MaxToolIterations: 2,
+	})
+	if err != nil {
+		t.Fatalf("runner: %v", err)
+	}
+
+	assistant, err := runner.Run(ctx, protocol.MessageAddress{ThreadID: "thread-1"}, protocol.ChatMessage{ID: "user-1", Role: protocol.RoleUser})
+	if err != nil {
+		t.Fatalf("turn must complete, not abort on tool error: %v", err)
+	}
+	if assistant.ID != "assistant-final" {
+		t.Fatalf("expected final model reply after tool error, got %#v", assistant)
+	}
+	if len(provider.requests) != 2 {
+		t.Fatalf("expected provider reprompted (2 requests) after the tool error, got %d", len(provider.requests))
+	}
+	sawToolResult := false
+	for _, ev := range publisher.events {
+		if ev.Type == "part_appended" && ev.Part != nil && ev.Part.Type() == protocol.ContentToolResult {
+			sawToolResult = true
+		}
+	}
+	if !sawToolResult {
+		t.Fatal("expected a tool_result error part streamed to the UI")
+	}
+}

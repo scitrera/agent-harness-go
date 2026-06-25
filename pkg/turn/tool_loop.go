@@ -67,7 +67,7 @@ func (r *Runner) runProviderLoop(ctx context.Context, session *harness.Session, 
 			// runner's configured approvers. A denial records a tool_result error
 			// so the model can adapt, without executing the tool.
 			if d := r.approveToolCall(ctx, hc, perTurnApprovers); !d.Allow {
-				part, err := protocol.NewToolResultPart(call.CallID, call.Name, denialOutput(d.Reason), true)
+				part, err := protocol.NewToolResultPart(call.CallID, call.Name, toolErrorOutput(d.Reason), true)
 				if err != nil {
 					return protocol.ChatMessage{}, fmt.Errorf("denied tool result part: %w", err)
 				}
@@ -86,7 +86,27 @@ func (r *Runner) runProviderLoop(ctx context.Context, session *harness.Session, 
 			r.notifyToolFinished(toolCtx, hc, err != nil, err)
 			telemetry.FinishErr(toolSpan, err)
 			if err != nil {
-				return protocol.ChatMessage{}, fmt.Errorf("invoke tool %s: %w", call.Name, err)
+				// A cancelled context aborts the turn; any other tool error (registry
+				// policy denial, execution failure, …) is recorded as a tool_result
+				// error and handed back to the model so it can adapt and respond.
+				// Aborting the turn here would end it with no assistant reply, which
+				// reads to the UI as a hang.
+				if ctx.Err() != nil {
+					return protocol.ChatMessage{}, fmt.Errorf("invoke tool %s: %w", call.Name, err)
+				}
+				slog.WarnContext(ctx, "tool call failed; returning error to model",
+					slog.String("tool", call.Name), slog.Any("err", err))
+				errPart, perr := protocol.NewToolResultPart(call.CallID, call.Name, toolErrorOutput(err.Error()), true)
+				if perr != nil {
+					return protocol.ChatMessage{}, fmt.Errorf("tool error result part: %w", perr)
+				}
+				if perr := session.AppendToolResult(ctx, call.CallID, errPart); perr != nil {
+					return protocol.ChatMessage{}, fmt.Errorf("record tool error: %w", perr)
+				}
+				if perr := streamer.appendPart(ctx, errPart); perr != nil {
+					return protocol.ChatMessage{}, fmt.Errorf("stream tool error: %w", perr)
+				}
+				continue
 			}
 			part, err := result.ContentPart()
 			if err != nil {
@@ -215,12 +235,13 @@ func (r *Runner) notifyToolFinished(ctx context.Context, call hooks.ToolCall, is
 	}
 }
 
-// denialOutput is the tool_result output payload recorded when a tool call is
-// denied by an approver.
-func denialOutput(reason string) json.RawMessage {
+// toolErrorOutput is the tool_result output payload recorded when a tool call is
+// denied by an approver or fails to invoke (e.g. registry policy denial,
+// execution error) — the error is handed back to the model, not raised.
+func toolErrorOutput(reason string) json.RawMessage {
 	out, err := json.Marshal(map[string]string{"error": reason})
 	if err != nil {
-		return json.RawMessage(`{"error":"tool denied"}`)
+		return json.RawMessage(`{"error":"tool failed"}`)
 	}
 	return out
 }
