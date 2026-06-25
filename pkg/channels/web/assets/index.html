@@ -1,0 +1,280 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>agent-harness</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #161922; --panel-2: #1d2230; --border: #272d3a;
+    --text: #e6e9ef; --muted: #8b93a7; --accent: #6ea8fe; --user: #243049;
+    --assistant: #1b2030; --danger: #e06c75; --tool: #2a2350; --tool-border: #5b4cc0;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    display: flex; font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg); color: var(--text);
+  }
+  /* Sidebar */
+  #sidebar {
+    width: 260px; flex: 0 0 260px; background: var(--panel); border-right: 1px solid var(--border);
+    display: flex; flex-direction: column; height: 100vh;
+  }
+  #sidebar header { padding: 14px 16px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
+  #sidebar header .brand { font-weight: 600; letter-spacing: .2px; }
+  #new-chat {
+    margin: 12px; padding: 9px 12px; background: var(--accent); color: #0b0e14; border: none;
+    border-radius: 8px; font-weight: 600; cursor: pointer;
+  }
+  #new-chat:hover { filter: brightness(1.08); }
+  #sessions { list-style: none; margin: 0; padding: 4px 8px; overflow-y: auto; flex: 1; }
+  #sessions li {
+    display: flex; align-items: center; gap: 6px; padding: 9px 10px; border-radius: 8px;
+    cursor: pointer; color: var(--muted);
+  }
+  #sessions li:hover { background: var(--panel-2); color: var(--text); }
+  #sessions li.active { background: var(--panel-2); color: var(--text); }
+  #sessions li .title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #sessions li .del {
+    opacity: 0; border: none; background: transparent; color: var(--muted); cursor: pointer; font-size: 15px;
+  }
+  #sessions li:hover .del { opacity: 1; }
+  #sessions li .del:hover { color: var(--danger); }
+  /* Main */
+  #main { flex: 1; display: flex; flex-direction: column; height: 100vh; min-width: 0; }
+  #transcript { flex: 1; overflow-y: auto; padding: 24px; display: flex; flex-direction: column; gap: 14px; }
+  .msg { max-width: 760px; width: fit-content; padding: 11px 14px; border-radius: 12px; white-space: pre-wrap; word-wrap: break-word; }
+  .msg.user { align-self: flex-end; background: var(--user); border: 1px solid #2f3c5a; }
+  .msg.assistant { align-self: flex-start; background: var(--assistant); border: 1px solid var(--border); }
+  .msg.error { align-self: flex-start; background: #2a1820; border: 1px solid var(--danger); color: var(--danger); }
+  .msg .role { font-size: 11px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); margin-bottom: 4px; }
+  .tool {
+    display: inline-block; margin: 6px 6px 2px 0; padding: 4px 9px; font-size: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    background: var(--tool); border: 1px solid var(--tool-border); border-radius: 6px; color: #cfc8ff;
+  }
+  .cursor::after { content: "▋"; color: var(--muted); animation: blink 1s steps(2) infinite; }
+  @keyframes blink { 0%,50% { opacity: 1; } 50.1%,100% { opacity: 0; } }
+  /* Composer */
+  #composer { border-top: 1px solid var(--border); padding: 14px 16px; display: flex; gap: 10px; background: var(--panel); }
+  #input {
+    flex: 1; resize: none; max-height: 180px; min-height: 44px; padding: 11px 13px; border-radius: 10px;
+    background: var(--panel-2); border: 1px solid var(--border); color: var(--text); font: inherit; outline: none;
+  }
+  #input:focus { border-color: var(--accent); }
+  #send {
+    align-self: flex-end; padding: 11px 18px; border: none; border-radius: 10px; background: var(--accent);
+    color: #0b0e14; font-weight: 600; cursor: pointer; height: 44px;
+  }
+  #send:disabled { opacity: .5; cursor: default; }
+  .empty { color: var(--muted); align-self: center; margin: auto; }
+</style>
+</head>
+<body>
+  <aside id="sidebar">
+    <header><span class="brand">agent-harness</span></header>
+    <button id="new-chat">+ New chat</button>
+    <ul id="sessions"></ul>
+  </aside>
+  <main id="main">
+    <div id="transcript"><div class="empty">Start a conversation…</div></div>
+    <form id="composer">
+      <textarea id="input" placeholder="Message the agent…  (Enter to send, Shift+Enter for newline)" autocomplete="off"></textarea>
+      <button id="send" type="submit">Send</button>
+    </form>
+  </main>
+
+<script>
+"use strict";
+const $ = (s, r = document) => r.querySelector(s);
+const el = (tag, cls) => { const e = document.createElement(tag); if (cls) e.className = cls; return e; };
+const esc = (s) => { const d = document.createElement("div"); d.textContent = s ?? ""; return d.innerHTML; };
+
+const state = { active: null, es: null, streaming: null, sawDelta: false, taskId: null };
+
+const sessionsEl = $("#sessions");
+const transcriptEl = $("#transcript");
+const inputEl = $("#input");
+const sendBtn = $("#send");
+
+async function api(method, path, body) {
+  const opts = { method, headers: {} };
+  if (body !== undefined) { opts.headers["Content-Type"] = "application/json"; opts.body = JSON.stringify(body); }
+  const res = await fetch(path, opts);
+  if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
+  if (res.status === 204) return null;
+  const ct = res.headers.get("content-type") || "";
+  return ct.includes("json") ? res.json() : res.text();
+}
+
+// ---- sessions ----
+async function loadSessions() {
+  const list = await api("GET", "/api/sessions");
+  renderSessions(list || []);
+  return list || [];
+}
+
+function renderSessions(list) {
+  sessionsEl.innerHTML = "";
+  for (const s of list) {
+    const li = el("li"); li.dataset.id = s.id;
+    if (s.id === state.active) li.classList.add("active");
+    const t = el("span", "title"); t.textContent = s.title || "New chat";
+    const del = el("button", "del"); del.textContent = "×"; del.title = "Delete";
+    del.onclick = (e) => { e.stopPropagation(); deleteSession(s.id); };
+    li.append(t, del);
+    li.onclick = () => selectSession(s.id);
+    sessionsEl.append(li);
+  }
+}
+
+async function newSession() {
+  const s = await api("POST", "/api/sessions");
+  await loadSessions();
+  await selectSession(s.id);
+}
+
+async function deleteSession(id) {
+  await api("DELETE", `/api/sessions/${encodeURIComponent(id)}`);
+  const list = await loadSessions();
+  if (state.active === id) {
+    if (list.length) await selectSession(list[0].id);
+    else { state.active = null; closeStream(); transcriptEl.innerHTML = '<div class="empty">Start a conversation…</div>'; }
+  }
+}
+
+async function selectSession(id) {
+  state.active = id;
+  state.streaming = null; state.sawDelta = false;
+  [...sessionsEl.children].forEach((li) => li.classList.toggle("active", li.dataset.id === id));
+  transcriptEl.innerHTML = "";
+  const history = await api("GET", `/api/sessions/${encodeURIComponent(id)}/history`);
+  renderHistory(history || []);
+  openStream(id);
+}
+
+// ---- transcript rendering ----
+function bubble(role) {
+  const m = el("div", "msg " + role);
+  const r = el("div", "role"); r.textContent = role;
+  m.append(r);
+  const body = el("span", "body"); m.append(body);
+  transcriptEl.append(m);
+  scroll();
+  return m;
+}
+function bodyOf(m) { return m.querySelector(".body"); }
+function scroll() { transcriptEl.scrollTop = transcriptEl.scrollHeight; }
+
+function renderHistory(messages) {
+  if (!messages.length) { transcriptEl.innerHTML = '<div class="empty">Start a conversation…</div>'; return; }
+  for (const msg of messages) {
+    const role = msg.role === "user" ? "user" : (msg.role === "assistant" ? "assistant" : null);
+    if (!role) continue; // skip tool/system rows in the transcript
+    const m = bubble(role);
+    const body = bodyOf(m);
+    for (const part of (msg.content || [])) {
+      if (part.type === "text" && part.text) body.append(document.createTextNode(part.text));
+      else if (part.type === "tool_call") body.append(toolChip(part));
+    }
+  }
+  scroll();
+}
+
+function toolChip(part) {
+  const chip = el("span", "tool");
+  let args = ""; try { args = JSON.stringify(part.args || {}); } catch (_) {}
+  chip.textContent = `${part.name}(${args})`;
+  return chip;
+}
+
+// ---- streaming (SSE) ----
+function closeStream() { if (state.es) { state.es.close(); state.es = null; } }
+
+function openStream(threadId) {
+  closeStream();
+  const es = new EventSource(`/api/stream?thread_id=${encodeURIComponent(threadId)}`);
+  state.es = es;
+  es.addEventListener("message_started", () => {
+    state.streaming = bubble("assistant");
+    state.sawDelta = false;
+    bodyOf(state.streaming).classList.add("cursor");
+  });
+  es.addEventListener("token_delta", (e) => {
+    const ev = parse(e); if (!ev || !ev.delta) return;
+    if (!state.streaming) { state.streaming = bubble("assistant"); bodyOf(state.streaming).classList.add("cursor"); }
+    state.sawDelta = true;
+    bodyOf(state.streaming).append(document.createTextNode(ev.delta));
+    scroll();
+  });
+  es.addEventListener("part_appended", (e) => {
+    const ev = parse(e); if (!ev || !ev.part) return;
+    if (ev.part.type === "tool_call") {
+      if (!state.streaming) state.streaming = bubble("assistant");
+      bodyOf(state.streaming).append(toolChip(ev.part));
+      scroll();
+    }
+  });
+  es.addEventListener("message_final", (e) => {
+    const ev = parse(e);
+    if (state.streaming) {
+      const body = bodyOf(state.streaming);
+      body.classList.remove("cursor");
+      if (!state.sawDelta && ev && ev.message) {
+        const txt = (ev.message.content || []).filter((p) => p.type === "text").map((p) => p.text).join("");
+        if (txt) body.append(document.createTextNode(txt));
+      }
+    }
+    state.streaming = null; state.sawDelta = false; state.taskId = null;
+    setBusy(false);
+    loadSessions(); // refresh titles / ordering
+  });
+  es.addEventListener("error", (e) => {
+    const ev = parse(e);
+    if (ev && ev.payload) { const m = bubble("error"); bodyOf(m).textContent = typeof ev.payload === "string" ? ev.payload : JSON.stringify(ev.payload); }
+  });
+}
+
+function parse(e) { try { return JSON.parse(e.data); } catch (_) { return null; } }
+
+// ---- send ----
+function setBusy(b) { sendBtn.disabled = b; }
+
+async function send() {
+  const text = inputEl.value.trim();
+  if (!text || !state.active) return;
+  inputEl.value = ""; autosize();
+  // optimistic user bubble
+  const m = bubble("user"); bodyOf(m).textContent = text;
+  setBusy(true);
+  try {
+    const res = await api("POST", "/api/chat", { thread_id: state.active, text });
+    state.taskId = res.task_id;
+  } catch (err) {
+    const e = bubble("error"); bodyOf(e).textContent = String(err.message || err);
+    setBusy(false);
+  }
+}
+
+function autosize() { inputEl.style.height = "44px"; inputEl.style.height = Math.min(inputEl.scrollHeight, 180) + "px"; }
+
+// ---- wiring ----
+$("#new-chat").onclick = newSession;
+$("#composer").onsubmit = (e) => { e.preventDefault(); send(); };
+inputEl.addEventListener("input", autosize);
+inputEl.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+});
+
+(async function init() {
+  try {
+    let list = await loadSessions();
+    if (!list.length) { await newSession(); }
+    else { await selectSession(list[0].id); }
+  } catch (err) {
+    transcriptEl.innerHTML = `<div class="empty">Failed to load: ${esc(err.message || err)}</div>`;
+  }
+})();
+</script>
+</body>
+</html>
