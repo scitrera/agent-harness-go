@@ -9,6 +9,10 @@ import (
 )
 
 type HistoryStore interface {
+	// LoadHistory returns the thread's messages. When the turn carries an OBO
+	// authority it is available on ctx via tools.MemoryAuthorityFrom — an
+	// authority-aware store (e.g. a MemoryLayer-backed loader) should apply it;
+	// local stores ignore it.
 	LoadHistory(ctx context.Context, threadID string) ([]protocol.ChatMessage, error)
 	SaveHistory(ctx context.Context, threadID string, messages []protocol.ChatMessage) error
 }
@@ -31,7 +35,9 @@ func NewSession(ctx context.Context, addr protocol.MessageAddress, store History
 	if registry == nil {
 		registry = tools.NewRegistry()
 	}
-	history, err := store.LoadHistory(ctx, addr.ThreadID)
+	// Carry the per-turn OBO authority on ctx so an authority-aware history store
+	// can apply the user's grant on the load; local stores ignore it.
+	history, err := store.LoadHistory(tools.WithMemoryAuthority(ctx, authority), addr.ThreadID)
 	if err != nil {
 		return nil, fmt.Errorf("load history: %w", err)
 	}

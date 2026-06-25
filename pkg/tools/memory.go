@@ -21,6 +21,28 @@ type MemoryAuthority struct {
 	SubjectID   string
 }
 
+// memoryAuthorityKey is the unexported context key carrying the per-turn
+// MemoryAuthority. Auth is a request-scoped, cross-cutting concern that transits
+// intermediary layers (e.g. a caching history store) which don't themselves care
+// about it, so a typed context value — set once by the runner, read at the
+// MemoryLayer boundary — is the right seam, rather than threading an auth
+// parameter through interfaces that mostly ignore it.
+type memoryAuthorityKey struct{}
+
+// WithMemoryAuthority returns a context carrying the per-turn MemoryAuthority.
+// The runner sets this before a history load so an authority-aware store can
+// apply the user's OBO grant; stores that don't need it simply ignore it.
+func WithMemoryAuthority(ctx context.Context, auth MemoryAuthority) context.Context {
+	return context.WithValue(ctx, memoryAuthorityKey{}, auth)
+}
+
+// MemoryAuthorityFrom returns the MemoryAuthority carried on ctx, and whether one
+// was present. Absence yields the zero value (no OBO → client/default behavior).
+func MemoryAuthorityFrom(ctx context.Context) (MemoryAuthority, bool) {
+	auth, ok := ctx.Value(memoryAuthorityKey{}).(MemoryAuthority)
+	return auth, ok
+}
+
 // MemoryRecaller is the read surface of MemoryLayer the harness exposes to the
 // model as on-demand tools (semantic recall + fetch-by-id). Implemented by the
 // MemoryLayer SDK adapter in internal/memory. Workspace + OBO authority are
