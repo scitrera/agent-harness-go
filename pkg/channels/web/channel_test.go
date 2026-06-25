@@ -42,8 +42,8 @@ func TestPublishEventFanOutFiltersByThread(t *testing.T) {
 
 	// Event for t1 should reach t1's subscriber only.
 	if err := c.PublishEvent(context.Background(), channel.Event{
-		Type: channel.EventTokenDelta,
-		Addr: protocol.MessageAddress{ThreadID: "t1"},
+		Type:  channel.EventTokenDelta,
+		Addr:  protocol.MessageAddress{ThreadID: "t1"},
 		Delta: "hi",
 	}); err != nil {
 		t.Fatalf("publish: %v", err)
