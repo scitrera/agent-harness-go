@@ -2,6 +2,7 @@ package turn
 
 import (
 	"context"
+	"time"
 
 	"github.com/scitrera/agent-harness-go/pkg/channel"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
@@ -15,12 +16,26 @@ type turnStreamer struct {
 	publisher EventPublisher
 	addr      protocol.MessageAddress
 	msgID     string
+	now       func() time.Time
+	createdAt string // captured once when start() first fires; reused at finalize
 	index     int
 	started   bool
 }
 
-func newTurnStreamer(pub EventPublisher, addr protocol.MessageAddress, msgID string) *turnStreamer {
-	return &turnStreamer{publisher: pub, addr: addr, msgID: msgID}
+func newTurnStreamer(pub EventPublisher, addr protocol.MessageAddress, msgID string, now func() time.Time) *turnStreamer {
+	return &turnStreamer{publisher: pub, addr: addr, msgID: msgID, now: now}
+}
+
+// stampNow returns the current time as an RFC3339Nano UTC string — the
+// created_at format. UTC + RFC3339Nano sorts lexicographically = chronologically
+// (sub-second precision avoids ties when ordering history on reload). Falls back
+// to the wall clock when no clock was injected.
+func (s *turnStreamer) stampNow() string {
+	now := time.Now
+	if s.now != nil {
+		now = s.now
+	}
+	return now().UTC().Format(time.RFC3339Nano)
 }
 
 func streamMessageID(addr protocol.MessageAddress) string {
@@ -42,10 +57,12 @@ func (s *turnStreamer) start(ctx context.Context) error {
 		return nil
 	}
 	s.started = true
+	s.createdAt = s.stampNow()
 	msg := protocol.ChatMessage{
 		SchemaVersion: "1.0",
 		ID:            s.msgID,
 		Role:          protocol.RoleAssistant,
+		CreatedAt:     s.createdAt,
 		Addr:          s.addr,
 		Content:       []protocol.ContentPart{},
 	}
@@ -105,6 +122,11 @@ func (s *turnStreamer) finalize(ctx context.Context, msg protocol.ChatMessage) e
 		return err
 	}
 	msg.ID = s.msgID
+	// Carry the message's creation time (captured at start) so persisted history
+	// orders correctly on reload; don't clobber a caller-provided value.
+	if msg.CreatedAt == "" {
+		msg.CreatedAt = s.createdAt
+	}
 	if msg.Addr.ThreadID == "" {
 		msg.Addr = s.addr
 	}

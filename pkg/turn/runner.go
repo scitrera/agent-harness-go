@@ -66,13 +66,13 @@ type Runner struct {
 	streaming         bool
 	toolSpecs         []provider.ToolSpec
 
-	memory             MemoryService
-	memAutoCommit      bool
+	memory                MemoryService
+	memAutoCommit         bool
 	memAutoCommitAsstOnly bool
-	memAutoCommitAsync bool
-	memAutoRecall      bool
-	memRecallLimit     int
-	memRecallWithInput bool
+	memAutoCommitAsync    bool
+	memAutoRecall         bool
+	memRecallLimit        int
+	memRecallWithInput    bool
 
 	dailyNotes     bool
 	dailyNotesDir  string
@@ -107,8 +107,8 @@ type Config struct {
 	// Memory integration (optional). When Memory is set: MemoryAutoCommit appends
 	// the turn's user+assistant messages to the thread; MemoryAutoRecall injects
 	// thread-scoped recalled memories into the turn context.
-	Memory                   MemoryService
-	MemoryAutoCommit         bool
+	Memory           MemoryService
+	MemoryAutoCommit bool
 	// MemoryAutoCommitAssistantOnly commits ONLY the assistant message on
 	// auto-commit. Use it when the host already persists the user message (e.g.
 	// the workclaw platform-server commits the inbound user turn before
@@ -121,8 +121,8 @@ type Config struct {
 	// the sandbox relay — the write still lands, but the response wait would
 	// otherwise delay the turn). Only safe for long-lived runtimes (a CLI process
 	// could exit before the goroutine finishes). Default false: synchronous.
-	MemoryAutoCommitAsync bool
-	MemoryAutoRecall      bool
+	MemoryAutoCommitAsync    bool
+	MemoryAutoRecall         bool
 	MemoryRecallLimit        int
 	MemoryRecallIncludeInput bool
 
@@ -172,31 +172,31 @@ func NewRunner(cfg Config) (*Runner, error) {
 		ctxMgr = cfg.Assembler
 	}
 	return &Runner{
-		store:              cfg.Store,
-		loader:             cfg.Loader,
-		registry:           cfg.Registry,
-		provider:           cfg.Provider,
-		publisher:          cfg.Publisher,
-		ctxMgr:             ctxMgr,
-		model:              cfg.Model,
-		maxToolIterations:  cfg.MaxToolIterations,
-		streaming:          cfg.Streaming,
-		toolSpecs:          toolSpecsFrom(cfg.Registry),
-		memory:             cfg.Memory,
-		memAutoCommit:      cfg.MemoryAutoCommit,
+		store:                 cfg.Store,
+		loader:                cfg.Loader,
+		registry:              cfg.Registry,
+		provider:              cfg.Provider,
+		publisher:             cfg.Publisher,
+		ctxMgr:                ctxMgr,
+		model:                 cfg.Model,
+		maxToolIterations:     cfg.MaxToolIterations,
+		streaming:             cfg.Streaming,
+		toolSpecs:             toolSpecsFrom(cfg.Registry),
+		memory:                cfg.Memory,
+		memAutoCommit:         cfg.MemoryAutoCommit,
 		memAutoCommitAsstOnly: cfg.MemoryAutoCommitAssistantOnly,
-		memAutoCommitAsync: cfg.MemoryAutoCommitAsync,
-		memAutoRecall:      cfg.MemoryAutoRecall,
-		memRecallLimit:     recallLimitOrDefault(cfg.MemoryRecallLimit),
-		memRecallWithInput: cfg.MemoryRecallIncludeInput,
-		dailyNotes:         cfg.DailyNotes,
-		dailyNotesDir:      cfg.DailyNotesDir,
-		dailyNotesDays:     cfg.DailyNotesDays,
-		now:                cfg.Now,
-		commands:           cfg.Commands,
-		approvers:          cfg.Approvers,
-		observers:          cfg.Observers,
-		authorityFn:        cfg.Authority,
+		memAutoCommitAsync:    cfg.MemoryAutoCommitAsync,
+		memAutoRecall:         cfg.MemoryAutoRecall,
+		memRecallLimit:        recallLimitOrDefault(cfg.MemoryRecallLimit),
+		memRecallWithInput:    cfg.MemoryRecallIncludeInput,
+		dailyNotes:            cfg.DailyNotes,
+		dailyNotesDir:         cfg.DailyNotesDir,
+		dailyNotesDays:        cfg.DailyNotesDays,
+		now:                   cfg.Now,
+		commands:              cfg.Commands,
+		approvers:             cfg.Approvers,
+		observers:             cfg.Observers,
+		authorityFn:           cfg.Authority,
 	}, nil
 }
 
@@ -316,7 +316,7 @@ func (r *Runner) Run(ctx context.Context, addr protocol.MessageAddress, user pro
 	if rm := r.recallForTurn(ctx, auth, addr, user); rm != nil {
 		injected = append(injected, *rm)
 	}
-	streamer := newTurnStreamer(r.publisher, addr, streamMessageID(addr))
+	streamer := newTurnStreamer(r.publisher, addr, streamMessageID(addr), r.now)
 	if err := streamer.start(ctx); err != nil {
 		return protocol.ChatMessage{}, fmt.Errorf("publish message_started: %w", err)
 	}
@@ -338,7 +338,6 @@ func (r *Runner) Run(ctx context.Context, addr protocol.MessageAddress, user pro
 	}
 	return assistant, nil
 }
-
 
 // recallForTurn auto-recalls thread-scoped memories and returns a system message
 // to inject into the turn context, or nil. Best-effort: errors are logged.

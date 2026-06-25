@@ -48,7 +48,7 @@ func (r *Runner) RunSubagent(ctx context.Context, req subagent.Request) (_ subag
 	}
 	// nil publisher => the streamer is a no-op, so the sub-agent does not emit
 	// stream events to the user-facing channel.
-	streamer := newTurnStreamer(nil, addr, streamMessageID(addr))
+	streamer := newTurnStreamer(nil, addr, streamMessageID(addr), r.now)
 	assistant, err := r.runProviderLoop(ctx, session, addr, bootstrap, streamer, nil, r.model, nil)
 	if err != nil {
 		return subagent.Result{}, err
