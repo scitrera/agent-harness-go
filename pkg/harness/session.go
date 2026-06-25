@@ -3,6 +3,7 @@ package harness
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 	"github.com/scitrera/agent-harness-go/pkg/tools"
@@ -61,6 +62,43 @@ func (s *Session) History() []protocol.ChatMessage {
 	out := make([]protocol.ChatMessage, len(s.history))
 	copy(out, s.history)
 	return out
+}
+
+// DropTrailingUserDuplicate removes the last history message when it is a user
+// message that duplicates msg — same id, or (when ids differ or are absent) the
+// same non-empty text. It exists to drop a copy of the incoming turn that the
+// host committed to the store out-of-band, so appending the incoming turn does
+// not double it. It mutates only the in-memory history; a following Append
+// persists the result. Returns whether a message was dropped.
+func (s *Session) DropTrailingUserDuplicate(msg protocol.ChatMessage) bool {
+	if len(s.history) == 0 || msg.Role != protocol.RoleUser {
+		return false
+	}
+	last := s.history[len(s.history)-1]
+	if last.Role != protocol.RoleUser {
+		return false
+	}
+	if last.ID != "" && msg.ID != "" && last.ID == msg.ID {
+		s.history = s.history[:len(s.history)-1]
+		return true
+	}
+	if t := messageText(msg); t != "" && messageText(last) == t {
+		s.history = s.history[:len(s.history)-1]
+		return true
+	}
+	return false
+}
+
+// messageText concatenates the text content parts of a message (ignoring
+// non-text parts such as tool calls or attachments).
+func messageText(m protocol.ChatMessage) string {
+	var b strings.Builder
+	for _, p := range m.Content {
+		if t, ok := p.AsText(); ok {
+			b.WriteString(t.Text)
+		}
+	}
+	return b.String()
 }
 
 func (s *Session) InvokeTool(ctx context.Context, env protocol.ToolInvokeEnvelope) (tools.Result, error) {

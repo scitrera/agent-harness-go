@@ -79,10 +79,11 @@ type Runner struct {
 	dailyNotesDays int
 	now            func() time.Time
 
-	commands    *commands.Registry
-	approvers   []hooks.ToolApprover
-	observers   []hooks.ToolObserver
-	authorityFn AuthorityFunc
+	commands          *commands.Registry
+	approvers         []hooks.ToolApprover
+	observers         []hooks.ToolObserver
+	authorityFn       AuthorityFunc
+	dedupTrailingUser bool
 }
 
 // AuthorityFunc derives a turn's OBO authority from the inbound address+message.
@@ -149,6 +150,13 @@ type Config struct {
 	// Authority derives each turn's OBO authority from the inbound message. Core
 	// leaves it nil; the distribution wires the grant extractor.
 	Authority AuthorityFunc
+
+	// DedupTrailingUserTurn drops a trailing user message from the loaded history
+	// when it matches the incoming turn (same id, else same non-empty text) before
+	// appending it. Use it when the host commits the inbound user turn to the store
+	// out-of-band before dispatching (so the fetched history can already end with
+	// it); the incoming turn is then kept as the canonical copy. Default false.
+	DedupTrailingUserTurn bool
 }
 
 func NewRunner(cfg Config) (*Runner, error) {
@@ -197,6 +205,7 @@ func NewRunner(cfg Config) (*Runner, error) {
 		approvers:             cfg.Approvers,
 		observers:             cfg.Observers,
 		authorityFn:           cfg.Authority,
+		dedupTrailingUser:     cfg.DedupTrailingUserTurn,
 	}, nil
 }
 
@@ -298,6 +307,16 @@ func (r *Runner) Run(ctx context.Context, addr protocol.MessageAddress, user pro
 	session, err := harness.NewSession(ctx, addr, r.store, r.registry, auth)
 	if err != nil {
 		return protocol.ChatMessage{}, fmt.Errorf("start session: %w", err)
+	}
+	// The host may commit the inbound user turn to the store out-of-band before
+	// dispatching this task (e.g. workclaw's platform-server), so a freshly-loaded
+	// history can already end with it. Drop that copy before appending the
+	// incoming turn so it isn't doubled — done before the newThread check so a
+	// thread whose only message is the pre-committed turn still bootstraps.
+	if r.dedupTrailingUser {
+		if session.DropTrailingUserDuplicate(user) {
+			slog.InfoContext(ctx, "history: dropped duplicate trailing user message before append (host pre-commit)", slog.String("thread", addr.ThreadID))
+		}
 	}
 	newThread := len(session.History()) == 0
 	if err := session.Append(ctx, user); err != nil {

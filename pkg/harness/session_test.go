@@ -12,6 +12,83 @@ import (
 	"github.com/scitrera/agent-harness-go/pkg/tools"
 )
 
+func userMsg(t *testing.T, id, text string) protocol.ChatMessage {
+	t.Helper()
+	part, err := protocol.NewTextPart(text)
+	if err != nil {
+		t.Fatalf("text part: %v", err)
+	}
+	return protocol.ChatMessage{ID: id, Role: protocol.RoleUser, Content: []protocol.ContentPart{part}}
+}
+
+func newSeededSession(t *testing.T, seed ...protocol.ChatMessage) *Session {
+	t.Helper()
+	ctx := context.Background()
+	store := NewMemoryStore()
+	if len(seed) > 0 {
+		if err := store.SaveHistory(ctx, "thread-1", seed); err != nil {
+			t.Fatalf("seed history: %v", err)
+		}
+	}
+	session, err := NewSession(ctx, protocol.MessageAddress{ThreadID: "thread-1"}, store, tools.NewRegistry(), tools.MemoryAuthority{})
+	if err != nil {
+		t.Fatalf("session: %v", err)
+	}
+	return session
+}
+
+func Test_Session_DropTrailingUserDuplicate_matches_by_id(t *testing.T) {
+	session := newSeededSession(t, userMsg(t, "m1", "committed copy text"))
+	// Incoming carries the same id but a richer body (e.g. attachments stripped on
+	// the committed copy) — drop the committed copy so the incoming stays canonical.
+	incoming := userMsg(t, "m1", "incoming body")
+	if !session.DropTrailingUserDuplicate(incoming) {
+		t.Fatalf("expected drop on id match")
+	}
+	if got := len(session.History()); got != 0 {
+		t.Fatalf("expected history emptied, got %d", got)
+	}
+}
+
+func Test_Session_DropTrailingUserDuplicate_matches_by_text_when_ids_differ(t *testing.T) {
+	session := newSeededSession(t, userMsg(t, "host-committed-id", "hello there"))
+	incoming := userMsg(t, "task-delivered-id", "hello there")
+	if !session.DropTrailingUserDuplicate(incoming) {
+		t.Fatalf("expected drop on content match")
+	}
+	if got := len(session.History()); got != 0 {
+		t.Fatalf("expected history emptied, got %d", got)
+	}
+}
+
+func Test_Session_DropTrailingUserDuplicate_keeps_distinct_message(t *testing.T) {
+	session := newSeededSession(t, userMsg(t, "m1", "an earlier question"))
+	incoming := userMsg(t, "m2", "a different question")
+	if session.DropTrailingUserDuplicate(incoming) {
+		t.Fatalf("must not drop a distinct trailing message")
+	}
+	if got := len(session.History()); got != 1 {
+		t.Fatalf("expected history preserved, got %d", got)
+	}
+}
+
+func Test_Session_DropTrailingUserDuplicate_ignores_non_user_tail(t *testing.T) {
+	part, err := protocol.NewTextPart("an assistant reply")
+	if err != nil {
+		t.Fatalf("text part: %v", err)
+	}
+	asst := protocol.ChatMessage{ID: "a1", Role: protocol.RoleAssistant, Content: []protocol.ContentPart{part}}
+	session := newSeededSession(t, userMsg(t, "m1", "hi"), asst)
+	// The incoming repeats an earlier user message verbatim, but it is no longer
+	// the tail (an assistant reply followed) — a legitimate repeat, not a dup.
+	if session.DropTrailingUserDuplicate(userMsg(t, "m1", "hi")) {
+		t.Fatalf("must not drop when the tail is not a user message")
+	}
+	if got := len(session.History()); got != 2 {
+		t.Fatalf("expected history preserved, got %d", got)
+	}
+}
+
 func Test_Session_InvokeTool_persists_tool_result_when_local_tool_succeeds(t *testing.T) {
 	// Given
 	ctx := context.Background()
