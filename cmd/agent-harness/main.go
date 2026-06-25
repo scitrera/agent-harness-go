@@ -49,6 +49,10 @@ import (
 	"github.com/scitrera/agent-harness-go/pkg/turncancel"
 )
 
+// shutdownTimeout bounds both the HTTP graceful drain and the wait for the
+// run-loop goroutine to finish any in-flight turn on shutdown.
+const shutdownTimeout = 5 * time.Second
+
 // appConfig holds the resolved shared configuration for both modes.
 type appConfig struct {
 	workspaceRoot string
@@ -66,7 +70,11 @@ func main() {
 	model := flag.String("model", env("SAHARA_LLM_MODEL", "gpt-4o-mini"), "model id")
 	seed := flag.Bool("seed", true, "seed default workspace files when missing")
 	cliMode := flag.Bool("cli", false, "run the stdin REPL instead of the web UI")
-	addr := flag.String("addr", env("SAHARA_WEB_ADDR", "127.0.0.1:8787"), "web UI listen address")
+	// The web UI has NO authentication: anyone who can reach this address can
+	// drive the agent. It defaults to loopback (127.0.0.1) and is intended for
+	// localhost use only. Binding beyond loopback exposes an unauthenticated,
+	// drivable agent endpoint — do so only behind your own auth/proxy.
+	addr := flag.String("addr", env("SAHARA_WEB_ADDR", "127.0.0.1:8787"), "web UI listen address (NO auth — localhost only)")
 	noBrowser := flag.Bool("no-browser", false, "do not open a browser (web mode)")
 	// Present flags GNU-style (--flag). Go's flag package already accepts both
 	// -flag and --flag; this only changes the help display.
@@ -196,7 +204,11 @@ func runWeb(cfg appConfig, addr string, openBrowser bool) error {
 	srv := web.New(wc, fsStore, sessions, canceller)
 	httpSrv := &http.Server{Addr: addr, Handler: srv.Handler()}
 
+	// done closes when the run loop returns so shutdown can join it; ctx cancel
+	// (from the signal context) propagates into RunLoop to make it return.
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		if _, err := rt.RunLoop(ctx, runtime.LoopConfig{Concurrency: 8}); err != nil && ctx.Err() == nil {
 			fmt.Fprintf(os.Stderr, "run loop: %v\n", err)
 		}
@@ -220,9 +232,18 @@ func runWeb(cfg appConfig, addr string, openBrowser bool) error {
 	case err := <-errc:
 		return err
 	}
-	shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	shutCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
-	return httpSrv.Shutdown(shutCtx)
+	shutErr := httpSrv.Shutdown(shutCtx)
+	// Cancel the loop context (idempotent with the signal context) and wait for
+	// the run loop to drain any in-flight turn, bounded by the shutdown timeout.
+	stop()
+	select {
+	case <-done:
+	case <-time.After(shutdownTimeout):
+		fmt.Fprintln(os.Stderr, "shutdown: run loop did not drain in-flight turn within timeout")
+	}
+	return shutErr
 }
 
 // runCLI runs the original stdin REPL, calling the turn runner directly.
