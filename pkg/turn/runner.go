@@ -86,6 +86,9 @@ type Runner struct {
 	authorityFn       AuthorityFunc
 	dedupTrailingUser bool
 
+	dynamicTools    DynamicToolProvider
+	staticToolNames map[string]struct{}
+
 	approvals       approval.Awaiter
 	approvalGranter ApprovalGranter
 	approvalTimeout time.Duration
@@ -104,6 +107,26 @@ type ApprovalGranter interface {
 // Core leaves it unset (zero authority → memory uses its default); the Scitrera
 // distribution wires one that reads the inbound grant.
 type AuthorityFunc func(addr protocol.MessageAddress, user protocol.ChatMessage) tools.MemoryAuthority
+
+// DynamicToolProvider supplies tools discovered per-turn from an external source
+// (e.g. the platform-bridge tool registry) rather than the static registry. The
+// runner calls Discover once per turn to assemble the model-visible tool list,
+// then routes invocations of any discovered tool (one not in the static
+// registry) to Invoke. Discover is best-effort: an error degrades the turn to
+// the static tool set. The per-turn OBO authority is on ctx
+// (tools.MemoryAuthorityFrom) and on req.Authority.
+type DynamicToolProvider interface {
+	Discover(ctx context.Context, addr protocol.MessageAddress, user protocol.ChatMessage) ([]tools.Descriptor, error)
+	Invoke(ctx context.Context, req tools.Request) (tools.Result, error)
+}
+
+// turnTools is the per-turn model-visible tool set: the static specs plus any
+// dynamically-discovered specs, and the set of dynamic tool names so the invoke
+// path can route them to the DynamicToolProvider (static tools win on collision).
+type turnTools struct {
+	specs        []provider.ToolSpec
+	dynamicNames map[string]struct{}
+}
 
 type Config struct {
 	Store     harness.HistoryStore
@@ -189,6 +212,15 @@ type Config struct {
 	// behavior). Typically the same store backing ApprovalGranter's
 	// GrantAlways persistence.
 	GrantStore tools.GrantStore
+
+	// DynamicTools, when set, supplies per-turn tools discovered from an external
+	// source (e.g. the platform-bridge registry, queried with the user's message
+	// for the top-N relevant tools). The runner merges them into the turn's
+	// model-visible tool set and routes their invocations to the provider.
+	// Optional; nil → static tools only. Independent of any always-on meta-tools
+	// the distribution may register statically (e.g. search_tools/call_tool), so
+	// auto-discovery can be disabled while leaving explicit discovery in place.
+	DynamicTools DynamicToolProvider
 }
 
 func NewRunner(cfg Config) (*Runner, error) {
@@ -211,6 +243,11 @@ func NewRunner(cfg Config) (*Runner, error) {
 	if ctxMgr == nil {
 		ctxMgr = cfg.Assembler
 	}
+	staticSpecs := toolSpecsFrom(cfg.Registry)
+	staticNames := make(map[string]struct{}, len(staticSpecs))
+	for _, s := range staticSpecs {
+		staticNames[s.Name] = struct{}{}
+	}
 	return &Runner{
 		store:                 cfg.Store,
 		loader:                cfg.Loader,
@@ -221,7 +258,7 @@ func NewRunner(cfg Config) (*Runner, error) {
 		model:                 cfg.Model,
 		maxToolIterations:     cfg.MaxToolIterations,
 		streaming:             cfg.Streaming,
-		toolSpecs:             toolSpecsFrom(cfg.Registry),
+		toolSpecs:             staticSpecs,
 		memory:                cfg.Memory,
 		memAutoCommit:         cfg.MemoryAutoCommit,
 		memAutoCommitAsstOnly: cfg.MemoryAutoCommitAssistantOnly,
@@ -243,7 +280,45 @@ func NewRunner(cfg Config) (*Runner, error) {
 		approvalTimeout:       cfg.ApprovalTimeout,
 		approvalScopes:        cfg.ApprovalScopes,
 		grantStore:            cfg.GrantStore,
+		dynamicTools:          cfg.DynamicTools,
+		staticToolNames:       staticNames,
 	}, nil
+}
+
+// assembleTurnTools builds the model-visible tool set for a turn: the static
+// specs plus any tools the DynamicToolProvider surfaces for this address/user
+// (e.g. the platform-bridge registry's top-N matches for the user's message).
+// Best-effort — a discovery error degrades to the static set. Static tools win
+// on name collision so a remote tool can never shadow a built-in.
+func (r *Runner) assembleTurnTools(ctx context.Context, addr protocol.MessageAddress, user protocol.ChatMessage) turnTools {
+	tt := turnTools{specs: r.toolSpecs}
+	if r.dynamicTools == nil {
+		return tt
+	}
+	descs, err := r.dynamicTools.Discover(ctx, addr, user)
+	if err != nil {
+		slog.WarnContext(ctx, "dynamic tool discovery failed; using static tools only", slog.Any("err", err))
+		return tt
+	}
+	if len(descs) == 0 {
+		return tt
+	}
+	specs := make([]provider.ToolSpec, len(r.toolSpecs), len(r.toolSpecs)+len(descs))
+	copy(specs, r.toolSpecs)
+	names := make(map[string]struct{}, len(descs))
+	for _, d := range descs {
+		if _, isStatic := r.staticToolNames[d.Name]; isStatic {
+			continue // a built-in tool always wins the name
+		}
+		if _, dup := names[d.Name]; dup {
+			continue
+		}
+		names[d.Name] = struct{}{}
+		specs = append(specs, provider.ToolSpec{Name: d.Name, Description: d.Description, Parameters: d.Parameters})
+	}
+	tt.specs = specs
+	tt.dynamicNames = names
+	return tt
 }
 
 func recallLimitOrDefault(limit int) int {
@@ -385,7 +460,10 @@ func (r *Runner) Run(ctx context.Context, addr protocol.MessageAddress, user pro
 	// on this message's stream and have it folded into the finalized message.
 	emitter := newTurnPartEmitter(streamer)
 	ctx = tools.WithPartEmitter(ctx, emitter)
-	assistant, err := r.runProviderLoop(ctx, session, addr, bootstrap, streamer, injected, model, perTurnApprovers)
+	// Per-turn tool set: static tools plus any dynamically-discovered ones (the
+	// DynamicToolProvider is queried with the user's message for relevant tools).
+	tt := r.assembleTurnTools(ctx, addr, user)
+	assistant, err := r.runProviderLoop(ctx, session, addr, bootstrap, streamer, injected, model, perTurnApprovers, tt)
 	if err != nil {
 		return protocol.ChatMessage{}, err
 	}

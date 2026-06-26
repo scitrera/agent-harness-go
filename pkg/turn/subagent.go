@@ -31,6 +31,9 @@ func (r *Runner) RunSubagent(ctx context.Context, req subagent.Request) (_ subag
 	addr.ThreadID = thread + "::sub"
 
 	auth := tools.MemoryAuthority{GrantID: req.GrantID, SubjectType: req.SubjectType, SubjectID: req.SubjectID}
+	// Carry the subagent's OBO on ctx so per-turn tool discovery + dynamic tool
+	// invocations act under the user's grant (mirrors Run).
+	ctx = tools.WithMemoryAuthority(ctx, auth)
 	session, err := harness.NewSession(ctx, addr, harness.NewMemoryStore(), r.registry, auth)
 	if err != nil {
 		return subagent.Result{}, fmt.Errorf("subagent session: %w", err)
@@ -39,7 +42,8 @@ func (r *Runner) RunSubagent(ctx context.Context, req subagent.Request) (_ subag
 	if err != nil {
 		return subagent.Result{}, err
 	}
-	if err := session.Append(ctx, protocol.ChatMessage{Role: protocol.RoleUser, Addr: addr, Content: []protocol.ContentPart{taskPart}}); err != nil {
+	userMsg := protocol.ChatMessage{Role: protocol.RoleUser, Addr: addr, Content: []protocol.ContentPart{taskPart}}
+	if err := session.Append(ctx, userMsg); err != nil {
 		return subagent.Result{}, fmt.Errorf("subagent append task: %w", err)
 	}
 	bootstrap, err := r.loader.LoadBootstrap(ctx)
@@ -49,7 +53,9 @@ func (r *Runner) RunSubagent(ctx context.Context, req subagent.Request) (_ subag
 	// nil publisher => the streamer is a no-op, so the sub-agent does not emit
 	// stream events to the user-facing channel.
 	streamer := newTurnStreamer(nil, addr, streamMessageID(addr), r.now)
-	assistant, err := r.runProviderLoop(ctx, session, addr, bootstrap, streamer, nil, r.model, nil)
+	// Discover tools relevant to the subagent's task (best-effort, same as Run).
+	tt := r.assembleTurnTools(ctx, addr, userMsg)
+	assistant, err := r.runProviderLoop(ctx, session, addr, bootstrap, streamer, nil, r.model, nil, tt)
 	if err != nil {
 		return subagent.Result{}, err
 	}

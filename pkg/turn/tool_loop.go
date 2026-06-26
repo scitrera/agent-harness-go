@@ -26,10 +26,10 @@ const (
 	maxOverflowRetries = 2
 )
 
-func (r *Runner) runProviderLoop(ctx context.Context, session *harness.Session, addr protocol.MessageAddress, bootstrap []bootstrap.File, streamer *turnStreamer, injected []protocol.ChatMessage, model string, perTurnApprovers []hooks.ToolApprover) (protocol.ChatMessage, error) {
+func (r *Runner) runProviderLoop(ctx context.Context, session *harness.Session, addr protocol.MessageAddress, bootstrap []bootstrap.File, streamer *turnStreamer, injected []protocol.ChatMessage, model string, perTurnApprovers []hooks.ToolApprover, tt turnTools) (protocol.ChatMessage, error) {
 	toolIterations := 0
 	for {
-		response, err := r.callWithOverflowRecovery(ctx, session.History(), bootstrap, injected, model, streamer)
+		response, err := r.callWithOverflowRecovery(ctx, session.History(), bootstrap, injected, model, streamer, tt)
 		if err != nil {
 			return protocol.ChatMessage{}, err
 		}
@@ -85,7 +85,7 @@ func (r *Runner) runProviderLoop(ctx context.Context, session *harness.Session, 
 
 			toolCtx, toolSpan := telemetry.StartTool(ctx, call.Name)
 			r.notifyToolStarted(toolCtx, hc)
-			result, err := r.invokeWithApproval(toolCtx, session, addr, call)
+			result, err := r.invokeTool(toolCtx, session, addr, call, tt)
 			r.notifyToolFinished(toolCtx, hc, err != nil, err)
 			telemetry.FinishErr(toolSpan, err)
 			if err != nil {
@@ -126,13 +126,13 @@ func (r *Runner) runProviderLoop(ctx context.Context, session *harness.Session, 
 // classified context_overflow error it drops the oldest history and retries
 // (the request was rejected before any tokens streamed, so no partial output is
 // duplicated), up to maxOverflowRetries.
-func (r *Runner) callWithOverflowRecovery(ctx context.Context, history []protocol.ChatMessage, bootstrap []bootstrap.File, injected []protocol.ChatMessage, model string, streamer *turnStreamer) (provider.ChatResponse, error) {
+func (r *Runner) callWithOverflowRecovery(ctx context.Context, history []protocol.ChatMessage, bootstrap []bootstrap.File, injected []protocol.ChatMessage, model string, streamer *turnStreamer, tt turnTools) (provider.ChatResponse, error) {
 	for attempt := 0; ; attempt++ {
 		contextMessages, err := r.ctxMgr.Build(ctx, bootstrap, trimOldest(history, attempt))
 		if err != nil {
 			return provider.ChatResponse{}, fmt.Errorf("assemble context: %w", err)
 		}
-		req := provider.ChatRequest{Model: model, Messages: mergeInjected(contextMessages, injected), Tools: r.toolSpecs}
+		req := provider.ChatRequest{Model: model, Messages: mergeInjected(contextMessages, injected), Tools: tt.specs}
 		response, err := r.invokeProvider(ctx, req, streamer)
 		if err == nil {
 			return response, nil
@@ -262,6 +262,29 @@ func toolCallsFromMessage(msg protocol.ChatMessage) ([]protocol.ToolInvokeEnvelo
 		}
 	}
 	return calls, nil
+}
+
+// invokeTool dispatches a tool call: a dynamically-discovered tool (one surfaced
+// by the DynamicToolProvider this turn, not in the static registry) routes to the
+// provider; everything else goes through the static registry's approval-aware
+// path. The hooks approval gate (approveToolCall) has already run for both in the
+// loop; the registry's requires-approval flow applies only to static tools.
+func (r *Runner) invokeTool(ctx context.Context, session *harness.Session, addr protocol.MessageAddress, call protocol.ToolInvokeEnvelope, tt turnTools) (tools.Result, error) {
+	if _, dynamic := tt.dynamicNames[call.Name]; dynamic {
+		return r.invokeDynamic(ctx, call)
+	}
+	return r.invokeWithApproval(ctx, session, addr, call)
+}
+
+// invokeDynamic invokes a discovered tool via the DynamicToolProvider, forwarding
+// the per-turn OBO authority (on ctx and on the request) so the remote side can
+// resolve the acting user.
+func (r *Runner) invokeDynamic(ctx context.Context, call protocol.ToolInvokeEnvelope) (tools.Result, error) {
+	req := tools.RequestFromEnvelope(call)
+	if auth, ok := tools.MemoryAuthorityFrom(ctx); ok {
+		req.Authority = auth
+	}
+	return r.dynamicTools.Invoke(ctx, req)
 }
 
 // invokeWithApproval invokes a tool; if the policy gates it as "requires
