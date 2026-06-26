@@ -13,6 +13,8 @@ github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZb
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
 github.com/scitrera/ecosystem-messaging-spec/go v1.0.0 h1:zMQV7OetJOBwkFE1hrdYUNxZg7ynCa9MeIO8e6SmCsw=
 github.com/scitrera/ecosystem-messaging-spec/go v1.0.0/go.mod h1:KtiRSHiYbBIcFwFOPEmJnypg39C1AR4zFEyGwjoHt3k=
+github.com/scitrera/ecosystem-messaging-spec/go v1.1.0 h1:awQ9UVizSlzZPKaVuLMHtV0g2DPZh9T8Fpgo5ElXC3c=
+github.com/scitrera/ecosystem-messaging-spec/go v1.1.0/go.mod h1:KtiRSHiYbBIcFwFOPEmJnypg39C1AR4zFEyGwjoHt3k=
 github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu7U=
 github.com/stretchr/testify v1.11.1/go.mod h1:wZwfW3scLgRK+23gO65QZefKpKQRnfz6sD981Nm4B6U=
 go.opentelemetry.io/auto/sdk v1.2.1 h1:jXsnJ4Lmnqd11kwkBV2LgLoFMZKizbCi5fNZ/ipaZ64=
