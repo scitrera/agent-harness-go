@@ -8,9 +8,6 @@ require (
 	go.opentelemetry.io/otel/trace v1.43.0
 )
 
-// Local dev bridge until the spec's go/v1.2.0 tag is published; drop after.
-replace github.com/scitrera/ecosystem-messaging-spec/go => ../../scitrera-ecosystem-messaging-spec/go
-
 require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
