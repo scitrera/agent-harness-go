@@ -90,6 +90,7 @@ type Runner struct {
 	approvalGranter ApprovalGranter
 	approvalTimeout time.Duration
 	approvalScopes  []string
+	grantStore      tools.GrantStore
 }
 
 // ApprovalGranter records tool authorizations the user grants via the approval
@@ -180,6 +181,14 @@ type Config struct {
 	ApprovalGranter ApprovalGranter
 	ApprovalTimeout time.Duration
 	ApprovalScopes  []string
+
+	// GrantStore lets the approval slow-path consult durable "always" grants
+	// before prompting: when a tool is already durably authorized for the
+	// workspace, the runner records a session grant and runs it without
+	// emitting an approval_request. Optional; nil → prompt every time (today's
+	// behavior). Typically the same store backing ApprovalGranter's
+	// GrantAlways persistence.
+	GrantStore tools.GrantStore
 }
 
 func NewRunner(cfg Config) (*Runner, error) {
@@ -233,6 +242,7 @@ func NewRunner(cfg Config) (*Runner, error) {
 		approvalGranter:       cfg.ApprovalGranter,
 		approvalTimeout:       cfg.ApprovalTimeout,
 		approvalScopes:        cfg.ApprovalScopes,
+		grantStore:            cfg.GrantStore,
 	}, nil
 }
 
@@ -331,6 +341,11 @@ func (r *Runner) Run(ctx context.Context, addr protocol.MessageAddress, user pro
 	if r.authorityFn != nil {
 		auth = r.authorityFn(addr, user)
 	}
+	// Carry the per-turn OBO on the turn ctx so ctx-based consumers (the durable
+	// tool-grant store, an authority-aware history store) act under the user's
+	// grant. Tools also receive it via req.Authority on the session; this covers
+	// the ctx path.
+	ctx = tools.WithMemoryAuthority(ctx, auth)
 	session, err := harness.NewSession(ctx, addr, r.store, r.registry, auth)
 	if err != nil {
 		return protocol.ChatMessage{}, fmt.Errorf("start session: %w", err)

@@ -277,6 +277,23 @@ func (r *Runner) invokeWithApproval(ctx context.Context, session *harness.Sessio
 		return result, err
 	}
 
+	// Durable "always" grants: before prompting, consult the durable grant store
+	// (when wired). A prior "always" grant — persisted under the user's OBO —
+	// short-circuits the prompt: record a session grant so subsequent calls in
+	// this turn skip the gate too, then run the tool approved. A store error is
+	// non-fatal: log and fall through to the normal prompt flow.
+	if r.grantStore != nil {
+		granted, gerr := r.grantStore.IsGranted(ctx, addr.WorkspaceID, call.Name)
+		if gerr != nil {
+			slog.WarnContext(ctx, "durable grant lookup failed", slog.String("tool", call.Name), slog.Any("err", gerr))
+		} else if granted {
+			if r.approvalGranter != nil {
+				r.approvalGranter.GrantSession(addr.WorkspaceID, call.Name)
+			}
+			return session.InvokeToolApproved(ctx, call)
+		}
+	}
+
 	reqID := call.CallID
 	emitter, _ := tools.PartEmitterFrom(ctx)
 	scopes := r.approvalScopes

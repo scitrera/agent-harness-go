@@ -53,6 +53,10 @@ type GrantStore interface {
 	ListGranted(ctx context.Context, workspaceID string) ([]string, error)
 	// Grant durably authorizes tool for workspaceID.
 	Grant(ctx context.Context, workspaceID, tool string) error
+	// IsGranted reports whether tool is durably authorized for workspaceID.
+	// Used by the approval slow-path to short-circuit a prompt when a prior
+	// "always" grant already exists in durable storage.
+	IsGranted(ctx context.Context, workspaceID, tool string) (bool, error)
 }
 
 // DynamicPolicy augments a base policy with runtime grants from the approval

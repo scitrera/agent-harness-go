@@ -3,6 +3,7 @@ package turn
 import (
 	"context"
 	"encoding/json"
+	"sync"
 	"testing"
 
 	spec "github.com/scitrera/ecosystem-messaging-spec/go"
@@ -135,5 +136,108 @@ func Test_Runner_approval_deny_skips_tool_and_marks_denied(t *testing.T) {
 	}
 	if part.Status != spec.ApprovalDenied {
 		t.Fatalf("expected denied, got %q", part.Status)
+	}
+}
+
+// failAwaiter fails the test if its Await is ever consulted — proving the
+// durable-grant slow-path short-circuited the prompt.
+type failAwaiter struct{ t *testing.T }
+
+func (f failAwaiter) Await(_ context.Context, _, _ string) (approval.Decision, error) {
+	f.t.Fatal("approval awaiter must NOT be consulted when a durable grant exists")
+	return approval.Decision{}, nil
+}
+
+// stubGrantStore reports IsGranted from a fixed set; Grant/ListGranted are
+// inert (the slow-path durable check only calls IsGranted).
+type stubGrantStore struct{ granted map[string]bool } // key: ws/tool
+
+func (s stubGrantStore) ListGranted(_ context.Context, _ string) ([]string, error) { return nil, nil }
+func (s stubGrantStore) Grant(_ context.Context, _, _ string) error                { return nil }
+func (s stubGrantStore) IsGranted(_ context.Context, ws, tool string) (bool, error) {
+	return s.granted[ws+"/"+tool], nil
+}
+
+func Test_Runner_durable_grant_runs_tool_without_prompting(t *testing.T) {
+	ran := false
+	granter := &fakeGranter{}
+	runner := buildApprovalRunner(t, failAwaiter{t: t}, granter, &ran)
+	// Pre-existing durable "always" grant for ws1/record.
+	runner.grantStore = stubGrantStore{granted: map[string]bool{"ws1/record": true}}
+
+	addr := protocol.MessageAddress{ThreadID: "th1", TaskID: "task1", WorkspaceID: "ws1"}
+	assistant, err := runner.Run(context.Background(), addr, userTurn(t))
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !ran {
+		t.Fatal("durably-granted tool should have run without prompting")
+	}
+	// A session grant is recorded so subsequent calls in-turn skip the gate too.
+	if len(granter.session) != 1 || granter.session[0] != "ws1/record" {
+		t.Fatalf("expected session grant ws1/record, got %#v", granter.session)
+	}
+	// No approval_request part should be emitted on the durable short-circuit.
+	if part, ok := approvalPartIn(assistant); ok {
+		t.Fatalf("no approval_request expected on durable grant, got %#v", part)
+	}
+}
+
+// authCapturingStore records the MemoryAuthority present on the ctx passed to
+// IsGranted, so a test can prove the runner puts the per-turn OBO on the ctx the
+// durable grant store reads (it acts under the user's grant, not anonymously).
+type authCapturingStore struct {
+	mu   sync.Mutex
+	seen tools.MemoryAuthority
+	saw  bool
+}
+
+func (s *authCapturingStore) IsGranted(ctx context.Context, _, _ string) (bool, error) {
+	a, _ := tools.MemoryAuthorityFrom(ctx)
+	s.mu.Lock()
+	s.seen, s.saw = a, true
+	s.mu.Unlock()
+	return false, nil // not granted → fall through to the (denying) prompt
+}
+func (s *authCapturingStore) Grant(context.Context, string, string) error           { return nil }
+func (s *authCapturingStore) ListGranted(context.Context, string) ([]string, error) { return nil, nil }
+
+func Test_Runner_grant_store_sees_turn_OBO_on_ctx(t *testing.T) {
+	policy := tools.NewDynamicPolicy(tools.StaticPolicy{Allowed: map[string]string{}}, nil)
+	registry := tools.NewAuditedRegistry(policy, nil)
+	if err := registry.Register("record", tools.HandlerFunc(func(_ context.Context, req tools.Request) (tools.Result, error) {
+		return tools.NewJSONResult(req.CallID, req.Name, json.RawMessage(`{"ok":true}`))
+	})); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	callPart, _ := protocol.NewToolCallPart(protocol.ToolInvokeEnvelope{CallID: "call-1", Name: "record", Args: protocol.RawToArgs(json.RawMessage(`{}`))})
+	finalPart, _ := protocol.NewTextPart("done")
+	prov := &scriptedProvider{responses: []provider.ChatResponse{
+		{Message: protocol.ChatMessage{ID: "a-tool", Role: protocol.RoleAssistant, Content: []protocol.ContentPart{callPart}}},
+		{Message: protocol.ChatMessage{ID: "a-final", Role: protocol.RoleAssistant, Content: []protocol.ContentPart{finalPart}}},
+	}}
+	store := &authCapturingStore{}
+	runner, err := NewRunner(Config{
+		Store: &fakeStore{}, Loader: fakeLoader{}, Registry: registry, Provider: prov,
+		Publisher: &fakePublisher{}, Assembler: contextpack.NewAssembler(contextpack.Config{}),
+		Approvals:       fakeAwaiter{decision: approval.Decision{Granted: false}}, // deny → turn completes
+		ApprovalGranter: policy,
+		GrantStore:      store,
+		Authority: func(protocol.MessageAddress, protocol.ChatMessage) tools.MemoryAuthority {
+			return tools.MemoryAuthority{SubjectType: "user", SubjectID: "u1", GrantID: "g1"}
+		},
+	})
+	if err != nil {
+		t.Fatalf("runner: %v", err)
+	}
+	addr := protocol.MessageAddress{ThreadID: "th1", TaskID: "task1", WorkspaceID: "ws1"}
+	if _, err := runner.Run(context.Background(), addr, userTurn(t)); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !store.saw {
+		t.Fatal("grant store IsGranted was never called")
+	}
+	if store.seen.SubjectType != "user" || store.seen.SubjectID != "u1" || store.seen.GrantID != "g1" {
+		t.Fatalf("grant store did not see the turn OBO on ctx: %#v", store.seen)
 	}
 }

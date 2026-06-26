@@ -44,6 +44,14 @@ func (s *memGrantStore) Grant(_ context.Context, ws, tool string) error {
 	s.granted[ws] = append(s.granted[ws], tool)
 	return nil
 }
+func (s *memGrantStore) IsGranted(_ context.Context, ws, tool string) (bool, error) {
+	for _, t := range s.granted[ws] {
+		if t == tool {
+			return true, nil
+		}
+	}
+	return false, nil
+}
 
 func Test_DynamicPolicy_always_grant_persists_and_hydrates(t *testing.T) {
 	store := &memGrantStore{}
