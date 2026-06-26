@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/scitrera/agent-harness-go/pkg/approval"
 	"github.com/scitrera/agent-harness-go/pkg/bootstrap"
 	"github.com/scitrera/agent-harness-go/pkg/channel"
 	"github.com/scitrera/agent-harness-go/pkg/commands"
@@ -84,6 +85,18 @@ type Runner struct {
 	observers         []hooks.ToolObserver
 	authorityFn       AuthorityFunc
 	dedupTrailingUser bool
+
+	approvals       approval.Awaiter
+	approvalGranter ApprovalGranter
+	approvalTimeout time.Duration
+	approvalScopes  []string
+}
+
+// ApprovalGranter records tool authorizations the user grants via the approval
+// flow. Implemented by the distribution's dynamic policy (tools.DynamicPolicy).
+type ApprovalGranter interface {
+	GrantSession(workspaceID, tool string)
+	GrantAlways(ctx context.Context, workspaceID, tool string) error
 }
 
 // AuthorityFunc derives a turn's OBO authority from the inbound address+message.
@@ -157,6 +170,16 @@ type Config struct {
 	// out-of-band before dispatching (so the fetched history can already end with
 	// it); the incoming turn is then kept as the canonical copy. Default false.
 	DedupTrailingUserTurn bool
+
+	// Approval flow (human-in-the-loop). When Approvals is set, a tool the policy
+	// gates with "requires approval" emits an approval_request part and blocks for
+	// an approve/deny control instead of erroring. ApprovalGranter records
+	// session/always grants; ApprovalTimeout bounds the wait (0 = until ctx);
+	// ApprovalScopes advertises offered scopes (default once/session/always).
+	Approvals       approval.Awaiter
+	ApprovalGranter ApprovalGranter
+	ApprovalTimeout time.Duration
+	ApprovalScopes  []string
 }
 
 func NewRunner(cfg Config) (*Runner, error) {
@@ -206,6 +229,10 @@ func NewRunner(cfg Config) (*Runner, error) {
 		observers:             cfg.Observers,
 		authorityFn:           cfg.Authority,
 		dedupTrailingUser:     cfg.DedupTrailingUserTurn,
+		approvals:             cfg.Approvals,
+		approvalGranter:       cfg.ApprovalGranter,
+		approvalTimeout:       cfg.ApprovalTimeout,
+		approvalScopes:        cfg.ApprovalScopes,
 	}, nil
 }
 

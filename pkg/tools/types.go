@@ -24,6 +24,10 @@ type Request struct {
 	// Authority is the turn's OBO grant, injected by the session so tools (e.g.
 	// memory_search) act on behalf of the turn's user with a fresh grant.
 	Authority MemoryAuthority
+	// Approved marks a call the user just authorized via the approval flow, so
+	// the registry bypasses the policy gate for this single invocation. (Durable
+	// session/always grants are recorded separately in the policy.)
+	Approved bool
 }
 
 type Result struct {

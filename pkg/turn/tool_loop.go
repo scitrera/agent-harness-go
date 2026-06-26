@@ -7,12 +7,15 @@ import (
 	"fmt"
 	"log/slog"
 
+	spec "github.com/scitrera/ecosystem-messaging-spec/go"
+
 	"github.com/scitrera/agent-harness-go/pkg/bootstrap"
 	"github.com/scitrera/agent-harness-go/pkg/harness"
 	"github.com/scitrera/agent-harness-go/pkg/hooks"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 	"github.com/scitrera/agent-harness-go/pkg/provider"
 	"github.com/scitrera/agent-harness-go/pkg/telemetry"
+	"github.com/scitrera/agent-harness-go/pkg/tools"
 )
 
 const (
@@ -82,7 +85,7 @@ func (r *Runner) runProviderLoop(ctx context.Context, session *harness.Session, 
 
 			toolCtx, toolSpan := telemetry.StartTool(ctx, call.Name)
 			r.notifyToolStarted(toolCtx, hc)
-			result, err := session.InvokeTool(toolCtx, call)
+			result, err := r.invokeWithApproval(toolCtx, session, addr, call)
 			r.notifyToolFinished(toolCtx, hc, err != nil, err)
 			telemetry.FinishErr(toolSpan, err)
 			if err != nil {
@@ -259,4 +262,81 @@ func toolCallsFromMessage(msg protocol.ChatMessage) ([]protocol.ToolInvokeEnvelo
 		}
 	}
 	return calls, nil
+}
+
+// invokeWithApproval invokes a tool; if the policy gates it as "requires
+// approval" and an approval channel is wired, it emits an approval_request part,
+// blocks for the user's approve/deny control (bounded by ApprovalTimeout), and
+// on approval re-invokes (bypassing the gate) plus records any session/always
+// grant. On deny/expire it returns the original requires-approval error so the
+// caller's error-feedback path records it for the model. With no approval
+// channel wired it behaves exactly as a plain invoke.
+func (r *Runner) invokeWithApproval(ctx context.Context, session *harness.Session, addr protocol.MessageAddress, call protocol.ToolInvokeEnvelope) (tools.Result, error) {
+	result, err := session.InvokeTool(ctx, call)
+	if err == nil || r.approvals == nil || !errors.Is(err, tools.ErrToolRequiresApproval) {
+		return result, err
+	}
+
+	reqID := call.CallID
+	emitter, _ := tools.PartEmitterFrom(ctx)
+	scopes := r.approvalScopes
+	if len(scopes) == 0 {
+		scopes = []string{"once", "session", "always"}
+	}
+	r.emitApproval(ctx, emitter, reqID, call, scopes, spec.ApprovalPending, "tool is not pre-authorized")
+
+	awaitCtx := ctx
+	if r.approvalTimeout > 0 {
+		var cancel context.CancelFunc
+		awaitCtx, cancel = context.WithTimeout(ctx, r.approvalTimeout)
+		defer cancel()
+	}
+	decision, awaitErr := r.approvals.Await(awaitCtx, addr.TaskID, reqID)
+	if ctx.Err() != nil {
+		// The turn itself was cancelled (not just the approval timeout) — abort.
+		return tools.Result{}, ctx.Err()
+	}
+	if awaitErr != nil || !decision.Granted {
+		status := spec.ApprovalDenied
+		if awaitErr != nil {
+			status = spec.ApprovalExpired // timed out waiting for a response
+		}
+		r.emitApproval(ctx, emitter, reqID, call, scopes, status, "")
+		return tools.Result{}, err // original requires-approval error → fed back to the model
+	}
+
+	// Granted: record a grant so future calls in scope don't re-prompt.
+	if r.approvalGranter != nil {
+		switch decision.Scope {
+		case "session":
+			r.approvalGranter.GrantSession(addr.WorkspaceID, call.Name)
+		case "always":
+			if gerr := r.approvalGranter.GrantAlways(ctx, addr.WorkspaceID, call.Name); gerr != nil {
+				slog.WarnContext(ctx, "persist always-grant failed", slog.String("tool", call.Name), slog.Any("err", gerr))
+			}
+		}
+	}
+	r.emitApproval(ctx, emitter, reqID, call, scopes, spec.ApprovalApproved, "")
+	return session.InvokeToolApproved(ctx, call)
+}
+
+// emitApproval upserts an approval_request part (pending first, then the
+// resolved status) on the current message stream so the user can answer and the
+// resolved prompt persists. No-op without an emitter.
+func (r *Runner) emitApproval(ctx context.Context, emitter tools.PartEmitter, reqID string, call protocol.ToolInvokeEnvelope, scopes []string, status spec.ApprovalStatus, reason string) {
+	if emitter == nil {
+		return
+	}
+	part := spec.NewApprovalRequestPart(spec.ApprovalRequestPart{
+		ID:      reqID,
+		Tool:    call.Name,
+		Summary: "Use the " + call.Name + " tool",
+		Args:    protocol.ArgsToRaw(call.Args),
+		Options: scopes,
+		Status:  status,
+		Reason:  reason,
+	})
+	if err := emitter.UpsertPart(ctx, part); err != nil {
+		slog.WarnContext(ctx, "emit approval_request failed", slog.Any("err", err))
+	}
 }

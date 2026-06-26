@@ -102,8 +102,19 @@ func messageText(m protocol.ChatMessage) string {
 }
 
 func (s *Session) InvokeTool(ctx context.Context, env protocol.ToolInvokeEnvelope) (tools.Result, error) {
+	return s.invokeTool(ctx, env, false)
+}
+
+// InvokeToolApproved invokes a tool the user just authorized via the approval
+// flow, bypassing the registry policy gate for this single call.
+func (s *Session) InvokeToolApproved(ctx context.Context, env protocol.ToolInvokeEnvelope) (tools.Result, error) {
+	return s.invokeTool(ctx, env, true)
+}
+
+func (s *Session) invokeTool(ctx context.Context, env protocol.ToolInvokeEnvelope, approved bool) (tools.Result, error) {
 	req := tools.RequestFromEnvelope(env)
 	req.Authority = s.authority
+	req.Approved = approved
 	result, err := s.tools.Invoke(ctx, req)
 	if err != nil {
 		return tools.Result{}, err

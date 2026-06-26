@@ -65,7 +65,14 @@ func (r *Registry) authorize(ctx context.Context, req Request) error {
 	if r.policy == nil {
 		return nil
 	}
-	decision := r.policy.Decide(req)
+	var decision Decision
+	if req.Approved {
+		// The user just authorized this call via the approval flow; bypass the
+		// policy gate for this single invocation (still audited).
+		decision = Decision{Code: DecisionAllow, Reason: "approved by user", AuditCode: "tool.user_approved"}
+	} else {
+		decision = r.policy.Decide(req)
+	}
 	if r.audit != nil {
 		if err := r.audit.Record(ctx, NewAuditRecord(req, decision)); err != nil {
 			return fmt.Errorf("record tool audit: %w", err)
