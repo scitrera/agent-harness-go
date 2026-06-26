@@ -2,6 +2,7 @@ package turn
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 
 	"github.com/scitrera/agent-harness-go/pkg/channel"
@@ -102,6 +103,19 @@ func (s *turnStreamer) appendTextStream(ctx context.Context) (int, error) {
 		return -1, err
 	}
 	return idx, nil
+}
+
+// updatePart emits part_updated, merging patch into the part already streamed at
+// index (used to evolve an in-place part such as a todo checklist). No-op
+// without a publisher or an empty patch.
+func (s *turnStreamer) updatePart(ctx context.Context, index int, patch map[string]json.RawMessage) error {
+	if s == nil || s.publisher == nil || len(patch) == 0 {
+		return nil
+	}
+	if err := s.start(ctx); err != nil {
+		return err
+	}
+	return s.publisher.PublishEvent(ctx, channel.Event{Type: channel.EventPartUpdated, Addr: s.addr, MessageID: s.msgID, Index: index, Patch: patch})
 }
 
 // tokenDelta emits token_delta for streamed text into the part at index.

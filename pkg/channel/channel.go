@@ -24,6 +24,7 @@ const (
 	EventMessageStarted EventType = "message_started"
 	EventPartAppended   EventType = "part_appended"
 	EventTokenDelta     EventType = "token_delta"
+	EventPartUpdated    EventType = "part_updated"
 	EventMessageFinal   EventType = "message_final"
 	EventToolResult     EventType = "tool_result"
 	EventError          EventType = "error"
@@ -31,16 +32,17 @@ const (
 
 // Event is an egress stream event. Different fields are populated per Type:
 // Message for started/final; MessageID+Index+Part for part_appended;
-// MessageID+Index+Delta for token_delta.
+// MessageID+Index+Delta for token_delta; MessageID+Index+Patch for part_updated.
 type Event struct {
-	Type      EventType               `json:"type"`
-	Addr      protocol.MessageAddress `json:"addr"`
-	Message   *protocol.ChatMessage   `json:"message,omitempty"`
-	MessageID string                  `json:"message_id,omitempty"`
-	Index     int                     `json:"index,omitempty"`
-	Part      *protocol.ContentPart   `json:"part,omitempty"`
-	Delta     string                  `json:"delta,omitempty"`
-	Payload   json.RawMessage         `json:"payload,omitempty"`
+	Type      EventType                  `json:"type"`
+	Addr      protocol.MessageAddress    `json:"addr"`
+	Message   *protocol.ChatMessage      `json:"message,omitempty"`
+	MessageID string                     `json:"message_id,omitempty"`
+	Index     int                        `json:"index,omitempty"`
+	Part      *protocol.ContentPart      `json:"part,omitempty"`
+	Delta     string                     `json:"delta,omitempty"`
+	Patch     map[string]json.RawMessage `json:"patch,omitempty"`
+	Payload   json.RawMessage            `json:"payload,omitempty"`
 }
 
 // Inbound is an inbound turn: an addressed message plus opaque transport meta.

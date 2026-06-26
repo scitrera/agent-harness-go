@@ -2,9 +2,11 @@ package turn
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
+	"github.com/scitrera/agent-harness-go/pkg/channel"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 )
 
@@ -37,6 +39,33 @@ func TestTurnStreamer_StampsCreatedAt(t *testing.T) {
 	}
 	if started.Message.CreatedAt != last.Message.CreatedAt {
 		t.Fatalf("started/finalized created_at differ: %q vs %q", started.Message.CreatedAt, last.Message.CreatedAt)
+	}
+}
+
+// updatePart emits a part_updated event carrying the patch, for evolving an
+// in-place part (e.g. a todo checklist) after it was first appended.
+func TestTurnStreamer_UpdatePartEmitsPatch(t *testing.T) {
+	pub := &fakePublisher{}
+	addr := protocol.MessageAddress{TaskID: "t1", ThreadID: "th1"}
+	s := newTurnStreamer(pub, addr, streamMessageID(addr), nil)
+
+	patch := map[string]json.RawMessage{"items": json.RawMessage(`[{"id":"a","status":"completed"}]`)}
+	if err := s.updatePart(context.Background(), 2, patch); err != nil {
+		t.Fatalf("updatePart: %v", err)
+	}
+	last := pub.events[len(pub.events)-1]
+	if last.Type != channel.EventPartUpdated || last.Index != 2 {
+		t.Fatalf("expected part_updated at index 2, got %#v", last)
+	}
+	if string(last.Patch["items"]) != `[{"id":"a","status":"completed"}]` {
+		t.Fatalf("patch not carried: %#v", last.Patch)
+	}
+	before := len(pub.events)
+	if err := s.updatePart(context.Background(), 2, nil); err != nil {
+		t.Fatalf("updatePart nil: %v", err)
+	}
+	if len(pub.events) != before {
+		t.Fatalf("empty patch should not emit an event")
 	}
 }
 
