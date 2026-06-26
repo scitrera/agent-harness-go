@@ -29,7 +29,7 @@ const (
 func (r *Runner) runProviderLoop(ctx context.Context, session *harness.Session, addr protocol.MessageAddress, bootstrap []bootstrap.File, streamer *turnStreamer, injected []protocol.ChatMessage, model string, perTurnApprovers []hooks.ToolApprover, tt turnTools) (protocol.ChatMessage, error) {
 	toolIterations := 0
 	for {
-		response, err := r.callWithOverflowRecovery(ctx, session.History(), bootstrap, injected, model, streamer, tt)
+		response, err := r.callWithOverflowRecovery(ctx, addr, session.History(), bootstrap, injected, model, streamer, tt)
 		if err != nil {
 			return protocol.ChatMessage{}, err
 		}
@@ -126,13 +126,23 @@ func (r *Runner) runProviderLoop(ctx context.Context, session *harness.Session, 
 // classified context_overflow error it drops the oldest history and retries
 // (the request was rejected before any tokens streamed, so no partial output is
 // duplicated), up to maxOverflowRetries.
-func (r *Runner) callWithOverflowRecovery(ctx context.Context, history []protocol.ChatMessage, bootstrap []bootstrap.File, injected []protocol.ChatMessage, model string, streamer *turnStreamer, tt turnTools) (provider.ChatResponse, error) {
+func (r *Runner) callWithOverflowRecovery(ctx context.Context, addr protocol.MessageAddress, history []protocol.ChatMessage, bootstrap []bootstrap.File, injected []protocol.ChatMessage, model string, streamer *turnStreamer, tt turnTools) (provider.ChatResponse, error) {
 	for attempt := 0; ; attempt++ {
 		contextMessages, err := r.ctxMgr.Build(ctx, bootstrap, trimOldest(history, attempt))
 		if err != nil {
 			return provider.ChatResponse{}, fmt.Errorf("assemble context: %w", err)
 		}
-		req := provider.ChatRequest{Model: model, Messages: mergeInjected(contextMessages, injected), Tools: tt.specs}
+		messages := mergeInjected(contextMessages, injected)
+		// Resolve provider-undeliverable attachments (vfs_ref-only image/file parts)
+		// on the outgoing request only — never persisted history. A resolver error
+		// is non-fatal: log and send what we have rather than failing the turn over
+		// an attachment (the model still gets the text).
+		if resolved, rerr := r.attachments.Resolve(ctx, addr, messages); rerr != nil {
+			slog.WarnContext(ctx, "attachment resolution failed; sending request without resolved attachments", slog.Any("err", rerr))
+		} else {
+			messages = resolved
+		}
+		req := provider.ChatRequest{Model: model, Messages: messages, Tools: tt.specs}
 		response, err := r.invokeProvider(ctx, req, streamer)
 		if err == nil {
 			return response, nil
@@ -154,11 +164,27 @@ func (r *Runner) invokeProvider(ctx context.Context, req provider.ChatRequest, s
 	// in the harness logs, so a failed call (network/auth/timeout) leaves no
 	// trace beyond the task fail reason — which is exactly when we most need to
 	// know the model, transport, and error.
-	slog.InfoContext(ctx, "llm: provider call",
+	attrs := []any{
 		slog.String("model", req.Model),
 		slog.Int("messages", len(req.Messages)),
 		slog.Int("tools", len(req.Tools)),
-	)
+	}
+	// Surface the multimodal breakdown of the *outgoing* request (post-resolution):
+	// how many image/file parts the model will actually see and via which carrier.
+	// A non-zero "unresolved" here means a part still has no deliverable carrier
+	// after the attachment resolver ran — the breakdown that explains a "I don't
+	// see the attached image" reply.
+	if mm := summarizeMultimodal(req.Messages); mm.any() {
+		attrs = append(attrs, slog.Group("multimodal",
+			slog.Int("images", mm.images),
+			slog.Int("files", mm.files),
+			slog.Int("data_uri", mm.dataURI),
+			slog.Int("uri", mm.uri),
+			slog.Int("vfs_ref", mm.vfsRef),
+			slog.Int("unresolved", mm.unresolved),
+		))
+	}
+	slog.InfoContext(ctx, "llm: provider call", attrs...)
 	defer func() {
 		if err != nil {
 			slog.ErrorContext(ctx, "llm: provider call failed",
@@ -184,6 +210,60 @@ func (r *Runner) invokeProvider(ctx context.Context, req provider.ChatRequest, s
 	}
 	resp, err = r.provider.Chat(ctx, req)
 	return resp, err
+}
+
+// multimodalStats counts image/file content parts across a set of messages,
+// bucketed by carrier. "unresolved" parts (vfs_ref-only or no carrier at all)
+// are not deliverable to the model because the harness has no VFS resolver, so
+// they are dropped during provider lowering — tracking them separately is what
+// makes a missing-attachment turn debuggable from the logs.
+type multimodalStats struct {
+	images     int
+	files      int
+	dataURI    int
+	uri        int
+	vfsRef     int
+	unresolved int
+}
+
+func (s multimodalStats) any() bool { return s.images > 0 || s.files > 0 }
+
+// tally buckets one part by the strongest carrier it offers (inline data first,
+// then a fetchable uri, then a vfs_ref the harness can't currently resolve).
+func (s *multimodalStats) tally(dataURI, uri, vfsRef string) {
+	switch {
+	case dataURI != "":
+		s.dataURI++
+	case uri != "":
+		s.uri++
+	case vfsRef != "":
+		s.vfsRef++
+		s.unresolved++
+	default:
+		s.unresolved++
+	}
+}
+
+func summarizeMultimodal(messages []protocol.ChatMessage) multimodalStats {
+	var s multimodalStats
+	for _, m := range messages {
+		for _, p := range m.Content {
+			switch p.Type() {
+			case protocol.ContentImage:
+				if img, ok := p.AsImage(); ok {
+					s.images++
+					s.tally(img.DataURI, img.URI, img.VFSRef)
+				}
+			case protocol.ContentFile:
+				if f, ok := p.AsFile(); ok {
+					s.files++
+					// FilePart has no inline data_uri carrier.
+					s.tally("", f.URI, f.VFSRef)
+				}
+			}
+		}
+	}
+	return s
 }
 
 // mergeInjected inserts injected context (daily notes, recalled memories) right

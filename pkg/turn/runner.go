@@ -88,6 +88,7 @@ type Runner struct {
 
 	dynamicTools    DynamicToolProvider
 	staticToolNames map[string]struct{}
+	attachments     AttachmentResolver
 
 	approvals       approval.Awaiter
 	approvalGranter ApprovalGranter
@@ -221,6 +222,13 @@ type Config struct {
 	// the distribution may register statically (e.g. search_tools/call_tool), so
 	// auto-discovery can be disabled while leaving explicit discovery in place.
 	DynamicTools DynamicToolProvider
+
+	// Attachments, when set, resolves multimodal parts the provider cannot fetch
+	// itself (vfs_ref-only image/file parts) into a model-deliverable carrier,
+	// applied to the assembled request just before each provider call. Optional;
+	// nil → NoopAttachmentResolver (logs undeliverable attachments, resolves
+	// nothing). The sahara distribution wires a data-connectors-backed resolver.
+	Attachments AttachmentResolver
 }
 
 func NewRunner(cfg Config) (*Runner, error) {
@@ -247,6 +255,10 @@ func NewRunner(cfg Config) (*Runner, error) {
 	staticNames := make(map[string]struct{}, len(staticSpecs))
 	for _, s := range staticSpecs {
 		staticNames[s.Name] = struct{}{}
+	}
+	attachments := cfg.Attachments
+	if attachments == nil {
+		attachments = NoopAttachmentResolver{}
 	}
 	return &Runner{
 		store:                 cfg.Store,
@@ -282,6 +294,7 @@ func NewRunner(cfg Config) (*Runner, error) {
 		grantStore:            cfg.GrantStore,
 		dynamicTools:          cfg.DynamicTools,
 		staticToolNames:       staticNames,
+		attachments:           attachments,
 	}, nil
 }
 
@@ -400,6 +413,21 @@ func (r *Runner) Run(ctx context.Context, addr protocol.MessageAddress, user pro
 		return reply, nil
 	}
 	user = rewritten
+	// Log inbound multimodal sources at turn entry. Attachments arrive on the user
+	// message as image/file parts carrying a vfs_ref, uri, or inline data_uri; the
+	// harness has no VFS resolver, so a vfs_ref-only attachment never reaches the
+	// model. Surfacing the carrier breakdown here makes that diagnosable.
+	if mm := summarizeMultimodal([]protocol.ChatMessage{user}); mm.any() {
+		slog.InfoContext(ctx, "turn: inbound multimodal attachments",
+			slog.String("thread", addr.ThreadID),
+			slog.Int("images", mm.images),
+			slog.Int("files", mm.files),
+			slog.Int("data_uri", mm.dataURI),
+			slog.Int("uri", mm.uri),
+			slog.Int("vfs_ref", mm.vfsRef),
+			slog.Int("unresolved", mm.unresolved),
+		)
+	}
 	model := r.model
 	if modelOverride != "" {
 		model = modelOverride

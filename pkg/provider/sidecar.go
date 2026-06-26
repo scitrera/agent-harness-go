@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -233,6 +234,14 @@ func lowerMessage(m protocol.ChatMessage) []openAIMessage {
 			if img, ok := part.AsImage(); ok {
 				if url := imageURL(img); url != "" {
 					images = append(images, &openAIImageURL{URL: url})
+				} else {
+					// vfs_ref-only (or empty) image: this OpenAI path can't resolve
+					// it, so it never reaches the model. Log it rather than dropping
+					// silently — this is the line that explains a missing attachment.
+					slog.Warn("provider: dropping image part with no model-deliverable carrier on the openai path (vfs_ref-only or empty)",
+						slog.String("mime", img.Mime),
+						slog.Bool("has_vfs_ref", img.VFSRef != ""),
+					)
 				}
 			}
 		case protocol.ContentToolCall:
