@@ -32,6 +32,9 @@ func RegisterLocal(reg *Registry, cfg LocalConfig) error {
 		{"inspect_file", HandlerFunc(func(ctx context.Context, req Request) (Result, error) { return inspectFile(ctx, cfg, req) })},
 		{"shell", HandlerFunc(func(ctx context.Context, req Request) (Result, error) { return shell(ctx, cfg, req) })},
 		{"python", HandlerFunc(func(ctx context.Context, req Request) (Result, error) { return python(ctx, cfg, req) })},
+		// todo_write needs no workspace/cfg — it surfaces a todo part via the
+		// per-turn PartEmitter on ctx (no-op when none is wired).
+		{"todo_write", HandlerFunc(todoWrite)},
 	}
 	if cfg.Exa != nil {
 		registrations = append(registrations, struct {
@@ -44,7 +47,8 @@ func RegisterLocal(reg *Registry, cfg LocalConfig) error {
 			return err
 		}
 	}
-	for _, d := range localDescriptors() {
+	descriptors := append(localDescriptors(), todoDescriptor())
+	for _, d := range descriptors {
 		if _, ok := reg.handlers[d.Name]; ok {
 			reg.Describe(d)
 		}

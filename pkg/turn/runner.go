@@ -339,10 +339,17 @@ func (r *Runner) Run(ctx context.Context, addr protocol.MessageAddress, user pro
 	if err := streamer.start(ctx); err != nil {
 		return protocol.ChatMessage{}, fmt.Errorf("publish message_started: %w", err)
 	}
+	// Per-turn part emitter: lets tools (e.g. todo_write) surface a content part
+	// on this message's stream and have it folded into the finalized message.
+	emitter := newTurnPartEmitter(streamer)
+	ctx = tools.WithPartEmitter(ctx, emitter)
 	assistant, err := r.runProviderLoop(ctx, session, addr, bootstrap, streamer, injected, model, perTurnApprovers)
 	if err != nil {
 		return protocol.ChatMessage{}, err
 	}
+	// Fold tool-emitted durable parts (e.g. the latest todo checklist) into the
+	// finalized + committed message so they persist and reload with history.
+	assistant.Content = append(assistant.Content, emitter.durableParts()...)
 	if err := streamer.finalize(ctx, assistant); err != nil {
 		return protocol.ChatMessage{}, fmt.Errorf("publish message_finalized: %w", err)
 	}

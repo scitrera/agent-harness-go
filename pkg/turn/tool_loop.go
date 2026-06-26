@@ -52,7 +52,7 @@ func (r *Runner) runProviderLoop(ctx context.Context, session *harness.Session, 
 		// Stream the tool_call parts so the UI surfaces tool activity in real time.
 		for _, part := range assistant.Content {
 			if part.Type() == protocol.ContentToolCall {
-				if err := streamer.appendPart(ctx, part); err != nil {
+				if _, err := streamer.appendPart(ctx, part); err != nil {
 					return protocol.ChatMessage{}, fmt.Errorf("stream tool call: %w", err)
 				}
 			}
@@ -74,7 +74,7 @@ func (r *Runner) runProviderLoop(ctx context.Context, session *harness.Session, 
 				if err := session.AppendToolResult(ctx, call.CallID, part); err != nil {
 					return protocol.ChatMessage{}, fmt.Errorf("record tool denial: %w", err)
 				}
-				if err := streamer.appendPart(ctx, part); err != nil {
+				if _, err := streamer.appendPart(ctx, part); err != nil {
 					return protocol.ChatMessage{}, fmt.Errorf("stream tool denial: %w", err)
 				}
 				continue
@@ -103,7 +103,7 @@ func (r *Runner) runProviderLoop(ctx context.Context, session *harness.Session, 
 				if perr := session.AppendToolResult(ctx, call.CallID, errPart); perr != nil {
 					return protocol.ChatMessage{}, fmt.Errorf("record tool error: %w", perr)
 				}
-				if perr := streamer.appendPart(ctx, errPart); perr != nil {
+				if _, perr := streamer.appendPart(ctx, errPart); perr != nil {
 					return protocol.ChatMessage{}, fmt.Errorf("stream tool error: %w", perr)
 				}
 				continue
@@ -112,7 +112,7 @@ func (r *Runner) runProviderLoop(ctx context.Context, session *harness.Session, 
 			if err != nil {
 				return protocol.ChatMessage{}, fmt.Errorf("tool result part: %w", err)
 			}
-			if err := streamer.appendPart(ctx, part); err != nil {
+			if _, err := streamer.appendPart(ctx, part); err != nil {
 				return protocol.ChatMessage{}, fmt.Errorf("stream tool result: %w", err)
 			}
 		}

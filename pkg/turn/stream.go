@@ -70,18 +70,22 @@ func (s *turnStreamer) start(ctx context.Context) error {
 	return s.publisher.PublishEvent(ctx, channel.Event{Type: channel.EventMessageStarted, Addr: s.addr, Message: &msg})
 }
 
-// appendPart emits part_appended for a content part (tool_call, tool_result, …).
-func (s *turnStreamer) appendPart(ctx context.Context, part protocol.ContentPart) error {
+// appendPart emits part_appended for a content part (tool_call, tool_result, …)
+// and returns the stream index it was placed at (-1 when there is no publisher).
+func (s *turnStreamer) appendPart(ctx context.Context, part protocol.ContentPart) (int, error) {
 	if s == nil || s.publisher == nil {
-		return nil
+		return -1, nil
 	}
 	if err := s.start(ctx); err != nil {
-		return err
+		return -1, err
 	}
 	idx := s.index
 	s.index++
 	p := part
-	return s.publisher.PublishEvent(ctx, channel.Event{Type: channel.EventPartAppended, Addr: s.addr, MessageID: s.msgID, Index: idx, Part: &p})
+	if err := s.publisher.PublishEvent(ctx, channel.Event{Type: channel.EventPartAppended, Addr: s.addr, MessageID: s.msgID, Index: idx, Part: &p}); err != nil {
+		return -1, err
+	}
+	return idx, nil
 }
 
 // appendTextStream appends an empty text part to stream tokens into, returning
