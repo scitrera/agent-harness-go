@@ -404,6 +404,12 @@ func (r *Runner) invokeWithApproval(ctx context.Context, session *harness.Sessio
 		scopes = []string{"once", "session", "always"}
 	}
 	r.emitApproval(ctx, emitter, reqID, call, scopes, spec.ApprovalPending, "tool is not pre-authorized")
+	slog.InfoContext(ctx, "tool approval requested; awaiting user decision",
+		slog.String("tool", call.Name),
+		slog.String("call_id", reqID),
+		slog.String("task", addr.TaskID),
+		slog.String("workspace", addr.WorkspaceID),
+	)
 
 	awaitCtx := ctx
 	if r.approvalTimeout > 0 {
@@ -422,6 +428,11 @@ func (r *Runner) invokeWithApproval(ctx context.Context, session *harness.Sessio
 			status = spec.ApprovalExpired // timed out waiting for a response
 		}
 		r.emitApproval(ctx, emitter, reqID, call, scopes, status, "")
+		slog.InfoContext(ctx, "tool approval not granted",
+			slog.String("tool", call.Name),
+			slog.String("call_id", reqID),
+			slog.String("status", string(status)),
+		)
 		return tools.Result{}, err // original requires-approval error → fed back to the model
 	}
 
@@ -437,6 +448,11 @@ func (r *Runner) invokeWithApproval(ctx context.Context, session *harness.Sessio
 		}
 	}
 	r.emitApproval(ctx, emitter, reqID, call, scopes, spec.ApprovalApproved, "")
+	slog.InfoContext(ctx, "tool approval granted",
+		slog.String("tool", call.Name),
+		slog.String("call_id", reqID),
+		slog.String("scope", decision.Scope),
+	)
 	return session.InvokeToolApproved(ctx, call)
 }
 
