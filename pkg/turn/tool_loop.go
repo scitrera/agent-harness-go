@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	spec "github.com/scitrera/ecosystem-messaging-spec/go"
 
@@ -83,11 +84,24 @@ func (r *Runner) runProviderLoop(ctx context.Context, session *harness.Session, 
 				continue
 			}
 
+			_, dynamicCall := tt.dynamicNames[call.Name]
+			toolStart := time.Now()
 			toolCtx, toolSpan := telemetry.StartTool(ctx, call.Name)
 			r.notifyToolStarted(toolCtx, hc)
 			result, err := r.invokeTool(toolCtx, session, addr, call, tt)
 			r.notifyToolFinished(toolCtx, hc, err != nil, err)
 			telemetry.FinishErr(toolSpan, err)
+			// Canonical per-call log covering every tool — local/static, MCP,
+			// memory, subagent, and dynamic (bridge). The Go-error path below
+			// adds its own warn with the failure detail.
+			if err == nil {
+				slog.InfoContext(toolCtx, "tool call",
+					slog.String("tool", call.Name),
+					slog.Bool("dynamic", dynamicCall),
+					slog.Bool("is_error", result.IsError),
+					slog.Duration("elapsed", time.Since(toolStart)),
+				)
+			}
 			if err != nil {
 				// A cancelled context aborts the turn; any other tool error (registry
 				// policy denial, execution failure, …) is recorded as a tool_result
