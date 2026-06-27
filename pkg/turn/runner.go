@@ -65,6 +65,7 @@ type Runner struct {
 	model             string
 	maxToolIterations int
 	streaming         bool
+	streamFlush       time.Duration
 	toolSpecs         []provider.ToolSpec
 
 	memory                MemoryService
@@ -142,6 +143,12 @@ type Config struct {
 	Model             string
 	MaxToolIterations int
 	Streaming         bool
+	// StreamFlushInterval coalesces streamed token deltas: deltas are buffered and
+	// emitted as one token_delta at most once per interval (always on the first
+	// delta; flushed before any other stream event and at finalize). This bounds
+	// the per-turn message rate so a fast stream stays under the gateway's
+	// per-identity quota. 0 (default) emits every delta immediately.
+	StreamFlushInterval time.Duration
 
 	// Memory integration (optional). When Memory is set: MemoryAutoCommit appends
 	// the turn's user+assistant messages to the thread; MemoryAutoRecall injects
@@ -270,6 +277,7 @@ func NewRunner(cfg Config) (*Runner, error) {
 		model:                 cfg.Model,
 		maxToolIterations:     cfg.MaxToolIterations,
 		streaming:             cfg.Streaming,
+		streamFlush:           cfg.StreamFlushInterval,
 		toolSpecs:             staticSpecs,
 		memory:                cfg.Memory,
 		memAutoCommit:         cfg.MemoryAutoCommit,
@@ -480,7 +488,7 @@ func (r *Runner) Run(ctx context.Context, addr protocol.MessageAddress, user pro
 	if rm := r.recallForTurn(ctx, auth, addr, user); rm != nil {
 		injected = append(injected, *rm)
 	}
-	streamer := newTurnStreamer(r.publisher, addr, streamMessageID(addr), r.now)
+	streamer := newTurnStreamer(r.publisher, addr, streamMessageID(addr), r.now, r.streamFlush)
 	if err := streamer.start(ctx); err != nil {
 		return protocol.ChatMessage{}, fmt.Errorf("publish message_started: %w", err)
 	}

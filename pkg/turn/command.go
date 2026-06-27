@@ -92,7 +92,7 @@ func (r *Runner) emitReply(ctx context.Context, addr protocol.MessageAddress, te
 		Addr:          addr,
 		Content:       []protocol.ContentPart{part},
 	}
-	streamer := newTurnStreamer(r.publisher, addr, id, r.now)
+	streamer := newTurnStreamer(r.publisher, addr, id, r.now, r.streamFlush)
 	if err := streamer.start(ctx); err != nil {
 		return protocol.ChatMessage{}, fmt.Errorf("publish message_started: %w", err)
 	}

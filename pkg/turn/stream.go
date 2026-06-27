@@ -3,6 +3,7 @@ package turn
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"time"
 
 	"github.com/scitrera/agent-harness-go/pkg/channel"
@@ -21,10 +22,30 @@ type turnStreamer struct {
 	createdAt string // captured once when start() first fires; reused at finalize
 	index     int
 	started   bool
+
+	// Token-delta coalescing. When flushInterval > 0, streamed deltas are
+	// buffered and emitted as a single token_delta at most once per interval
+	// (plus a forced flush before any other stream event), collapsing a fast
+	// token stream into far fewer messages — which keeps the egress under the
+	// gateway's per-identity message-rate quota. 0 disables coalescing (every
+	// delta is emitted immediately — the original behavior).
+	flushInterval time.Duration
+	pending       strings.Builder
+	pendingIndex  int
+	lastFlush     time.Time
 }
 
-func newTurnStreamer(pub EventPublisher, addr protocol.MessageAddress, msgID string, now func() time.Time) *turnStreamer {
-	return &turnStreamer{publisher: pub, addr: addr, msgID: msgID, now: now}
+func newTurnStreamer(pub EventPublisher, addr protocol.MessageAddress, msgID string, now func() time.Time, flushInterval time.Duration) *turnStreamer {
+	return &turnStreamer{publisher: pub, addr: addr, msgID: msgID, now: now, flushInterval: flushInterval}
+}
+
+// nowTime returns the current time from the injected clock (falling back to the
+// wall clock), used for interval-based delta flushing.
+func (s *turnStreamer) nowTime() time.Time {
+	if s.now != nil {
+		return s.now()
+	}
+	return time.Now()
 }
 
 // stampNow returns the current time as an RFC3339Nano UTC string — the
@@ -79,6 +100,9 @@ func (s *turnStreamer) appendPart(ctx context.Context, part protocol.ContentPart
 	if err := s.start(ctx); err != nil {
 		return -1, err
 	}
+	if err := s.flushPending(ctx); err != nil {
+		return -1, err
+	}
 	idx := s.index
 	s.index++
 	p := part
@@ -95,6 +119,9 @@ func (s *turnStreamer) appendTextStream(ctx context.Context) (int, error) {
 		return -1, nil
 	}
 	if err := s.start(ctx); err != nil {
+		return -1, err
+	}
+	if err := s.flushPending(ctx); err != nil {
 		return -1, err
 	}
 	idx := s.index
@@ -119,14 +146,52 @@ func (s *turnStreamer) updatePart(ctx context.Context, index int, patch map[stri
 	if err := s.start(ctx); err != nil {
 		return err
 	}
+	if err := s.flushPending(ctx); err != nil {
+		return err
+	}
 	return s.publisher.PublishEvent(ctx, channel.Event{Type: channel.EventPartUpdated, Addr: s.addr, MessageID: s.msgID, Index: index, Patch: patch})
 }
 
-// tokenDelta emits token_delta for streamed text into the part at index.
+// tokenDelta emits token_delta for streamed text into the part at index. With
+// coalescing enabled (flushInterval > 0) it buffers the text and flushes at most
+// once per interval (always on the first delta, for low time-to-first-token);
+// the buffer is forced out before any other stream event and at finalize.
 func (s *turnStreamer) tokenDelta(ctx context.Context, index int, text string) error {
 	if s == nil || s.publisher == nil || text == "" {
 		return nil
 	}
+	if s.flushInterval <= 0 {
+		return s.publishDelta(ctx, index, text)
+	}
+	// A delta for a different part: flush the buffered one first so the two
+	// parts' deltas never interleave under one index.
+	if s.pending.Len() > 0 && s.pendingIndex != index {
+		if err := s.flushPending(ctx); err != nil {
+			return err
+		}
+	}
+	s.pendingIndex = index
+	s.pending.WriteString(text)
+	if s.lastFlush.IsZero() || s.nowTime().Sub(s.lastFlush) >= s.flushInterval {
+		return s.flushPending(ctx)
+	}
+	return nil
+}
+
+// flushPending emits any buffered token-delta text as a single token_delta. No-op
+// when nothing is buffered (or no publisher). Called before every other stream
+// event and at finalize so coalesced deltas stay correctly ordered and complete.
+func (s *turnStreamer) flushPending(ctx context.Context) error {
+	if s == nil || s.publisher == nil || s.pending.Len() == 0 {
+		return nil
+	}
+	text := s.pending.String()
+	s.pending.Reset()
+	s.lastFlush = s.nowTime()
+	return s.publishDelta(ctx, s.pendingIndex, text)
+}
+
+func (s *turnStreamer) publishDelta(ctx context.Context, index int, text string) error {
 	return s.publisher.PublishEvent(ctx, channel.Event{Type: channel.EventTokenDelta, Addr: s.addr, MessageID: s.msgID, Index: index, Delta: text})
 }
 
@@ -137,6 +202,11 @@ func (s *turnStreamer) finalize(ctx context.Context, msg protocol.ChatMessage) e
 		return nil
 	}
 	if err := s.start(ctx); err != nil {
+		return err
+	}
+	// Flush any buffered token deltas so the streamed text is complete and
+	// ordered before the authoritative finalized message.
+	if err := s.flushPending(ctx); err != nil {
 		return err
 	}
 	msg.ID = s.msgID

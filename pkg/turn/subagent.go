@@ -52,7 +52,7 @@ func (r *Runner) RunSubagent(ctx context.Context, req subagent.Request) (_ subag
 	}
 	// nil publisher => the streamer is a no-op, so the sub-agent does not emit
 	// stream events to the user-facing channel.
-	streamer := newTurnStreamer(nil, addr, streamMessageID(addr), r.now)
+	streamer := newTurnStreamer(nil, addr, streamMessageID(addr), r.now, r.streamFlush)
 	// Discover tools relevant to the subagent's task (best-effort, same as Run).
 	tt := r.assembleTurnTools(ctx, addr, userMsg)
 	assistant, err := r.runProviderLoop(ctx, session, addr, bootstrap, streamer, nil, r.model, nil, tt)

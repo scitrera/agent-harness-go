@@ -16,7 +16,7 @@ import (
 func Test_turnPartEmitter_appends_then_updates_and_folds_latest(t *testing.T) {
 	pub := &fakePublisher{}
 	addr := protocol.MessageAddress{TaskID: "t1", ThreadID: "th1"}
-	em := newTurnPartEmitter(newTurnStreamer(pub, addr, streamMessageID(addr), nil))
+	em := newTurnPartEmitter(newTurnStreamer(pub, addr, streamMessageID(addr), nil, 0))
 
 	first := spec.NewTodoPart(spec.TodoPart{ID: "todo_main", Items: []spec.TodoItem{{Content: "A", Status: spec.TodoPending}}})
 	second := spec.NewTodoPart(spec.TodoPart{ID: "todo_main", Items: []spec.TodoItem{{Content: "A", Status: spec.TodoCompleted}}})
@@ -54,7 +54,7 @@ func Test_turnPartEmitter_appends_then_updates_and_folds_latest(t *testing.T) {
 func Test_turnPartEmitter_idless_parts_not_tracked(t *testing.T) {
 	pub := &fakePublisher{}
 	addr := protocol.MessageAddress{TaskID: "t1"}
-	em := newTurnPartEmitter(newTurnStreamer(pub, addr, streamMessageID(addr), nil))
+	em := newTurnPartEmitter(newTurnStreamer(pub, addr, streamMessageID(addr), nil, 0))
 
 	p, err := protocol.NewTextPart("hi")
 	if err != nil {
