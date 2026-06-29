@@ -29,6 +29,22 @@ type Request struct {
 	// Model optionally pins the sub-agent to a specific model (validated against
 	// the registry by the runner; empty → the runner's normal per-turn selection).
 	Model string
+	// Agent fields are populated when a file-backed catalog definition is used.
+	// The OSS in-process runner applies Instructions, MaxTurns, AllowedTools,
+	// DeniedTools, and Model. Skills, MCPServers, PermissionMode,
+	// ExecPolicyHint, and Background are retained for catalog-compatible
+	// backends until OSS has concrete runtime seams for them.
+	AgentName      AgentName
+	AgentType      AgentType
+	Instructions   string
+	MaxTurns       int
+	AllowedTools   []string
+	DeniedTools    []string
+	Skills         []string
+	MCPServers     []string
+	PermissionMode PermissionMode
+	ExecPolicyHint string
+	Background     bool
 }
 
 // Result is the sub-agent's final answer.
