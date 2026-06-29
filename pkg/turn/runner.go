@@ -15,6 +15,7 @@ import (
 	"github.com/scitrera/agent-harness-go/pkg/dailynotes"
 	"github.com/scitrera/agent-harness-go/pkg/harness"
 	"github.com/scitrera/agent-harness-go/pkg/hooks"
+	modelpkg "github.com/scitrera/agent-harness-go/pkg/model"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 	"github.com/scitrera/agent-harness-go/pkg/provider"
 	"github.com/scitrera/agent-harness-go/pkg/telemetry"
@@ -63,6 +64,8 @@ type Runner struct {
 	publisher         EventPublisher
 	ctxMgr            ContextManager
 	model             string
+	modelRegistry     *modelpkg.Registry
+	modelSelector     modelpkg.Selector
 	maxToolIterations int
 	streaming         bool
 	streamFlush       time.Duration
@@ -141,6 +144,15 @@ type Config struct {
 	Assembler         contextpack.Assembler
 	ContextManager    ContextManager
 	Model             string
+	// ModelRegistry is the set of available models + default. When set, the runner
+	// selects the per-turn model from it (capability-matched), honoring an
+	// explicit /command override first. nil → the single Model is always used.
+	ModelRegistry *modelpkg.Registry
+	// ModelSelector picks the per-turn model from ModelRegistry on the auto path
+	// (an explicit override wins). nil with a non-nil ModelRegistry →
+	// model.CapabilityDefault. The distribution plugs in a cost/complexity router
+	// here (policy stays out of oss).
+	ModelSelector     modelpkg.Selector
 	MaxToolIterations int
 	Streaming         bool
 	// StreamFlushInterval coalesces streamed token deltas: deltas are buffered and
@@ -267,6 +279,12 @@ func NewRunner(cfg Config) (*Runner, error) {
 	if attachments == nil {
 		attachments = NoopAttachmentResolver{}
 	}
+	// Per-turn model selection: with a registry but no explicit selector, use the
+	// neutral capability-matching default. No registry → single configured model.
+	modelSelector := cfg.ModelSelector
+	if modelSelector == nil && cfg.ModelRegistry != nil {
+		modelSelector = modelpkg.CapabilityDefault{}
+	}
 	return &Runner{
 		store:                 cfg.Store,
 		loader:                cfg.Loader,
@@ -275,6 +293,8 @@ func NewRunner(cfg Config) (*Runner, error) {
 		publisher:             cfg.Publisher,
 		ctxMgr:                ctxMgr,
 		model:                 cfg.Model,
+		modelRegistry:         cfg.ModelRegistry,
+		modelSelector:         modelSelector,
 		maxToolIterations:     cfg.MaxToolIterations,
 		streaming:             cfg.Streaming,
 		streamFlush:           cfg.StreamFlushInterval,
@@ -436,10 +456,11 @@ func (r *Runner) Run(ctx context.Context, addr protocol.MessageAddress, user pro
 			slog.Int("unresolved", mm.unresolved),
 		)
 	}
-	model := r.model
-	if modelOverride != "" {
-		model = modelOverride
-	}
+	model := r.resolveTurnModel(ctx, addr, user, modelOverride)
+	slog.InfoContext(ctx, "turn: model selected",
+		slog.String("model", model),
+		slog.Bool("override", modelOverride != ""),
+	)
 	// A command's allowed-tools frontmatter gates this turn's tool calls.
 	var perTurnApprovers []hooks.ToolApprover
 	if len(allowedTools) > 0 {
@@ -519,6 +540,47 @@ func (r *Runner) Run(ctx context.Context, addr protocol.MessageAddress, user pro
 		r.commitToMemory(ctx, auth, addr, user, assistant)
 	}
 	return assistant, nil
+}
+
+// resolveTurnModel picks the model for this turn: an explicit command/override
+// wins; otherwise the configured ModelSelector chooses from the registry
+// (capability-matched). With no registry/selector the single configured model is
+// used (unchanged single-model behavior).
+func (r *Runner) resolveTurnModel(ctx context.Context, addr protocol.MessageAddress, user protocol.ChatMessage, override string) string {
+	if override != "" {
+		return override
+	}
+	if r.modelSelector == nil || r.modelRegistry == nil {
+		return r.model
+	}
+	sel, err := r.modelSelector.SelectModel(ctx, modelpkg.SelectInput{
+		Addr:     addr,
+		User:     user,
+		Required: requiredCapabilities(user),
+		Registry: r.modelRegistry,
+		Default:  r.model,
+	})
+	if err != nil {
+		slog.WarnContext(ctx, "model selection failed; using default",
+			slog.String("default", r.model), slog.Any("err", err))
+		return r.model
+	}
+	if sel == "" {
+		return r.model
+	}
+	return sel
+}
+
+// requiredCapabilities derives the capabilities this turn needs: Tools is always
+// required (the harness runs a tool loop); Vision when the message carries images.
+func requiredCapabilities(user protocol.ChatMessage) modelpkg.Capabilities {
+	req := modelpkg.Capabilities{Tools: true}
+	for _, p := range user.Content {
+		if p.Type() == protocol.ContentImage {
+			req.Vision = true
+		}
+	}
+	return req
 }
 
 // recallForTurn auto-recalls thread-scoped memories and returns a system message
