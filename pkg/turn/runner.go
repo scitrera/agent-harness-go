@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/scitrera/agent-harness-go/pkg/approval"
@@ -66,6 +67,12 @@ type Runner struct {
 	model             string
 	modelRegistry     *modelpkg.Registry
 	modelSelector     modelpkg.Selector
+	// threadModels holds the per-thread model pinned via /model <name>
+	// (runner-lifetime; reset when the runner is rebuilt or the process restarts).
+	// Guarded by threadModelsMu.
+	threadModels   map[string]string
+	threadModelsMu sync.Mutex
+
 	maxToolIterations int
 	streaming         bool
 	streamFlush       time.Duration
@@ -295,6 +302,7 @@ func NewRunner(cfg Config) (*Runner, error) {
 		model:                 cfg.Model,
 		modelRegistry:         cfg.ModelRegistry,
 		modelSelector:         modelSelector,
+		threadModels:          map[string]string{},
 		maxToolIterations:     cfg.MaxToolIterations,
 		streaming:             cfg.Streaming,
 		streamFlush:           cfg.StreamFlushInterval,
@@ -550,13 +558,24 @@ func (r *Runner) resolveTurnModel(ctx context.Context, addr protocol.MessageAddr
 	if override != "" {
 		return override
 	}
+	req := requiredCapabilities(user)
+	// A model pinned via /model <name> wins for the thread, as long as it can
+	// handle this turn's modality; otherwise fall through to auto-routing so an
+	// image (etc.) still reaches a capable model.
+	if sticky := r.stickyModel(addr.ThreadID); sticky != "" {
+		if m, ok := r.modelRegistry.Get(sticky); ok && m.Capabilities.Satisfies(req) {
+			return sticky
+		}
+		slog.InfoContext(ctx, "pinned model cannot satisfy this turn; auto-routing",
+			slog.String("pinned", sticky))
+	}
 	if r.modelSelector == nil || r.modelRegistry == nil {
 		return r.model
 	}
 	sel, err := r.modelSelector.SelectModel(ctx, modelpkg.SelectInput{
 		Addr:     addr,
 		User:     user,
-		Required: requiredCapabilities(user),
+		Required: req,
 		Registry: r.modelRegistry,
 		Default:  r.model,
 	})

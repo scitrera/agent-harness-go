@@ -22,6 +22,7 @@ var ReservedNames = map[string]string{
 	"help":     "List available commands.",
 	"commands": "List available commands.",
 	"clear":    "Clear this thread's history.",
+	"model":    "List available models, or switch with /model <name>.",
 }
 
 // Discover scans each dir (relative to workspaceRoot) for "<name>.md" command

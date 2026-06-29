@@ -26,7 +26,7 @@ func (r *Runner) resolveCommand(ctx context.Context, addr protocol.MessageAddres
 	}
 	// Reserved built-ins win over workspace files and never reach the model.
 	if commands.IsReserved(name) {
-		reply, err = r.runBuiltin(ctx, addr, name)
+		reply, err = r.runBuiltin(ctx, addr, name, args)
 		return user, reply, true, "", nil, err
 	}
 	if cmd, found := r.commands.Lookup(name); found {
@@ -40,7 +40,7 @@ func (r *Runner) resolveCommand(ctx context.Context, addr protocol.MessageAddres
 
 // runBuiltin handles a reserved built-in command, returning the synthesized
 // assistant reply (also published via the streamer for Aether egress).
-func (r *Runner) runBuiltin(ctx context.Context, addr protocol.MessageAddress, name string) (protocol.ChatMessage, error) {
+func (r *Runner) runBuiltin(ctx context.Context, addr protocol.MessageAddress, name, args string) (protocol.ChatMessage, error) {
 	switch commands.CanonicalKey(name) {
 	case "help", "commands":
 		return r.emitReply(ctx, addr, r.helpText())
@@ -49,6 +49,8 @@ func (r *Runner) runBuiltin(ctx context.Context, addr protocol.MessageAddress, n
 			return protocol.ChatMessage{}, fmt.Errorf("clear history: %w", err)
 		}
 		return r.emitReply(ctx, addr, "Thread history cleared.")
+	case "model":
+		return r.runModelCommand(ctx, addr, args)
 	default:
 		return r.emitReply(ctx, addr, "Unknown command.")
 	}
@@ -60,7 +62,8 @@ func (r *Runner) helpText() string {
 	b.WriteString("Available commands:\n")
 	b.WriteString("  /help          List available commands.\n")
 	b.WriteString("  /commands      List available commands.\n")
-	b.WriteString("  /clear         Clear this thread's history.")
+	b.WriteString("  /clear         Clear this thread's history.\n")
+	b.WriteString("  /model         List models, or /model <name> to switch.")
 	for _, c := range r.commands.List() {
 		b.WriteString("\n  /")
 		b.WriteString(c.Name)

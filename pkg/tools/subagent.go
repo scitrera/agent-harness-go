@@ -25,7 +25,8 @@ func RegisterSubagent(reg *Registry, runner subagent.Runner, maxDepth int) error
 			return errorResult(req, fmt.Sprintf("sub-agent depth limit (%d) reached; handle this task directly", maxDepth))
 		}
 		var args struct {
-			Task string `json:"task"`
+			Task  string `json:"task"`
+			Model string `json:"model"`
 		}
 		if err := decodeArgs(req, &args); err != nil {
 			return Result{}, err
@@ -40,6 +41,7 @@ func RegisterSubagent(reg *Registry, runner subagent.Runner, maxDepth int) error
 			GrantID:     req.Authority.GrantID,
 			SubjectType: req.Authority.SubjectType,
 			SubjectID:   req.Authority.SubjectID,
+			Model:       args.Model,
 		})
 		if err != nil {
 			return errorResult(req, "sub-agent failed: "+err.Error())
@@ -55,8 +57,8 @@ func RegisterSubagent(reg *Registry, runner subagent.Runner, maxDepth int) error
 	}
 	reg.Describe(Descriptor{
 		Name:        subagentToolName,
-		Description: "Delegate a self-contained sub-task to a fresh sub-agent (bounded; no shared conversation history). Returns the sub-agent's final answer. Use for focused research/analysis you want isolated from the main thread.",
-		Parameters:  json.RawMessage(`{"type":"object","properties":{"task":{"type":"string","description":"A self-contained instruction for the sub-agent"}},"required":["task"]}`),
+		Description: "Delegate a self-contained sub-task to a fresh sub-agent (bounded; no shared conversation history). Returns the sub-agent's final answer. Use for focused research/analysis you want isolated from the main thread, or to consult a specific/specialist model via the optional 'model' argument.",
+		Parameters:  json.RawMessage(`{"type":"object","properties":{"task":{"type":"string","description":"A self-contained instruction for the sub-agent"},"model":{"type":"string","description":"Optional: a specific model name to run the sub-agent on (e.g. a vision or stronger model). Omit to use the default."}},"required":["task"]}`),
 	})
 	return nil
 }

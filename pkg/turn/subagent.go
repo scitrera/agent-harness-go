@@ -55,7 +55,10 @@ func (r *Runner) RunSubagent(ctx context.Context, req subagent.Request) (_ subag
 	streamer := newTurnStreamer(nil, addr, streamMessageID(addr), r.now, r.streamFlush)
 	// Discover tools relevant to the subagent's task (best-effort, same as Run).
 	tt := r.assembleTurnTools(ctx, addr, userMsg)
-	assistant, err := r.runProviderLoop(ctx, session, addr, bootstrap, streamer, nil, r.model, nil, tt)
+	// req.Model (from spawn_subagent's model arg) is an explicit override; with it
+	// empty the sub-agent uses normal capability-matched selection for its task.
+	subModel := r.resolveTurnModel(ctx, addr, userMsg, req.Model)
+	assistant, err := r.runProviderLoop(ctx, session, addr, bootstrap, streamer, nil, subModel, nil, tt)
 	if err != nil {
 		return subagent.Result{}, err
 	}

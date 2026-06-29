@@ -26,6 +26,9 @@ type Request struct {
 	GrantID     string
 	SubjectType string
 	SubjectID   string
+	// Model optionally pins the sub-agent to a specific model (validated against
+	// the registry by the runner; empty → the runner's normal per-turn selection).
+	Model string
 }
 
 // Result is the sub-agent's final answer.
