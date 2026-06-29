@@ -105,8 +105,10 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	// Clear the persisted transcript too (best-effort).
-	_ = s.store.SaveHistory(r.Context(), id, nil)
+	if err := s.store.DeleteHistory(r.Context(), id); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 

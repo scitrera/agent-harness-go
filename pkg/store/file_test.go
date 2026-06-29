@@ -56,3 +56,29 @@ func TestFileStoreBootstrapReadsWorkspaceFiles(t *testing.T) {
 		t.Fatalf("unexpected bootstrap: %#v", files)
 	}
 }
+
+func TestFileStoreDeleteHistory_whenTranscriptExists(t *testing.T) {
+	// Given
+	dir := t.TempDir()
+	store := NewFileStore(dir, dir)
+	ctx := context.Background()
+	part, _ := protocol.NewTextPart("delete me")
+	msg := protocol.ChatMessage{ID: "u1", Role: protocol.RoleUser, Content: []protocol.ContentPart{part}}
+	if err := store.SaveHistory(ctx, "t1", []protocol.ChatMessage{msg}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	// When
+	if err := store.DeleteHistory(ctx, "t1"); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	got, err := store.LoadHistory(ctx, "t1")
+
+	// Then
+	if err != nil {
+		t.Fatalf("load after delete: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("history should be empty after delete: %+v", got)
+	}
+}

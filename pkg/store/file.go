@@ -82,6 +82,17 @@ func (s *FileStore) SaveHistory(_ context.Context, threadID string, messages []p
 	return nil
 }
 
+// DeleteHistory deletes the persisted transcript for threadID.
+func (s *FileStore) DeleteHistory(_ context.Context, threadID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	err := os.Remove(s.historyPath(threadID))
+	if err == nil || os.IsNotExist(err) {
+		return nil
+	}
+	return fmt.Errorf("delete history: %w", err)
+}
+
 // LoadBootstrap reads the workspace bootstrap documents (in bootstrapFileOrder)
 // that exist, each capped at maxBootstrap bytes.
 func (s *FileStore) LoadBootstrap(_ context.Context) ([]bootstrap.File, error) {
