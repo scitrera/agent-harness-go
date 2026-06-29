@@ -6,10 +6,11 @@ import (
 )
 
 var (
-	ErrInvalidServer = errors.New("mcp: invalid server")
-	ErrUnknownServer = errors.New("mcp: unknown server")
-	ErrProcessExit   = errors.New("mcp: process exited")
-	ErrRPC           = errors.New("mcp: json-rpc error")
+	ErrInvalidServer   = errors.New("mcp: invalid server")
+	ErrInvalidResource = errors.New("mcp: invalid resource")
+	ErrUnknownServer   = errors.New("mcp: unknown server")
+	ErrProcessExit     = errors.New("mcp: process exited")
+	ErrRPC             = errors.New("mcp: json-rpc error")
 )
 
 type RPCError struct {

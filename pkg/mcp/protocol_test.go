@@ -96,11 +96,16 @@ func runFakeMCPServer() {
 		if req.ID == 0 {
 			continue
 		}
-		respondFakeMCP(req.ID, req.Method)
+		respondFakeMCP(req.ID, req.Method, req.Params)
 	}
 }
 
-func respondFakeMCP(id int64, method string) {
+func respondFakeMCP(id int64, method string, params json.RawMessage) {
+	if os.Getenv("AGENT_HARNESS_FAKE_MCP_UNSUPPORTED_RESOURCES") == "1" && isResourceMethod(method) {
+		writeFakeMCPError(id, codeMethodNotFound, "method not found")
+		return
+	}
+
 	var result interface{}
 	switch method {
 	case "initialize":
@@ -109,8 +114,34 @@ func respondFakeMCP(id int64, method string) {
 		result = map[string]interface{}{"tools": []map[string]interface{}{{"name": "add", "description": "add two numbers", "inputSchema": map[string]interface{}{"type": "object"}}}}
 	case "tools/call":
 		result = map[string]interface{}{"content": []map[string]interface{}{{"type": "text", "text": "7"}}}
+	case "resources/list":
+		result = fakeResourcesList(params)
+	case "resources/read":
+		result = fakeResourceRead(params)
+	case "resources/templates/list":
+		result = fakeResourceTemplatesList(params)
 	default:
 		result = map[string]interface{}{}
 	}
 	_ = json.NewEncoder(os.Stdout).Encode(map[string]interface{}{"jsonrpc": "2.0", "id": id, "result": result})
+}
+
+func isResourceMethod(method string) bool {
+	switch method {
+	case "resources/list", "resources/read", "resources/templates/list":
+		return true
+	default:
+		return false
+	}
+}
+
+func writeFakeMCPError(id int64, code int, message string) {
+	_ = json.NewEncoder(os.Stdout).Encode(map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      id,
+		"error": map[string]interface{}{
+			"code":    code,
+			"message": message,
+		},
+	})
 }
