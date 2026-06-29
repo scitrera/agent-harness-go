@@ -20,8 +20,11 @@ type CommandSpec struct {
 }
 
 type CommandResult struct {
-	ExitCode int
-	Output   string
+	ExitCode        int
+	Output          string
+	OutputBytes     int
+	OutputTruncated bool
+	PID             int
 }
 
 func (w *Workspace) RunCommand(ctx context.Context, spec CommandSpec) (CommandResult, error) {
@@ -57,13 +60,14 @@ func (w *Workspace) RunCommand(ctx context.Context, spec CommandSpec) (CommandRe
 	if err := cmd.Start(); err != nil {
 		return CommandResult{}, fmt.Errorf("start command: %w", err)
 	}
+	pid := cmd.Process.Pid
 	err = cmd.Wait()
 	if runCtx.Err() == context.DeadlineExceeded {
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		return CommandResult{ExitCode: -1, Output: out.String()}, fmt.Errorf("%w: timeout", ErrCommandFailed)
+		return CommandResult{ExitCode: -1, Output: out.String(), OutputBytes: out.Total(), OutputTruncated: out.Truncated(), PID: pid}, fmt.Errorf("%w: timeout", ErrCommandFailed)
 	}
 	code := cmd.ProcessState.ExitCode()
-	result := CommandResult{ExitCode: code, Output: out.String()}
+	result := CommandResult{ExitCode: code, Output: out.String(), OutputBytes: out.Total(), OutputTruncated: out.Truncated(), PID: pid}
 	if err != nil {
 		return result, fmt.Errorf("%w: exit %d: %w", ErrCommandFailed, code, err)
 	}
@@ -80,20 +84,25 @@ func (w *Workspace) RunPython(ctx context.Context, pythonPath string, code strin
 }
 
 type limitedBuffer struct {
-	buf   bytes.Buffer
-	limit int
+	buf       bytes.Buffer
+	limit     int
+	total     int
+	truncated bool
 }
 
 func (b *limitedBuffer) Write(p []byte) (int, error) {
+	b.total += len(p)
 	if b.limit <= 0 {
 		return b.buf.Write(p)
 	}
 	remaining := b.limit - b.buf.Len()
 	if remaining <= 0 {
+		b.truncated = true
 		return len(p), nil
 	}
 	if len(p) > remaining {
 		_, _ = b.buf.Write(p[:remaining])
+		b.truncated = true
 		return len(p), nil
 	}
 	return b.buf.Write(p)
@@ -101,4 +110,12 @@ func (b *limitedBuffer) Write(p []byte) (int, error) {
 
 func (b *limitedBuffer) String() string {
 	return b.buf.String()
+}
+
+func (b *limitedBuffer) Total() int {
+	return b.total
+}
+
+func (b *limitedBuffer) Truncated() bool {
+	return b.truncated
 }

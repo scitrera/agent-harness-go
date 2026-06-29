@@ -27,6 +27,7 @@ const (
 	EventPartUpdated    EventType = "part_updated"
 	EventMessageFinal   EventType = "message_final"
 	EventToolResult     EventType = "tool_result"
+	EventToolLifecycle  EventType = "tool_lifecycle"
 	EventError          EventType = "error"
 )
 

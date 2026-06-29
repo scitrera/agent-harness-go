@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"time"
 )
 
 type Registry struct {
@@ -11,6 +12,7 @@ type Registry struct {
 	descriptors map[string]Descriptor
 	policy      Policy
 	audit       AuditSink
+	events      ToolEventSink
 }
 
 func NewRegistry() *Registry {
@@ -24,6 +26,10 @@ func NewAuditedRegistry(policy Policy, audit AuditSink) *Registry {
 func (r *Registry) SetPolicy(policy Policy, audit AuditSink) {
 	r.policy = policy
 	r.audit = audit
+}
+
+func (r *Registry) SetEventSink(events ToolEventSink) {
+	r.events = events
 }
 
 func (r *Registry) Register(name string, handler Handler) error {
@@ -42,13 +48,30 @@ func (r *Registry) Invoke(ctx context.Context, req Request) (Result, error) {
 	if !exists {
 		return Result{}, fmt.Errorf("%w: %s", ErrUnknownTool, req.Name)
 	}
-	if err := r.authorize(ctx, req); err != nil {
+	started := time.Now()
+	r.emitToolEvent(ctx, NewToolEvent(ToolEventStarted, req))
+	decision, hasDecision, err := r.authorize(ctx, req)
+	if err != nil {
+		event := finishedToolEvent(req, started, Result{}, err)
+		if hasDecision {
+			event.PolicyDecision = string(decision.Code)
+			event.Reason = decision.Reason
+		}
+		r.emitToolEvent(ctx, event)
 		return Result{}, err
 	}
 	result, err := handler.Invoke(ctx, req)
 	if err != nil {
-		return Result{}, fmt.Errorf("invoke %s: %w", req.Name, err)
+		wrapped := fmt.Errorf("invoke %s: %w", req.Name, err)
+		r.emitToolEvent(ctx, finishedToolEvent(req, started, result, wrapped))
+		return result, wrapped
 	}
+	event := finishedToolEvent(req, started, result, nil)
+	if hasDecision {
+		event.PolicyDecision = string(decision.Code)
+		event.Reason = decision.Reason
+	}
+	r.emitToolEvent(ctx, event)
 	return result, nil
 }
 
@@ -61,9 +84,9 @@ func (r *Registry) Names() []string {
 	return names
 }
 
-func (r *Registry) authorize(ctx context.Context, req Request) error {
+func (r *Registry) authorize(ctx context.Context, req Request) (Decision, bool, error) {
 	if r.policy == nil {
-		return nil
+		return Decision{}, false, nil
 	}
 	var decision Decision
 	if req.Approved {
@@ -75,11 +98,28 @@ func (r *Registry) authorize(ctx context.Context, req Request) error {
 	}
 	if r.audit != nil {
 		if err := r.audit.Record(ctx, NewAuditRecord(req, decision)); err != nil {
-			return fmt.Errorf("record tool audit: %w", err)
+			return decision, true, fmt.Errorf("record tool audit: %w", err)
 		}
 	}
 	if !decision.Allowed() {
-		return policyError(decision, req.Name)
+		return decision, true, policyError(decision, req.Name)
 	}
-	return nil
+	return decision, true, nil
+}
+
+func (r *Registry) emitToolEvent(ctx context.Context, event ToolEvent) {
+	if r.events == nil {
+		return
+	}
+	_ = r.events.EmitToolEvent(ctx, event)
+}
+
+func finishedToolEvent(req Request, started time.Time, result Result, err error) ToolEvent {
+	event := NewToolEvent(ToolEventFinished, req)
+	event.DurationMS = DurationMillis(time.Since(started))
+	event.Result = result.Metadata
+	event.Result.PayloadBytes = len(result.Payload)
+	event.IsError = result.IsError || err != nil
+	ApplySafeError(&event, err)
+	return event
 }

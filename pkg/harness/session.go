@@ -117,7 +117,7 @@ func (s *Session) invokeTool(ctx context.Context, env protocol.ToolInvokeEnvelop
 	req.Approved = approved
 	result, err := s.tools.Invoke(ctx, req)
 	if err != nil {
-		return tools.Result{}, err
+		return result, err
 	}
 	part, err := result.ContentPart()
 	if err != nil {

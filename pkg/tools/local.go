@@ -10,11 +10,12 @@ import (
 )
 
 type LocalConfig struct {
-	Workspace *localtools.Workspace
-	Python    string
-	Exa       *localtools.ExaClient
-	Timeout   time.Duration
-	MaxOutput int
+	Workspace     *localtools.Workspace
+	Python        string
+	Exa           *localtools.ExaClient
+	Timeout       time.Duration
+	MaxOutput     int
+	CommandPolicy CommandDecider
 }
 
 func RegisterLocal(reg *Registry, cfg LocalConfig) error {
@@ -98,7 +99,12 @@ func writeFile(ctx context.Context, cfg LocalConfig, req Request) (Result, error
 	if err := cfg.Workspace.WriteFile(ctx, args.Path, args.Content); err != nil {
 		return Result{}, err
 	}
-	return okResult(req)
+	result, err := okResult(req)
+	if err != nil {
+		return Result{}, err
+	}
+	result.Metadata.FileChanges = []FileChange{{Path: args.Path, Kind: "write"}}
+	return result, nil
 }
 
 func editFile(ctx context.Context, cfg LocalConfig, req Request) (Result, error) {
@@ -113,7 +119,12 @@ func editFile(ctx context.Context, cfg LocalConfig, req Request) (Result, error)
 	if err := cfg.Workspace.EditFile(ctx, args.Path, args.OldText, args.NewText); err != nil {
 		return Result{}, err
 	}
-	return okResult(req)
+	result, err := okResult(req)
+	if err != nil {
+		return Result{}, err
+	}
+	result.Metadata.FileChanges = []FileChange{{Path: args.Path, Kind: "edit"}}
+	return result, nil
 }
 
 func listDir(ctx context.Context, cfg LocalConfig, req Request) (Result, error) {

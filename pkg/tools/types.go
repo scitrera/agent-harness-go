@@ -31,10 +31,11 @@ type Request struct {
 }
 
 type Result struct {
-	CallID  string          `json:"call_id"`
-	Name    string          `json:"name"`
-	Payload json.RawMessage `json:"payload"`
-	IsError bool            `json:"is_error"`
+	CallID   string          `json:"call_id"`
+	Name     string          `json:"name"`
+	Payload  json.RawMessage `json:"payload"`
+	IsError  bool            `json:"is_error"`
+	Metadata ResultMetadata  `json:"metadata,omitempty"`
 }
 
 type Handler interface {

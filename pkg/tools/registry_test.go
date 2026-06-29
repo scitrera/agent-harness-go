@@ -46,6 +46,9 @@ func Test_Registry_Invoke_updates_soul_when_edit_file_tool_called(t *testing.T) 
 	if result.CallID != "call-1" || result.Name != "edit_file" {
 		t.Fatalf("unexpected result identity: %#v", result)
 	}
+	if len(result.Metadata.FileChanges) != 1 || result.Metadata.FileChanges[0].Path != "SOUL.md" || result.Metadata.FileChanges[0].Kind != "edit" {
+		t.Fatalf("unexpected file-change metadata: %#v", result.Metadata.FileChanges)
+	}
 	updated, err := os.ReadFile(filepath.Join(root, "SOUL.md"))
 	if err != nil {
 		t.Fatalf("read updated file: %v", err)

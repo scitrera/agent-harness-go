@@ -32,8 +32,16 @@ func okResult(req Request) (Result, error) {
 }
 
 func commandResult(req Request, result localtools.CommandResult) (Result, error) {
-	return marshalResult(req, struct {
+	out, err := marshalResult(req, struct {
 		ExitCode int    `json:"exit_code"`
 		Output   string `json:"output"`
 	}{ExitCode: result.ExitCode, Output: result.Output})
+	if err != nil {
+		return Result{}, err
+	}
+	out.Metadata.ExitCode = result.ExitCode
+	out.Metadata.OutputBytes = result.OutputBytes
+	out.Metadata.OutputTruncated = result.OutputTruncated
+	out.Metadata.PID = result.PID
+	return out, nil
 }

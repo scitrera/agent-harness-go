@@ -30,6 +30,10 @@ func NewWorkspace(root string) (*Workspace, error) {
 	return &Workspace{root: evaluated}, nil
 }
 
+func (w *Workspace) Root() string {
+	return w.root
+}
+
 func (w *Workspace) ReadFile(ctx context.Context, relPath string, maxBytes int64) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
