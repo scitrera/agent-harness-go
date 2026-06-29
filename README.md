@@ -24,7 +24,7 @@ and is the open-source core that the Scitrera distribution ("sahara") builds on.
 
 The reference CLI (`cmd/agent-harness`) runs a chat against any OpenAI-compatible
 endpoint using only core packages + reference impls (file store, filesystem
-skills/commands, web + CLI channels) — no external transport or memory backend:
+skills/commands, web, TUI, and CLI channels) — no external transport or memory backend:
 
 ```sh
 export SAHARA_LLM_BASE_URL=http://localhost:11434/v1   # e.g. ollama / vLLM / OpenAI
@@ -34,11 +34,12 @@ go run ./cmd/agent-harness --workspace ./workspace
 ```
 
 By default it serves a browser chat UI (the **web** channel) on `127.0.0.1:8787`
-and opens a browser; pass `--cli` to run the stdin REPL instead. `--base-url` and
-`--model` can also be passed as flags (overriding the env). It seeds default
+and opens a browser; pass `--tui` for the terminal UI or `--cli` to run the
+stdin REPL instead. `--base-url` and `--model` can also be passed as flags
+(overriding the env). It seeds default
 workspace files (SOUL/AGENTS/…) on first run, persists history under
 `<workspace>/.agent-harness`, and streams replies to the active channel (SSE to
-the browser, or stdout in `--cli` mode).
+the browser, the terminal UI, or stdout in `--cli` mode).
 
 ### Web UI
 
@@ -46,6 +47,7 @@ the browser, or stdout in `--cli` mode).
 |------|-----|---------|-------|
 | `--addr` | `SAHARA_WEB_ADDR` | `127.0.0.1:8787` | web UI listen address |
 | `--cli` | — | `false` | run the stdin REPL instead of the web UI |
+| `--tui` | — | `false` | run the Bubble Tea terminal UI instead of the web UI |
 | `--no-browser` | — | `false` | don't auto-open a browser (web mode) |
 
 The web server has **no authentication** and is intended for **localhost use
