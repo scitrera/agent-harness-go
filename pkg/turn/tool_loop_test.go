@@ -6,6 +6,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/scitrera/agent-harness-go/pkg/channel"
 	"github.com/scitrera/agent-harness-go/pkg/contextpack"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 	"github.com/scitrera/agent-harness-go/pkg/provider"
@@ -89,21 +90,34 @@ func Test_Runner_Run_invokes_tool_call_and_reprompts_provider(t *testing.T) {
 	if store.messages[2].Role != protocol.RoleToolResult {
 		t.Fatalf("expected tool result message at index 2, got %#v", store.messages[2])
 	}
-	// Streamed lifecycle: started, tool_call part, tool_result part, final.
-	if len(publisher.events) != 4 {
-		t.Fatalf("expected started, tool_call, tool_result, final; got %#v", publisher.events)
+	// Streamed content lifecycle: started, tool_call part, tool_result part, final.
+	streamEvents := make([]protocol.ContentPart, 0)
+	contentEvents := make([]channel.Event, 0, len(publisher.events))
+	for _, event := range publisher.events {
+		if event.Type != "tool_lifecycle" {
+			contentEvents = append(contentEvents, event)
+		}
+		if event.Part != nil {
+			streamEvents = append(streamEvents, *event.Part)
+		}
 	}
-	if publisher.events[0].Type != "message_started" {
-		t.Fatalf("event[0] should be message_started: %#v", publisher.events[0])
+	if len(contentEvents) != 4 {
+		t.Fatalf("expected started, tool_call, tool_result, final; got %#v", contentEvents)
 	}
-	if publisher.events[1].Type != "part_appended" || publisher.events[1].Part == nil || publisher.events[1].Part.Type() != protocol.ContentToolCall {
-		t.Fatalf("event[1] should be a tool_call part_appended: %#v", publisher.events[1])
+	if contentEvents[0].Type != "message_started" {
+		t.Fatalf("event[0] should be message_started: %#v", contentEvents[0])
 	}
-	if publisher.events[2].Type != "part_appended" || publisher.events[2].Part == nil || publisher.events[2].Part.Type() != protocol.ContentToolResult {
-		t.Fatalf("event[2] should be a tool_result part_appended: %#v", publisher.events[2])
+	if contentEvents[1].Type != "part_appended" || contentEvents[1].Part == nil || contentEvents[1].Part.Type() != protocol.ContentToolCall {
+		t.Fatalf("event[1] should be a tool_call part_appended: %#v", contentEvents[1])
 	}
-	if publisher.events[3].Type != "message_final" {
-		t.Fatalf("event[3] should be message_final: %#v", publisher.events[3])
+	if contentEvents[2].Type != "part_appended" || contentEvents[2].Part == nil || contentEvents[2].Part.Type() != protocol.ContentToolResult {
+		t.Fatalf("event[2] should be a tool_result part_appended: %#v", contentEvents[2])
+	}
+	if contentEvents[3].Type != "message_final" {
+		t.Fatalf("event[3] should be message_final: %#v", contentEvents[3])
+	}
+	if len(streamEvents) != 2 {
+		t.Fatalf("expected streamed tool_call and tool_result parts, got %#v", streamEvents)
 	}
 }
 

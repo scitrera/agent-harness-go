@@ -42,6 +42,11 @@ func (r *Runner) activeModelName(threadID string) string {
 	return r.model
 }
 
+// ActiveModelName reports the model selected for threadID.
+func (r *Runner) ActiveModelName(threadID string) string {
+	return r.activeModelName(threadID)
+}
+
 // runModelCommand handles /model: bare or "list" lists the available models;
 // "<name>" (or "switch <name>") pins the thread's model. With no registry, only
 // the single configured model exists and switching is unavailable.

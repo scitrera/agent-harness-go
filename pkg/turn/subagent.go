@@ -3,9 +3,13 @@ package turn
 import (
 	"context"
 	"fmt"
+	"strings"
 
+	"github.com/scitrera/agent-harness-go/pkg/bootstrap"
 	"github.com/scitrera/agent-harness-go/pkg/harness"
+	"github.com/scitrera/agent-harness-go/pkg/hooks"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
+	"github.com/scitrera/agent-harness-go/pkg/provider"
 	"github.com/scitrera/agent-harness-go/pkg/subagent"
 	"github.com/scitrera/agent-harness-go/pkg/telemetry"
 	"github.com/scitrera/agent-harness-go/pkg/tools"
@@ -50,17 +54,77 @@ func (r *Runner) RunSubagent(ctx context.Context, req subagent.Request) (_ subag
 	if err != nil {
 		return subagent.Result{}, fmt.Errorf("subagent bootstrap: %w", err)
 	}
+	bootstrap = subagentBootstrap(bootstrap, req)
 	// nil publisher => the streamer is a no-op, so the sub-agent does not emit
 	// stream events to the user-facing channel.
 	streamer := newTurnStreamer(nil, addr, streamMessageID(addr), r.now, r.streamFlush)
-	// Discover tools relevant to the subagent's task (best-effort, same as Run).
-	tt := r.assembleTurnTools(ctx, addr, userMsg)
+	// Discover tools relevant to the subagent's task, then apply catalog policy.
+	tt := filterSubagentTools(r.assembleTurnTools(ctx, addr, userMsg), req)
 	// req.Model (from spawn_subagent's model arg) is an explicit override; with it
 	// empty the sub-agent uses normal capability-matched selection for its task.
 	subModel := r.resolveTurnModel(ctx, addr, userMsg, req.Model)
-	assistant, err := r.runProviderLoop(ctx, session, addr, userMsg, bootstrap, streamer, nil, subModel, nil, tt)
+	if req.MaxTurns > 0 {
+		ctx = withToolIterationLimit(ctx, req.MaxTurns)
+	}
+	approvers := subagentApprovers(req)
+	assistant, err := r.runProviderLoop(ctx, session, addr, userMsg, bootstrap, streamer, nil, subModel, approvers, tt)
 	if err != nil {
 		return subagent.Result{}, err
 	}
 	return subagent.Result{Text: textOf(assistant)}, nil
+}
+
+func subagentBootstrap(files []bootstrap.File, req subagent.Request) []bootstrap.File {
+	instructions := strings.TrimSpace(req.Instructions)
+	if instructions == "" {
+		return files
+	}
+	out := make([]bootstrap.File, 0, len(files)+1)
+	out = append(out, files...)
+	name := "SUBAGENT.md"
+	if req.AgentType != "" {
+		name = fmt.Sprintf("SUBAGENT.%s.md", req.AgentType)
+	}
+	out = append(out, bootstrap.File{Name: name, Content: instructions})
+	return out
+}
+
+func subagentApprovers(req subagent.Request) []hooks.ToolApprover {
+	if len(req.AllowedTools) == 0 && len(req.DeniedTools) == 0 {
+		return nil
+	}
+	return []hooks.ToolApprover{subagentToolPolicy{req: req}}
+}
+
+type subagentToolPolicy struct {
+	req subagent.Request
+}
+
+func (p subagentToolPolicy) ApproveTool(_ context.Context, call hooks.ToolCall) hooks.Decision {
+	if err := p.req.AllowsTool(call.Name); err != nil {
+		return hooks.Deny(err.Error())
+	}
+	return hooks.Allow()
+}
+
+func filterSubagentTools(tt turnTools, req subagent.Request) turnTools {
+	if len(req.AllowedTools) == 0 && len(req.DeniedTools) == 0 {
+		return tt
+	}
+	specs := make([]provider.ToolSpec, 0, len(tt.specs))
+	dynamicNames := make(map[string]struct{}, len(tt.dynamicNames))
+	for _, spec := range tt.specs {
+		if err := req.AllowsTool(spec.Name); err != nil {
+			continue
+		}
+		specs = append(specs, spec)
+		if _, ok := tt.dynamicNames[spec.Name]; ok {
+			dynamicNames[spec.Name] = struct{}{}
+		}
+	}
+	filtered := turnTools{specs: specs}
+	if len(dynamicNames) > 0 {
+		filtered.dynamicNames = dynamicNames
+	}
+	return filtered
 }

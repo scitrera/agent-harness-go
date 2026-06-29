@@ -2,34 +2,40 @@ package turn
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"time"
 
-	spec "github.com/scitrera/ecosystem-messaging-spec/go"
-
 	"github.com/scitrera/agent-harness-go/pkg/bootstrap"
 	"github.com/scitrera/agent-harness-go/pkg/harness"
 	"github.com/scitrera/agent-harness-go/pkg/hooks"
-	modelpkg "github.com/scitrera/agent-harness-go/pkg/model"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
-	"github.com/scitrera/agent-harness-go/pkg/provider"
 	"github.com/scitrera/agent-harness-go/pkg/telemetry"
 	"github.com/scitrera/agent-harness-go/pkg/tools"
 )
 
-const (
-	defaultMaxToolIterations = 4
-	// maxOverflowRetries bounds reactive context-overflow recovery: on a
-	// classified context_overflow error, the loop drops the oldest history and
-	// rebuilds, up to this many times before surfacing the error.
-	maxOverflowRetries = 2
-)
+const defaultMaxToolIterations = 4
+
+type toolIterationLimitKey struct{}
+
+func withToolIterationLimit(ctx context.Context, limit int) context.Context {
+	if limit <= 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, toolIterationLimitKey{}, limit)
+}
+
+func toolIterationLimit(ctx context.Context, fallback int) int {
+	limit, ok := ctx.Value(toolIterationLimitKey{}).(int)
+	if !ok || limit <= 0 {
+		return fallback
+	}
+	return limit
+}
 
 func (r *Runner) runProviderLoop(ctx context.Context, session *harness.Session, addr protocol.MessageAddress, user protocol.ChatMessage, bootstrap []bootstrap.File, streamer *turnStreamer, injected []protocol.ChatMessage, model string, perTurnApprovers []hooks.ToolApprover, tt turnTools) (protocol.ChatMessage, error) {
 	required := requiredCapabilities(user)
+	maxToolIterations := toolIterationLimit(ctx, r.maxToolIterations)
 	toolIterations := 0
 	for {
 		response, usedModel, err := r.callWithRecovery(ctx, addr, user, required, session.History(), bootstrap, injected, model, streamer, tt)
@@ -53,7 +59,7 @@ func (r *Runner) runProviderLoop(ctx context.Context, session *harness.Session, 
 		if len(calls) == 0 {
 			return assistant, nil
 		}
-		if toolIterations >= r.maxToolIterations {
+		if toolIterations >= maxToolIterations {
 			return protocol.ChatMessage{}, ErrToolLoopLimit
 		}
 		toolIterations++
@@ -71,12 +77,18 @@ func (r *Runner) runProviderLoop(ctx context.Context, session *harness.Session, 
 				call.Addr = addr
 			}
 			hc := hooks.ToolCall{CallID: call.CallID, Name: call.Name, Args: protocol.ArgsToRaw(call.Args), Addr: call.Addr}
+			r.publishToolEvent(ctx, toolEventFromCall(tools.ToolEventQueued, call))
 
 			// Gate: per-turn approvers (e.g. command allowed-tools) then the
 			// runner's configured approvers. A denial records a tool_result error
 			// so the model can adapt, without executing the tool.
-			if d := r.approveToolCall(ctx, hc, perTurnApprovers); !d.Allow {
-				part, err := protocol.NewToolResultPart(call.CallID, call.Name, toolErrorOutput(d.Reason), true)
+			decision := r.approveToolCall(ctx, hc, perTurnApprovers)
+			if !decision.Allow {
+				errorOutput := toolErrorOutput(decision.Reason)
+				finished := applyHookDecision(toolEventFromCall(tools.ToolEventFinished, call), decision)
+				finished.Result.PayloadBytes = len(errorOutput)
+				r.publishToolEvent(ctx, finished)
+				part, err := protocol.NewToolResultPart(call.CallID, call.Name, errorOutput, true)
 				if err != nil {
 					return protocol.ChatMessage{}, fmt.Errorf("denied tool result part: %w", err)
 				}
@@ -92,10 +104,12 @@ func (r *Runner) runProviderLoop(ctx context.Context, session *harness.Session, 
 			_, dynamicCall := tt.dynamicNames[call.Name]
 			toolStart := time.Now()
 			toolCtx, toolSpan := telemetry.StartTool(ctx, call.Name)
+			r.publishToolEvent(toolCtx, applyHookDecision(toolEventFromCall(tools.ToolEventStarted, call), decision))
 			r.notifyToolStarted(toolCtx, hc)
 			result, err := r.invokeTool(toolCtx, session, addr, call, tt)
 			r.notifyToolFinished(toolCtx, hc, err != nil, err)
 			telemetry.FinishErr(toolSpan, err)
+			r.publishToolEvent(toolCtx, finishToolEvent(call, toolStart, result, err))
 			// Canonical per-call log covering every tool — local/static, MCP,
 			// memory, subagent, and dynamic (bridge). The Go-error path below
 			// adds its own warn with the failure detail.
@@ -138,491 +152,5 @@ func (r *Runner) runProviderLoop(ctx context.Context, session *harness.Session, 
 				return protocol.ChatMessage{}, fmt.Errorf("stream tool result: %w", err)
 			}
 		}
-	}
-}
-
-// callWithRecovery builds the context and invokes the provider with the layered
-// failure-recovery safety net. Every recovery path acts at the provider-call
-// boundary — before any assistant message or tool result is appended — so it is
-// side-effect-safe: nothing is re-executed, whether the failure hits the first
-// model call or a call after several tool iterations.
-//
-//  1. context_overflow → drop oldest history and retry the SAME model (up to
-//     maxOverflowRetries); the request was rejected before any tokens streamed,
-//     so no partial output is duplicated.
-//  2. transient failure (rate_limit/server/overloaded/timeout/network) →
-//     context-aware backoff, then retry the SAME model, up to
-//     maxTransientRetries.
-//  3. otherwise (incl. overflow/transient budgets exhausted, or an unknown
-//     kind) → ask the Selector for a different model and retry. auth/bad_request
-//     are terminal and never switch models. oss's CapabilityDefault declines the
-//     fallback, so with no distribution Selector this surfaces the error.
-//
-// It returns the model that produced the response (possibly switched from the
-// input model by a fallback) so the caller can keep using it for the rest of the
-// turn.
-func (r *Runner) callWithRecovery(ctx context.Context, addr protocol.MessageAddress, user protocol.ChatMessage, required modelpkg.Capabilities, history []protocol.ChatMessage, bootstrap []bootstrap.File, injected []protocol.ChatMessage, model string, streamer *turnStreamer, tt turnTools) (provider.ChatResponse, string, error) {
-	overflowTrim := 0
-	transientRetries := 0
-	var modelAttempts []modelpkg.Attempt
-	for {
-		contextMessages, err := r.ctxMgr.Build(ctx, bootstrap, trimOldest(history, overflowTrim))
-		if err != nil {
-			return provider.ChatResponse{}, model, fmt.Errorf("assemble context: %w", err)
-		}
-		messages := mergeInjected(contextMessages, injected)
-		// Resolve provider-undeliverable attachments (vfs_ref-only image/file parts)
-		// on the outgoing request only — never persisted history. A resolver error
-		// is non-fatal: log and send what we have rather than failing the turn over
-		// an attachment (the model still gets the text).
-		if resolved, rerr := r.attachments.Resolve(ctx, addr, messages); rerr != nil {
-			slog.WarnContext(ctx, "attachment resolution failed; sending request without resolved attachments", slog.Any("err", rerr))
-		} else {
-			messages = resolved
-		}
-		req := provider.ChatRequest{Model: model, Messages: messages, Tools: tt.specs}
-		response, err := r.invokeProvider(ctx, req, streamer)
-		if err == nil {
-			return response, model, nil
-		}
-		// A cancelled context aborts the turn — never a recoverable provider failure.
-		if ctx.Err() != nil {
-			return provider.ChatResponse{}, model, err
-		}
-
-		var pe *provider.ProviderError
-		isProviderErr := errors.As(err, &pe)
-
-		// 1) context overflow: trim oldest history, retry the same model.
-		if isContextOverflow(err) && overflowTrim < maxOverflowRetries && len(history) > 1 {
-			overflowTrim++
-			slog.WarnContext(ctx, "context overflow; compacting and retrying",
-				slog.String("model", model), slog.Int("attempt", overflowTrim))
-			continue
-		}
-		// 2) transient: context-aware backoff, retry the same model.
-		if isProviderErr && pe.Retryable() && transientRetries < r.maxTransientRetries {
-			transientRetries++
-			slog.WarnContext(ctx, "transient provider failure; backing off and retrying",
-				slog.String("model", model), slog.String("kind", string(pe.Kind)), slog.Int("attempt", transientRetries))
-			if serr := r.backoffSleep(ctx, transientRetries); serr != nil {
-				return provider.ChatResponse{}, model, serr
-			}
-			continue
-		}
-		// 3) terminal kinds never switch models.
-		if isProviderErr && (pe.Kind == provider.FailureAuth || pe.Kind == provider.FailureBadRequest) {
-			return provider.ChatResponse{}, model, fmt.Errorf("provider chat: %w", err)
-		}
-		// 4) cross-model fallback via the Selector seam (opt-in; CapabilityDefault declines).
-		next, ok := r.nextFallbackModel(ctx, addr, user, required, model, &modelAttempts, err)
-		if !ok {
-			return provider.ChatResponse{}, model, fmt.Errorf("provider chat: %w", err)
-		}
-		slog.WarnContext(ctx, "provider failure; falling back to a different model",
-			slog.String("from", model), slog.String("to", next), slog.String("reason", fallbackReason(err)), slog.Any("err", err))
-		model = next
-		// Fresh per-model recovery budgets (a new model may have a larger context
-		// window and its own transient behavior).
-		overflowTrim = 0
-		transientRetries = 0
-	}
-}
-
-// backoffSleep waits r.retryBackoff(attempt), aborting early if ctx is cancelled.
-func (r *Runner) backoffSleep(ctx context.Context, attempt int) error {
-	d := r.retryBackoff(attempt)
-	if d <= 0 {
-		return nil
-	}
-	t := time.NewTimer(d)
-	defer t.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-t.C:
-		return nil
-	}
-}
-
-// nextFallbackModel records the just-failed model and asks the Selector for a
-// different model to try. It returns ("", false) when no registry/selector is
-// wired, the per-turn model-attempt budget is exhausted, or the Selector
-// declines ("") / returns the same or an already-failed model.
-func (r *Runner) nextFallbackModel(ctx context.Context, addr protocol.MessageAddress, user protocol.ChatMessage, required modelpkg.Capabilities, current string, attempts *[]modelpkg.Attempt, lastErr error) (string, bool) {
-	if r.modelSelector == nil || r.modelRegistry == nil {
-		return "", false
-	}
-	*attempts = append(*attempts, modelpkg.Attempt{Model: current, Reason: fallbackReason(lastErr)})
-	if len(*attempts) >= r.maxModelAttempts {
-		return "", false
-	}
-	next, err := r.modelSelector.SelectModel(ctx, modelpkg.SelectInput{
-		Addr:     addr,
-		User:     user,
-		Required: required,
-		Registry: r.modelRegistry,
-		Default:  r.model,
-		Attempts: *attempts,
-	})
-	if err != nil {
-		slog.WarnContext(ctx, "model fallback selection failed", slog.Any("err", err))
-		return "", false
-	}
-	if next == "" || next == current {
-		return "", false
-	}
-	for _, a := range *attempts {
-		if a.Model == next {
-			return "", false // selector returned an already-failed model; stop
-		}
-	}
-	return next, true
-}
-
-// fallbackReason extracts the provider failure kind as a string (empty if the
-// error is not a classified ProviderError).
-func fallbackReason(err error) string {
-	var pe *provider.ProviderError
-	if errors.As(err, &pe) {
-		return string(pe.Kind)
-	}
-	return ""
-}
-
-// defaultRetryBackoff is exponential: 250ms * 2^(attempt-1), capped at 8s.
-func defaultRetryBackoff(attempt int) time.Duration {
-	if attempt < 1 {
-		attempt = 1
-	}
-	if attempt > 16 {
-		attempt = 16 // guard the shift from overflowing
-	}
-	d := 250 * time.Millisecond << (attempt - 1)
-	if d > 8*time.Second {
-		return 8 * time.Second
-	}
-	return d
-}
-
-// invokeProvider issues one provider call, streaming tokens via the streamer
-// when the provider supports it and streaming is enabled.
-func (r *Runner) invokeProvider(ctx context.Context, req provider.ChatRequest, streamer *turnStreamer) (resp provider.ChatResponse, err error) {
-	ctx, span := telemetry.StartLLM(ctx, req.Model)
-	defer telemetry.Finish(span, &err)
-	// Log every provider call + its outcome. The LLM request is otherwise opaque
-	// in the harness logs, so a failed call (network/auth/timeout) leaves no
-	// trace beyond the task fail reason — which is exactly when we most need to
-	// know the model, transport, and error.
-	attrs := []any{
-		slog.String("model", req.Model),
-		slog.Int("messages", len(req.Messages)),
-		slog.Int("tools", len(req.Tools)),
-	}
-	// Surface the multimodal breakdown of the *outgoing* request (post-resolution):
-	// how many image/file parts the model will actually see and via which carrier.
-	// A non-zero "unresolved" here means a part still has no deliverable carrier
-	// after the attachment resolver ran — the breakdown that explains a "I don't
-	// see the attached image" reply.
-	if mm := summarizeMultimodal(req.Messages); mm.any() {
-		attrs = append(attrs, slog.Group("multimodal",
-			slog.Int("images", mm.images),
-			slog.Int("files", mm.files),
-			slog.Int("data_uri", mm.dataURI),
-			slog.Int("uri", mm.uri),
-			slog.Int("vfs_ref", mm.vfsRef),
-			slog.Int("unresolved", mm.unresolved),
-		))
-	}
-	slog.InfoContext(ctx, "llm: provider call", attrs...)
-	defer func() {
-		if err != nil {
-			slog.ErrorContext(ctx, "llm: provider call failed",
-				slog.String("model", req.Model),
-				slog.Any("err", err),
-			)
-		}
-	}()
-	if sp, ok := r.provider.(StreamingProvider); ok && r.streaming {
-		textIndex := -1
-		onDelta := func(text string) error {
-			if textIndex < 0 {
-				idx, derr := streamer.appendTextStream(ctx)
-				if derr != nil {
-					return derr
-				}
-				textIndex = idx
-			}
-			return streamer.tokenDelta(ctx, textIndex, text)
-		}
-		resp, err = sp.ChatStream(ctx, req, onDelta)
-		return resp, err
-	}
-	resp, err = r.provider.Chat(ctx, req)
-	return resp, err
-}
-
-// multimodalStats counts image/file content parts across a set of messages,
-// bucketed by carrier. "unresolved" parts (vfs_ref-only or no carrier at all)
-// are not deliverable to the model because the harness has no VFS resolver, so
-// they are dropped during provider lowering — tracking them separately is what
-// makes a missing-attachment turn debuggable from the logs.
-type multimodalStats struct {
-	images     int
-	files      int
-	dataURI    int
-	uri        int
-	vfsRef     int
-	unresolved int
-}
-
-func (s multimodalStats) any() bool { return s.images > 0 || s.files > 0 }
-
-// tally buckets one part by the strongest carrier it offers (inline data first,
-// then a fetchable uri, then a vfs_ref the harness can't currently resolve).
-func (s *multimodalStats) tally(dataURI, uri, vfsRef string) {
-	switch {
-	case dataURI != "":
-		s.dataURI++
-	case uri != "":
-		s.uri++
-	case vfsRef != "":
-		s.vfsRef++
-		s.unresolved++
-	default:
-		s.unresolved++
-	}
-}
-
-func summarizeMultimodal(messages []protocol.ChatMessage) multimodalStats {
-	var s multimodalStats
-	for _, m := range messages {
-		for _, p := range m.Content {
-			switch p.Type() {
-			case protocol.ContentImage:
-				if img, ok := p.AsImage(); ok {
-					s.images++
-					s.tally(img.DataURI, img.URI, img.VFSRef)
-				}
-			case protocol.ContentFile:
-				if f, ok := p.AsFile(); ok {
-					s.files++
-					// FilePart has no inline data_uri carrier.
-					s.tally("", f.URI, f.VFSRef)
-				}
-			}
-		}
-	}
-	return s
-}
-
-// mergeInjected inserts injected context (daily notes, recalled memories) right
-// after the system prompt.
-func mergeInjected(contextMessages, injected []protocol.ChatMessage) []protocol.ChatMessage {
-	if len(injected) == 0 || len(contextMessages) == 0 {
-		return contextMessages
-	}
-	merged := make([]protocol.ChatMessage, 0, len(contextMessages)+len(injected))
-	merged = append(merged, contextMessages[0])
-	merged = append(merged, injected...)
-	merged = append(merged, contextMessages[1:]...)
-	return merged
-}
-
-// trimOldest drops the oldest fraction of history for overflow retry attempt N
-// (attempt 0 = no trim). The most recent message is always retained; pairing is
-// repaired by the provider's transcript sanitizer.
-func trimOldest(history []protocol.ChatMessage, attempt int) []protocol.ChatMessage {
-	if attempt <= 0 || len(history) <= 1 {
-		return history
-	}
-	drop := len(history) * attempt / (maxOverflowRetries + 1)
-	if drop >= len(history) {
-		drop = len(history) - 1
-	}
-	return history[drop:]
-}
-
-// approveToolCall consults the per-turn approvers (e.g. command allowed-tools)
-// first, then the runner's configured approvers. First denial wins.
-func (r *Runner) approveToolCall(ctx context.Context, call hooks.ToolCall, perTurn []hooks.ToolApprover) hooks.Decision {
-	if d := hooks.Approve(ctx, call, perTurn); !d.Allow {
-		return d
-	}
-	return hooks.Approve(ctx, call, r.approvers)
-}
-
-func (r *Runner) notifyToolStarted(ctx context.Context, call hooks.ToolCall) {
-	for _, o := range r.observers {
-		if o != nil {
-			o.ToolStarted(ctx, call)
-		}
-	}
-}
-
-func (r *Runner) notifyToolFinished(ctx context.Context, call hooks.ToolCall, isError bool, err error) {
-	for _, o := range r.observers {
-		if o != nil {
-			o.ToolFinished(ctx, call, isError, err)
-		}
-	}
-}
-
-// toolErrorOutput is the tool_result output payload recorded when a tool call is
-// denied by an approver or fails to invoke (e.g. registry policy denial,
-// execution error) — the error is handed back to the model, not raised.
-func toolErrorOutput(reason string) json.RawMessage {
-	out, err := json.Marshal(map[string]string{"error": reason})
-	if err != nil {
-		return json.RawMessage(`{"error":"tool failed"}`)
-	}
-	return out
-}
-
-func isContextOverflow(err error) bool {
-	var pe *provider.ProviderError
-	return errors.As(err, &pe) && pe.Kind == provider.FailureContextOverflow
-}
-
-func toolCallsFromMessage(msg protocol.ChatMessage) ([]protocol.ToolInvokeEnvelope, error) {
-	calls := make([]protocol.ToolInvokeEnvelope, 0)
-	for _, part := range msg.Content {
-		if call, ok := protocol.ToolCallFromPart(part); ok {
-			calls = append(calls, call)
-		}
-	}
-	return calls, nil
-}
-
-// invokeTool dispatches a tool call: a dynamically-discovered tool (one surfaced
-// by the DynamicToolProvider this turn, not in the static registry) routes to the
-// provider; everything else goes through the static registry's approval-aware
-// path. The hooks approval gate (approveToolCall) has already run for both in the
-// loop; the registry's requires-approval flow applies only to static tools.
-func (r *Runner) invokeTool(ctx context.Context, session *harness.Session, addr protocol.MessageAddress, call protocol.ToolInvokeEnvelope, tt turnTools) (tools.Result, error) {
-	if _, dynamic := tt.dynamicNames[call.Name]; dynamic {
-		return r.invokeDynamic(ctx, call)
-	}
-	return r.invokeWithApproval(ctx, session, addr, call)
-}
-
-// invokeDynamic invokes a discovered tool via the DynamicToolProvider, forwarding
-// the per-turn OBO authority (on ctx and on the request) so the remote side can
-// resolve the acting user.
-func (r *Runner) invokeDynamic(ctx context.Context, call protocol.ToolInvokeEnvelope) (tools.Result, error) {
-	req := tools.RequestFromEnvelope(call)
-	if auth, ok := tools.MemoryAuthorityFrom(ctx); ok {
-		req.Authority = auth
-	}
-	return r.dynamicTools.Invoke(ctx, req)
-}
-
-// invokeWithApproval invokes a tool; if the policy gates it as "requires
-// approval" and an approval channel is wired, it emits an approval_request part,
-// blocks for the user's approve/deny control (bounded by ApprovalTimeout), and
-// on approval re-invokes (bypassing the gate) plus records any session/always
-// grant. On deny/expire it returns the original requires-approval error so the
-// caller's error-feedback path records it for the model. With no approval
-// channel wired it behaves exactly as a plain invoke.
-func (r *Runner) invokeWithApproval(ctx context.Context, session *harness.Session, addr protocol.MessageAddress, call protocol.ToolInvokeEnvelope) (tools.Result, error) {
-	result, err := session.InvokeTool(ctx, call)
-	if err == nil || r.approvals == nil || !errors.Is(err, tools.ErrToolRequiresApproval) {
-		return result, err
-	}
-
-	// Durable "always" grants: before prompting, consult the durable grant store
-	// (when wired). A prior "always" grant — persisted under the user's OBO —
-	// short-circuits the prompt: record a session grant so subsequent calls in
-	// this turn skip the gate too, then run the tool approved. A store error is
-	// non-fatal: log and fall through to the normal prompt flow.
-	if r.grantStore != nil {
-		granted, gerr := r.grantStore.IsGranted(ctx, addr.WorkspaceID, call.Name)
-		if gerr != nil {
-			slog.WarnContext(ctx, "durable grant lookup failed", slog.String("tool", call.Name), slog.Any("err", gerr))
-		} else if granted {
-			if r.approvalGranter != nil {
-				r.approvalGranter.GrantSession(addr.WorkspaceID, call.Name)
-			}
-			return session.InvokeToolApproved(ctx, call)
-		}
-	}
-
-	reqID := call.CallID
-	emitter, _ := tools.PartEmitterFrom(ctx)
-	scopes := r.approvalScopes
-	if len(scopes) == 0 {
-		scopes = []string{"once", "session", "always"}
-	}
-	r.emitApproval(ctx, emitter, reqID, call, scopes, spec.ApprovalPending, "tool is not pre-authorized")
-	slog.InfoContext(ctx, "tool approval requested; awaiting user decision",
-		slog.String("tool", call.Name),
-		slog.String("call_id", reqID),
-		slog.String("task", addr.TaskID),
-		slog.String("workspace", addr.WorkspaceID),
-	)
-
-	awaitCtx := ctx
-	if r.approvalTimeout > 0 {
-		var cancel context.CancelFunc
-		awaitCtx, cancel = context.WithTimeout(ctx, r.approvalTimeout)
-		defer cancel()
-	}
-	decision, awaitErr := r.approvals.Await(awaitCtx, addr.TaskID, reqID)
-	if ctx.Err() != nil {
-		// The turn itself was cancelled (not just the approval timeout) — abort.
-		return tools.Result{}, ctx.Err()
-	}
-	if awaitErr != nil || !decision.Granted {
-		status := spec.ApprovalDenied
-		if awaitErr != nil {
-			status = spec.ApprovalExpired // timed out waiting for a response
-		}
-		r.emitApproval(ctx, emitter, reqID, call, scopes, status, "")
-		slog.InfoContext(ctx, "tool approval not granted",
-			slog.String("tool", call.Name),
-			slog.String("call_id", reqID),
-			slog.String("status", string(status)),
-		)
-		return tools.Result{}, err // original requires-approval error → fed back to the model
-	}
-
-	// Granted: record a grant so future calls in scope don't re-prompt.
-	if r.approvalGranter != nil {
-		switch decision.Scope {
-		case "session":
-			r.approvalGranter.GrantSession(addr.WorkspaceID, call.Name)
-		case "always":
-			if gerr := r.approvalGranter.GrantAlways(ctx, addr.WorkspaceID, call.Name); gerr != nil {
-				slog.WarnContext(ctx, "persist always-grant failed", slog.String("tool", call.Name), slog.Any("err", gerr))
-			}
-		}
-	}
-	r.emitApproval(ctx, emitter, reqID, call, scopes, spec.ApprovalApproved, "")
-	slog.InfoContext(ctx, "tool approval granted",
-		slog.String("tool", call.Name),
-		slog.String("call_id", reqID),
-		slog.String("scope", decision.Scope),
-	)
-	return session.InvokeToolApproved(ctx, call)
-}
-
-// emitApproval upserts an approval_request part (pending first, then the
-// resolved status) on the current message stream so the user can answer and the
-// resolved prompt persists. No-op without an emitter.
-func (r *Runner) emitApproval(ctx context.Context, emitter tools.PartEmitter, reqID string, call protocol.ToolInvokeEnvelope, scopes []string, status spec.ApprovalStatus, reason string) {
-	if emitter == nil {
-		return
-	}
-	part := spec.NewApprovalRequestPart(spec.ApprovalRequestPart{
-		ID:      reqID,
-		Tool:    call.Name,
-		Summary: "Use the " + call.Name + " tool",
-		Args:    protocol.ArgsToRaw(call.Args),
-		Options: scopes,
-		Status:  status,
-		Reason:  reason,
-	})
-	if err := emitter.UpsertPart(ctx, part); err != nil {
-		slog.WarnContext(ctx, "emit approval_request failed", slog.Any("err", err))
 	}
 }
