@@ -73,10 +73,13 @@ type Runner struct {
 	threadModels   map[string]string
 	threadModelsMu sync.Mutex
 
-	maxToolIterations int
-	streaming         bool
-	streamFlush       time.Duration
-	toolSpecs         []provider.ToolSpec
+	maxToolIterations   int
+	maxModelAttempts    int
+	maxTransientRetries int
+	retryBackoff        func(attempt int) time.Duration
+	streaming           bool
+	streamFlush         time.Duration
+	toolSpecs           []provider.ToolSpec
 
 	memory                MemoryService
 	memAutoCommit         bool
@@ -160,6 +163,20 @@ type Config struct {
 	// model.CapabilityDefault. The distribution plugs in a cost/complexity router
 	// here (policy stays out of oss).
 	ModelSelector     modelpkg.Selector
+	// MaxModelAttempts bounds how many distinct models a single turn may try
+	// before surfacing the error (the initial model plus cross-model fallbacks).
+	// Only relevant with a ModelSelector that opts into fallback — oss's
+	// CapabilityDefault never does. <=0 → default 3.
+	MaxModelAttempts int
+	// MaxTransientRetries bounds same-model backoff retries for a transient
+	// provider failure (rate_limit/server/overloaded/timeout/network) before
+	// escalating to a fallback model or surfacing the error. 0 → default 2;
+	// negative → disabled (surface immediately, the pre-safety-net behavior).
+	MaxTransientRetries int
+	// RetryBackoff returns the wait before transient retry attempt n (1-based).
+	// nil → an exponential default (250ms, doubling, capped at 8s). The wait is
+	// context-aware (a cancelled ctx aborts it).
+	RetryBackoff      func(attempt int) time.Duration
 	MaxToolIterations int
 	Streaming         bool
 	// StreamFlushInterval coalesces streamed token deltas: deltas are buffered and
@@ -292,6 +309,21 @@ func NewRunner(cfg Config) (*Runner, error) {
 	if modelSelector == nil && cfg.ModelRegistry != nil {
 		modelSelector = modelpkg.CapabilityDefault{}
 	}
+	maxModelAttempts := cfg.MaxModelAttempts
+	if maxModelAttempts <= 0 {
+		maxModelAttempts = 3
+	}
+	maxTransientRetries := cfg.MaxTransientRetries
+	switch {
+	case maxTransientRetries == 0:
+		maxTransientRetries = 2 // default on (bounded); closes the documented transient-retry gap
+	case maxTransientRetries < 0:
+		maxTransientRetries = 0 // explicitly disabled
+	}
+	retryBackoff := cfg.RetryBackoff
+	if retryBackoff == nil {
+		retryBackoff = defaultRetryBackoff
+	}
 	return &Runner{
 		store:                 cfg.Store,
 		loader:                cfg.Loader,
@@ -306,6 +338,9 @@ func NewRunner(cfg Config) (*Runner, error) {
 		maxToolIterations:     cfg.MaxToolIterations,
 		streaming:             cfg.Streaming,
 		streamFlush:           cfg.StreamFlushInterval,
+		maxModelAttempts:      maxModelAttempts,
+		maxTransientRetries:   maxTransientRetries,
+		retryBackoff:          retryBackoff,
 		toolSpecs:             staticSpecs,
 		memory:                cfg.Memory,
 		memAutoCommit:         cfg.MemoryAutoCommit,
@@ -528,7 +563,7 @@ func (r *Runner) Run(ctx context.Context, addr protocol.MessageAddress, user pro
 	// Per-turn tool set: static tools plus any dynamically-discovered ones (the
 	// DynamicToolProvider is queried with the user's message for relevant tools).
 	tt := r.assembleTurnTools(ctx, addr, user)
-	assistant, err := r.runProviderLoop(ctx, session, addr, bootstrap, streamer, injected, model, perTurnApprovers, tt)
+	assistant, err := r.runProviderLoop(ctx, session, addr, user, bootstrap, streamer, injected, model, perTurnApprovers, tt)
 	if err != nil {
 		return protocol.ChatMessage{}, err
 	}

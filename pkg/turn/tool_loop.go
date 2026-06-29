@@ -13,6 +13,7 @@ import (
 	"github.com/scitrera/agent-harness-go/pkg/bootstrap"
 	"github.com/scitrera/agent-harness-go/pkg/harness"
 	"github.com/scitrera/agent-harness-go/pkg/hooks"
+	modelpkg "github.com/scitrera/agent-harness-go/pkg/model"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 	"github.com/scitrera/agent-harness-go/pkg/provider"
 	"github.com/scitrera/agent-harness-go/pkg/telemetry"
@@ -27,13 +28,17 @@ const (
 	maxOverflowRetries = 2
 )
 
-func (r *Runner) runProviderLoop(ctx context.Context, session *harness.Session, addr protocol.MessageAddress, bootstrap []bootstrap.File, streamer *turnStreamer, injected []protocol.ChatMessage, model string, perTurnApprovers []hooks.ToolApprover, tt turnTools) (protocol.ChatMessage, error) {
+func (r *Runner) runProviderLoop(ctx context.Context, session *harness.Session, addr protocol.MessageAddress, user protocol.ChatMessage, bootstrap []bootstrap.File, streamer *turnStreamer, injected []protocol.ChatMessage, model string, perTurnApprovers []hooks.ToolApprover, tt turnTools) (protocol.ChatMessage, error) {
+	required := requiredCapabilities(user)
 	toolIterations := 0
 	for {
-		response, err := r.callWithOverflowRecovery(ctx, addr, session.History(), bootstrap, injected, model, streamer, tt)
+		response, usedModel, err := r.callWithRecovery(ctx, addr, user, required, session.History(), bootstrap, injected, model, streamer, tt)
 		if err != nil {
 			return protocol.ChatMessage{}, err
 		}
+		// Stick with the (possibly escalated) model for the rest of the turn:
+		// reverting after a fallback would likely re-hit the original failure.
+		model = usedModel
 		assistant := response.Message
 		if assistant.Addr.ThreadID == "" {
 			assistant.Addr = addr
@@ -136,15 +141,34 @@ func (r *Runner) runProviderLoop(ctx context.Context, session *harness.Session, 
 	}
 }
 
-// callWithOverflowRecovery builds the context and invokes the provider. On a
-// classified context_overflow error it drops the oldest history and retries
-// (the request was rejected before any tokens streamed, so no partial output is
-// duplicated), up to maxOverflowRetries.
-func (r *Runner) callWithOverflowRecovery(ctx context.Context, addr protocol.MessageAddress, history []protocol.ChatMessage, bootstrap []bootstrap.File, injected []protocol.ChatMessage, model string, streamer *turnStreamer, tt turnTools) (provider.ChatResponse, error) {
-	for attempt := 0; ; attempt++ {
-		contextMessages, err := r.ctxMgr.Build(ctx, bootstrap, trimOldest(history, attempt))
+// callWithRecovery builds the context and invokes the provider with the layered
+// failure-recovery safety net. Every recovery path acts at the provider-call
+// boundary — before any assistant message or tool result is appended — so it is
+// side-effect-safe: nothing is re-executed, whether the failure hits the first
+// model call or a call after several tool iterations.
+//
+//  1. context_overflow → drop oldest history and retry the SAME model (up to
+//     maxOverflowRetries); the request was rejected before any tokens streamed,
+//     so no partial output is duplicated.
+//  2. transient failure (rate_limit/server/overloaded/timeout/network) →
+//     context-aware backoff, then retry the SAME model, up to
+//     maxTransientRetries.
+//  3. otherwise (incl. overflow/transient budgets exhausted, or an unknown
+//     kind) → ask the Selector for a different model and retry. auth/bad_request
+//     are terminal and never switch models. oss's CapabilityDefault declines the
+//     fallback, so with no distribution Selector this surfaces the error.
+//
+// It returns the model that produced the response (possibly switched from the
+// input model by a fallback) so the caller can keep using it for the rest of the
+// turn.
+func (r *Runner) callWithRecovery(ctx context.Context, addr protocol.MessageAddress, user protocol.ChatMessage, required modelpkg.Capabilities, history []protocol.ChatMessage, bootstrap []bootstrap.File, injected []protocol.ChatMessage, model string, streamer *turnStreamer, tt turnTools) (provider.ChatResponse, string, error) {
+	overflowTrim := 0
+	transientRetries := 0
+	var modelAttempts []modelpkg.Attempt
+	for {
+		contextMessages, err := r.ctxMgr.Build(ctx, bootstrap, trimOldest(history, overflowTrim))
 		if err != nil {
-			return provider.ChatResponse{}, fmt.Errorf("assemble context: %w", err)
+			return provider.ChatResponse{}, model, fmt.Errorf("assemble context: %w", err)
 		}
 		messages := mergeInjected(contextMessages, injected)
 		// Resolve provider-undeliverable attachments (vfs_ref-only image/file parts)
@@ -159,14 +183,126 @@ func (r *Runner) callWithOverflowRecovery(ctx context.Context, addr protocol.Mes
 		req := provider.ChatRequest{Model: model, Messages: messages, Tools: tt.specs}
 		response, err := r.invokeProvider(ctx, req, streamer)
 		if err == nil {
-			return response, nil
+			return response, model, nil
 		}
-		if isContextOverflow(err) && attempt < maxOverflowRetries && len(history) > 1 {
-			slog.WarnContext(ctx, "context overflow; compacting and retrying", slog.Int("attempt", attempt+1))
+		// A cancelled context aborts the turn — never a recoverable provider failure.
+		if ctx.Err() != nil {
+			return provider.ChatResponse{}, model, err
+		}
+
+		var pe *provider.ProviderError
+		isProviderErr := errors.As(err, &pe)
+
+		// 1) context overflow: trim oldest history, retry the same model.
+		if isContextOverflow(err) && overflowTrim < maxOverflowRetries && len(history) > 1 {
+			overflowTrim++
+			slog.WarnContext(ctx, "context overflow; compacting and retrying",
+				slog.String("model", model), slog.Int("attempt", overflowTrim))
 			continue
 		}
-		return provider.ChatResponse{}, fmt.Errorf("provider chat: %w", err)
+		// 2) transient: context-aware backoff, retry the same model.
+		if isProviderErr && pe.Retryable() && transientRetries < r.maxTransientRetries {
+			transientRetries++
+			slog.WarnContext(ctx, "transient provider failure; backing off and retrying",
+				slog.String("model", model), slog.String("kind", string(pe.Kind)), slog.Int("attempt", transientRetries))
+			if serr := r.backoffSleep(ctx, transientRetries); serr != nil {
+				return provider.ChatResponse{}, model, serr
+			}
+			continue
+		}
+		// 3) terminal kinds never switch models.
+		if isProviderErr && (pe.Kind == provider.FailureAuth || pe.Kind == provider.FailureBadRequest) {
+			return provider.ChatResponse{}, model, fmt.Errorf("provider chat: %w", err)
+		}
+		// 4) cross-model fallback via the Selector seam (opt-in; CapabilityDefault declines).
+		next, ok := r.nextFallbackModel(ctx, addr, user, required, model, &modelAttempts, err)
+		if !ok {
+			return provider.ChatResponse{}, model, fmt.Errorf("provider chat: %w", err)
+		}
+		slog.WarnContext(ctx, "provider failure; falling back to a different model",
+			slog.String("from", model), slog.String("to", next), slog.String("reason", fallbackReason(err)), slog.Any("err", err))
+		model = next
+		// Fresh per-model recovery budgets (a new model may have a larger context
+		// window and its own transient behavior).
+		overflowTrim = 0
+		transientRetries = 0
 	}
+}
+
+// backoffSleep waits r.retryBackoff(attempt), aborting early if ctx is cancelled.
+func (r *Runner) backoffSleep(ctx context.Context, attempt int) error {
+	d := r.retryBackoff(attempt)
+	if d <= 0 {
+		return nil
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
+}
+
+// nextFallbackModel records the just-failed model and asks the Selector for a
+// different model to try. It returns ("", false) when no registry/selector is
+// wired, the per-turn model-attempt budget is exhausted, or the Selector
+// declines ("") / returns the same or an already-failed model.
+func (r *Runner) nextFallbackModel(ctx context.Context, addr protocol.MessageAddress, user protocol.ChatMessage, required modelpkg.Capabilities, current string, attempts *[]modelpkg.Attempt, lastErr error) (string, bool) {
+	if r.modelSelector == nil || r.modelRegistry == nil {
+		return "", false
+	}
+	*attempts = append(*attempts, modelpkg.Attempt{Model: current, Reason: fallbackReason(lastErr)})
+	if len(*attempts) >= r.maxModelAttempts {
+		return "", false
+	}
+	next, err := r.modelSelector.SelectModel(ctx, modelpkg.SelectInput{
+		Addr:     addr,
+		User:     user,
+		Required: required,
+		Registry: r.modelRegistry,
+		Default:  r.model,
+		Attempts: *attempts,
+	})
+	if err != nil {
+		slog.WarnContext(ctx, "model fallback selection failed", slog.Any("err", err))
+		return "", false
+	}
+	if next == "" || next == current {
+		return "", false
+	}
+	for _, a := range *attempts {
+		if a.Model == next {
+			return "", false // selector returned an already-failed model; stop
+		}
+	}
+	return next, true
+}
+
+// fallbackReason extracts the provider failure kind as a string (empty if the
+// error is not a classified ProviderError).
+func fallbackReason(err error) string {
+	var pe *provider.ProviderError
+	if errors.As(err, &pe) {
+		return string(pe.Kind)
+	}
+	return ""
+}
+
+// defaultRetryBackoff is exponential: 250ms * 2^(attempt-1), capped at 8s.
+func defaultRetryBackoff(attempt int) time.Duration {
+	if attempt < 1 {
+		attempt = 1
+	}
+	if attempt > 16 {
+		attempt = 16 // guard the shift from overflowing
+	}
+	d := 250 * time.Millisecond << (attempt - 1)
+	if d > 8*time.Second {
+		return 8 * time.Second
+	}
+	return d
 }
 
 // invokeProvider issues one provider call, streaming tokens via the streamer

@@ -58,7 +58,7 @@ func (r *Runner) RunSubagent(ctx context.Context, req subagent.Request) (_ subag
 	// req.Model (from spawn_subagent's model arg) is an explicit override; with it
 	// empty the sub-agent uses normal capability-matched selection for its task.
 	subModel := r.resolveTurnModel(ctx, addr, userMsg, req.Model)
-	assistant, err := r.runProviderLoop(ctx, session, addr, bootstrap, streamer, nil, subModel, nil, tt)
+	assistant, err := r.runProviderLoop(ctx, session, addr, userMsg, bootstrap, streamer, nil, subModel, nil, tt)
 	if err != nil {
 		return subagent.Result{}, err
 	}

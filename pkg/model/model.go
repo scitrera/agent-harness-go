@@ -121,6 +121,22 @@ type SelectInput struct {
 	Required Capabilities
 	Registry *Registry
 	Default  string
+	// Attempts are the models that already failed this turn, in order (empty on
+	// the initial pick). The runner re-consults the Selector after a *retryable*
+	// provider failure that same-model recovery (backoff, context trim) could not
+	// resolve, so a Selector can avoid a model that just failed and escalate
+	// (e.g. to a larger-context or higher tier). Returning "" declines further
+	// fallback and surfaces the error. oss's CapabilityDefault always declines on
+	// retry — cross-model fallback is opt-in via a distribution Selector.
+	Attempts []Attempt
+}
+
+// Attempt records a model that failed within the current turn. Reason is the
+// provider failure classification as a string (kept a string so this package
+// stays free of a provider dependency); empty when unknown.
+type Attempt struct {
+	Model  string
+	Reason string
 }
 
 // Selector picks the model name for a turn. oss calls it for the auto path only
@@ -137,6 +153,13 @@ type Selector interface {
 type CapabilityDefault struct{}
 
 func (CapabilityDefault) SelectModel(_ context.Context, in SelectInput) (string, error) {
+	// Pure initial-pick: oss never switches models on failure. Once a model has
+	// failed this turn (the runner re-consults the Selector after a retryable
+	// failure), decline so the error surfaces. Cross-model fallback is opt-in via
+	// a distribution Selector (e.g. the sahara cost router).
+	if len(in.Attempts) > 0 {
+		return "", nil
+	}
 	def := in.Default
 	if m, ok := in.Registry.Get(def); ok && m.Capabilities.Satisfies(in.Required) {
 		return def, nil
