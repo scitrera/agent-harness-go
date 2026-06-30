@@ -89,7 +89,7 @@ func Test_Session_DropTrailingUserDuplicate_ignores_non_user_tail(t *testing.T) 
 	}
 }
 
-func Test_Session_InvokeTool_persists_tool_result_when_local_tool_succeeds(t *testing.T) {
+func Test_Session_InvokeTool_runs_tool_without_persisting_result(t *testing.T) {
 	// Given
 	ctx := context.Background()
 	root := t.TempDir()
@@ -121,12 +121,15 @@ func Test_Session_InvokeTool_persists_tool_result_when_local_tool_succeeds(t *te
 	if err != nil {
 		t.Fatalf("invoke tool: %v", err)
 	}
+	// InvokeTool runs the tool but does NOT persist the result — that is the
+	// turn loop's job (single append site for static + dynamic + denied + errored
+	// results), so history stays empty here.
 	loaded, err := store.LoadHistory(ctx, "thread-1")
 	if err != nil {
 		t.Fatalf("load history: %v", err)
 	}
-	if len(loaded) != 1 || loaded[0].Role != protocol.RoleToolResult {
-		t.Fatalf("expected one tool result message, got %#v", loaded)
+	if len(loaded) != 0 {
+		t.Fatalf("expected InvokeTool to persist nothing (loop owns that), got %#v", loaded)
 	}
 	updated, err := os.ReadFile(filepath.Join(root, "SOUL.md"))
 	if err != nil {

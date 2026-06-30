@@ -2,9 +2,11 @@ package turn
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 
+	"github.com/scitrera/agent-harness-go/pkg/contextpack"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 	"github.com/scitrera/agent-harness-go/pkg/provider"
 	"github.com/scitrera/agent-harness-go/pkg/tools"
@@ -94,5 +96,64 @@ func TestInvokeTool_RoutesDynamicWithAuthority(t *testing.T) {
 	}
 	if got := fake.invoked[0].Authority; got.SubjectID != "alice" || got.GrantID != "g1" {
 		t.Errorf("dynamic invoke authority = %+v, want subject=alice grant=g1", got)
+	}
+}
+
+// Regression: a DYNAMIC (discovered) tool's result must land in session history
+// just like a static tool's, so the model sees it on the next iteration and
+// doesn't re-call the tool in an infinite loop (the bridge frontend_*/backend_*
+// looping bug). Exercises the full turn loop, not just invokeTool.
+func Test_Runner_Run_dynamic_tool_result_appended_to_history(t *testing.T) {
+	ctx := context.Background()
+	callPart, err := protocol.NewToolCallPart(protocol.ToolInvokeEnvelope{CallID: "call-1", Name: "remote_x"})
+	if err != nil {
+		t.Fatalf("tool call part: %v", err)
+	}
+	finalPart, err := protocol.NewTextPart("done")
+	if err != nil {
+		t.Fatalf("final text: %v", err)
+	}
+	prov := &scriptedProvider{responses: []provider.ChatResponse{
+		{Message: protocol.ChatMessage{ID: "a-tool", Role: protocol.RoleAssistant, Content: []protocol.ContentPart{callPart}}},
+		{Message: protocol.ChatMessage{ID: "a-final", Role: protocol.RoleAssistant, Content: []protocol.ContentPart{finalPart}}},
+	}}
+	dyn := &fakeDynamicProvider{descs: []tools.Descriptor{
+		{Name: "remote_x", Description: "remote", Parameters: json.RawMessage(`{"type":"object"}`)},
+	}}
+	store := &fakeStore{}
+	r, err := NewRunner(Config{
+		Store:             store,
+		Loader:            fakeLoader{},
+		Registry:          tools.NewRegistry(),
+		Provider:          prov,
+		Assembler:         contextpack.NewAssembler(contextpack.Config{MaxHistoryMessages: 10}),
+		DynamicTools:      dyn,
+		MaxToolIterations: 2,
+	})
+	if err != nil {
+		t.Fatalf("runner: %v", err)
+	}
+
+	_, err = r.Run(ctx, protocol.MessageAddress{ThreadID: "t1"}, userMessage(t, "use remote"))
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	// The model was reprompted after the tool ran (2 provider calls), and the
+	// dynamic tool's result is persisted as a tool-result message.
+	if len(prov.requests) != 2 {
+		t.Fatalf("expected 2 provider calls (reprompt after tool), got %d", len(prov.requests))
+	}
+	if len(dyn.invoked) != 1 {
+		t.Fatalf("expected dynamic tool invoked once, got %d", len(dyn.invoked))
+	}
+	var toolResults int
+	for _, m := range store.messages {
+		if m.Role == protocol.RoleToolResult {
+			toolResults++
+		}
+	}
+	if toolResults != 1 {
+		t.Fatalf("dynamic tool result not persisted to history: %#v", store.messages)
 	}
 }

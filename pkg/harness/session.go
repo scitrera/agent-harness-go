@@ -115,23 +115,15 @@ func (s *Session) invokeTool(ctx context.Context, env protocol.ToolInvokeEnvelop
 	req := tools.RequestFromEnvelope(env)
 	req.Authority = s.authority
 	req.Approved = approved
-	result, err := s.tools.Invoke(ctx, req)
-	if err != nil {
-		return result, err
-	}
-	part, err := result.ContentPart()
-	if err != nil {
-		return tools.Result{}, err
-	}
-	if err := s.AppendToolResult(ctx, env.CallID, part); err != nil {
-		return tools.Result{}, err
-	}
-	return result, nil
+	// Invocation only — the caller (the turn loop) owns persisting the result to
+	// history, in ONE place for every tool (static, dynamic, denied, errored), so
+	// the "append the result" responsibility can't silently diverge per path.
+	return s.tools.Invoke(ctx, req)
 }
 
-// AppendToolResult persists a tool_result content part as a tool-result message
-// (used both by InvokeTool and by the turn loop to record a denial without
-// executing the tool).
+// AppendToolResult persists a tool_result content part as a tool-result message.
+// The turn loop calls it for every tool outcome — success, denial, and error —
+// so the result reliably enters the history sent back to the model.
 func (s *Session) AppendToolResult(ctx context.Context, callID string, part protocol.ContentPart) error {
 	msg := protocol.ChatMessage{ID: callID + "-result", Role: protocol.RoleToolResult, Addr: s.addr, Content: []protocol.ContentPart{part}}
 	return s.Append(ctx, msg)

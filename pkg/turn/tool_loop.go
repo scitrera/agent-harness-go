@@ -148,6 +148,13 @@ func (r *Runner) runProviderLoop(ctx context.Context, session *harness.Session, 
 			if err != nil {
 				return protocol.ChatMessage{}, fmt.Errorf("tool result part: %w", err)
 			}
+			// Persist the result to history (single append site for every tool —
+			// static, dynamic, denied, errored — so it can't diverge per path).
+			// Without this the model never sees the result and re-calls the tool
+			// in a loop.
+			if err := session.AppendToolResult(ctx, call.CallID, part); err != nil {
+				return protocol.ChatMessage{}, fmt.Errorf("record tool result: %w", err)
+			}
 			if _, err := streamer.appendPart(ctx, part); err != nil {
 				return protocol.ChatMessage{}, fmt.Errorf("stream tool result: %w", err)
 			}
