@@ -3,6 +3,7 @@ package localtools
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -50,6 +51,37 @@ func (w *Workspace) ReadFile(ctx context.Context, relPath string, maxBytes int64
 		data = data[:maxBytes]
 	}
 	return string(data), nil
+}
+
+// ReadBytes returns the raw bytes of relPath without coercing to a string, so it
+// is safe for binary artifacts the agent presents (images, PDFs). Unlike
+// ReadFile it errors rather than truncating when the file exceeds maxBytes
+// (<=0 → no cap) — a truncated binary is corrupt.
+func (w *Workspace) ReadBytes(ctx context.Context, relPath string, maxBytes int64) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	path, err := w.resolveExisting(relPath)
+	if err != nil {
+		return nil, err
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", relPath, err)
+	}
+	defer f.Close()
+	var rdr io.Reader = f
+	if maxBytes > 0 {
+		rdr = io.LimitReader(f, maxBytes+1)
+	}
+	data, err := io.ReadAll(rdr)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", relPath, err)
+	}
+	if maxBytes > 0 && int64(len(data)) > maxBytes {
+		return nil, fmt.Errorf("%w: %s exceeds limit %d bytes", ErrInvalidFile, relPath, maxBytes)
+	}
+	return data, nil
 }
 
 func (w *Workspace) WriteFile(ctx context.Context, relPath string, content string) error {
