@@ -43,6 +43,19 @@ func (r *Registry) Register(name string, handler Handler) error {
 	return nil
 }
 
+// Override registers handler under name, replacing any existing handler for that
+// name (unlike Register, which errors on a duplicate). Used to swap an
+// already-registered tool implementation — e.g. redirecting the local "python"
+// tool to a sandboxed execd backend. Descriptors are left untouched; re-describe
+// separately if the schema changes.
+func (r *Registry) Override(name string, handler Handler) error {
+	if name == "" || handler == nil {
+		return fmt.Errorf("%w: name and handler required", ErrInvalidTool)
+	}
+	r.handlers[name] = handler
+	return nil
+}
+
 func (r *Registry) Invoke(ctx context.Context, req Request) (Result, error) {
 	handler, exists := r.handlers[req.Name]
 	if !exists {
