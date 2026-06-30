@@ -6,8 +6,17 @@ package turncancel
 
 import (
 	"context"
+	"errors"
 	"sync"
 )
+
+// ErrTurnCancelled is returned by a turn executor when the turn was aborted by
+// an out-of-band cancel (the user pressed stop) rather than failing. Callers
+// (e.g. the task-lifecycle wrapper) use errors.Is to distinguish a user cancel
+// — which should wrap up gracefully, not mark the task FAILED — from a genuine
+// turn error. Lives here (a dependency-free leaf) so both the turn runner and
+// the task layer can reference it without an import cycle.
+var ErrTurnCancelled = errors.New("turn cancelled by user")
 
 // Canceller tracks cancel funcs for active turns by task id.
 type Canceller struct {

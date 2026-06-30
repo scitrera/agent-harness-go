@@ -2,6 +2,8 @@ package turn
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -21,6 +23,7 @@ import (
 	"github.com/scitrera/agent-harness-go/pkg/provider"
 	"github.com/scitrera/agent-harness-go/pkg/telemetry"
 	"github.com/scitrera/agent-harness-go/pkg/tools"
+	"github.com/scitrera/agent-harness-go/pkg/turncancel"
 )
 
 type Provider interface {
@@ -466,6 +469,12 @@ func toolSpecsFrom(reg *tools.Registry) []provider.ToolSpec {
 	return specs
 }
 
+// metaCancelledKey marks a finalized assistant message whose turn the user
+// cancelled mid-flight. Persisted in message meta so history reload (and the
+// frontend) can surface a "turn cancelled" indicator. Kept in sync with the
+// frontend's ``msg.meta.cancelled`` read.
+const metaCancelledKey = "cancelled"
+
 func (r *Runner) Run(ctx context.Context, addr protocol.MessageAddress, user protocol.ChatMessage) (_ protocol.ChatMessage, err error) {
 	// Link to the upstream trace (if the inbound address carries one) and open
 	// the per-turn span.
@@ -565,6 +574,33 @@ func (r *Runner) Run(ctx context.Context, addr protocol.MessageAddress, user pro
 	tt := r.assembleTurnTools(ctx, addr, user)
 	assistant, err := r.runProviderLoop(ctx, session, addr, user, bootstrap, streamer, injected, model, perTurnApprovers, tt)
 	if err != nil {
+		// User cancellation: the out-of-band cancel control aborts the turn ctx,
+		// which cancels the in-flight provider HTTP call (so we stop paying for
+		// the generation). Don't discard the work or fail the task — finalize the
+		// PARTIAL turn (everything streamed so far), mark it cancelled in meta so
+		// it persists in history, commit it to memory, and signal the task layer
+		// to wrap up gracefully (ErrTurnCancelled). The wrap-up runs on a context
+		// detached from the cancelled turn ctx so the message_finalized publish +
+		// memory commit aren't themselves immediately aborted.
+		if ctx.Err() != nil {
+			detached := context.WithoutCancel(ctx)
+			partial := protocol.ChatMessage{
+				Role: protocol.RoleAssistant,
+				Addr: addr,
+				Meta: map[string]json.RawMessage{metaCancelledKey: json.RawMessage("true")},
+			}
+			partial.Content = append(partial.Content, emitter.durableParts()...)
+			finalized, ferr := streamer.finalize(detached, partial)
+			if ferr != nil {
+				slog.WarnContext(detached, "turn cancelled: finalize failed",
+					slog.String("thread", addr.ThreadID), slog.Any("err", ferr))
+				return protocol.ChatMessage{}, errors.Join(turncancel.ErrTurnCancelled, err)
+			}
+			r.commitToMemory(detached, auth, addr, user, finalized)
+			slog.InfoContext(detached, "turn cancelled: finalized partial turn",
+				slog.String("thread", addr.ThreadID), slog.Int("parts", len(finalized.Content)))
+			return finalized, turncancel.ErrTurnCancelled
+		}
 		return protocol.ChatMessage{}, err
 	}
 	// Fold tool-emitted durable parts (e.g. the latest todo checklist) into the

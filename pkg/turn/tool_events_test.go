@@ -13,6 +13,7 @@ import (
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 	"github.com/scitrera/agent-harness-go/pkg/provider"
 	"github.com/scitrera/agent-harness-go/pkg/tools"
+	"github.com/scitrera/agent-harness-go/pkg/turncancel"
 )
 
 func Test_Runner_Run_publishes_tool_lifecycle_events_in_order(t *testing.T) {
@@ -87,9 +88,10 @@ func Test_Runner_Run_publishes_one_aborted_event_when_tool_context_is_cancelled(
 	// When
 	_, err = r.Run(ctx, protocol.MessageAddress{ThreadID: "t1"}, userMessage(t, "cancel"))
 
-	// Then
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("expected context cancellation, got %v", err)
+	// Then: a user/ctx cancellation surfaces as the turn-cancelled sentinel
+	// (the turn finalizes its partial result rather than failing).
+	if !errors.Is(err, turncancel.ErrTurnCancelled) {
+		t.Fatalf("expected turn-cancelled sentinel, got %v", err)
 	}
 	events := decodeToolEvents(t, pub.events)
 	if len(events) != 3 {
@@ -103,6 +105,67 @@ func Test_Runner_Run_publishes_one_aborted_event_when_tool_context_is_cancelled(
 		if event.Status == tools.ToolEventFinished {
 			t.Fatalf("unexpected duplicate finished event after abort: %#v", events)
 		}
+	}
+}
+
+// On cancellation the turn must not be discarded: it finalizes the PARTIAL turn
+// (the tool_call streamed before the abort), marks it cancelled in meta so it
+// persists in history, and returns the turn-cancelled sentinel (so the task
+// layer wraps up gracefully instead of failing the task).
+func Test_Runner_Run_cancel_finalizes_partial_turn(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	reg := tools.NewRegistry()
+	if err := reg.Register("cancel_me", tools.HandlerFunc(func(ctx context.Context, _ tools.Request) (tools.Result, error) {
+		cancel()
+		<-ctx.Done()
+		return tools.Result{}, ctx.Err()
+	})); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	pub := &fakePublisher{}
+	r, err := NewRunner(Config{
+		Store:     &fakeStore{},
+		Loader:    fakeLoader{},
+		Provider:  &callToolThenText{toolName: "cancel_me"},
+		Publisher: pub,
+		Registry:  reg,
+		Assembler: contextpack.NewAssembler(contextpack.Config{MaxHistoryMessages: 8}),
+	})
+	if err != nil {
+		t.Fatalf("runner: %v", err)
+	}
+
+	msg, err := r.Run(ctx, protocol.MessageAddress{ThreadID: "t1"}, userMessage(t, "cancel"))
+
+	if !errors.Is(err, turncancel.ErrTurnCancelled) {
+		t.Fatalf("expected turn-cancelled sentinel, got %v", err)
+	}
+	if string(msg.Meta[metaCancelledKey]) != "true" {
+		t.Fatalf("expected meta.cancelled=true on returned message, got meta=%v", msg.Meta)
+	}
+	// The partial content streamed before the abort (the tool_call) is preserved.
+	sawToolCall := false
+	for _, p := range msg.Content {
+		if p.Type() == protocol.ContentToolCall {
+			sawToolCall = true
+		}
+	}
+	if !sawToolCall {
+		t.Fatalf("expected partial tool_call preserved in finalized message, got %#v", msg.Content)
+	}
+	// A message_final event was published carrying the cancelled marker (so the
+	// frontend/history reflect the cancelled turn).
+	var final *channel.Event
+	for i := range pub.events {
+		if pub.events[i].Type == channel.EventMessageFinal {
+			final = &pub.events[i]
+		}
+	}
+	if final == nil || final.Message == nil {
+		t.Fatal("expected a message_final event for the cancelled turn")
+	}
+	if string(final.Message.Meta[metaCancelledKey]) != "true" {
+		t.Fatalf("expected finalized event marked cancelled, got meta=%v", final.Message.Meta)
 	}
 }
 
