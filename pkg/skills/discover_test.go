@@ -76,3 +76,19 @@ func TestDiscoverMissingDirs(t *testing.T) {
 		t.Fatalf("expected no skills, got %#v", specs)
 	}
 }
+
+func Test_Discover_absolute_root_yields_absolute_path(t *testing.T) {
+	root := t.TempDir() // an absolute system-skills root, e.g. /opt/agent-skills
+	writeSkill(t, root, "", "alpha", "---\nname: alpha\ndescription: does alpha\n---\nbody")
+	specs, err := Discover("/some/workspace", []string{root})
+	if err != nil {
+		t.Fatalf("discover: %v", err)
+	}
+	if len(specs) != 1 || specs[0].Name != "alpha" || specs[0].Description != "does alpha" {
+		t.Fatalf("unexpected specs: %+v", specs)
+	}
+	want := filepath.Join(root, "alpha", "SKILL.md")
+	if specs[0].Path != want {
+		t.Fatalf("absolute root should yield absolute Path %q, got %q", want, specs[0].Path)
+	}
+}

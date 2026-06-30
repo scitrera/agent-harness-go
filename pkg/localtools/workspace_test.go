@@ -170,3 +170,61 @@ func newTestWorkspace(t *testing.T) *Workspace {
 	}
 	return ws
 }
+
+func Test_Workspace_ReadFile_allows_registered_read_root(t *testing.T) {
+	ctx := context.Background()
+	ws := newTestWorkspace(t)
+	ext := t.TempDir() // an external read-only root, e.g. /opt/agent-skills
+	if err := os.MkdirAll(filepath.Join(ext, "foo"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	skill := filepath.Join(ext, "foo", "SKILL.md")
+	if err := os.WriteFile(skill, []byte("# foo skill"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := ws.AddReadRoots(ext); err != nil {
+		t.Fatalf("AddReadRoots: %v", err)
+	}
+	got, err := ws.ReadFile(ctx, skill, 0) // absolute path within the read root
+	if err != nil {
+		t.Fatalf("read from registered read root: %v", err)
+	}
+	if got != "# foo skill" {
+		t.Fatalf("unexpected content %q", got)
+	}
+}
+
+func Test_Workspace_ReadFile_rejects_absolute_outside_all_roots(t *testing.T) {
+	ctx := context.Background()
+	ws := newTestWorkspace(t)
+	if err := ws.AddReadRoots(t.TempDir()); err != nil { // a read root, but the file is elsewhere
+		t.Fatal(err)
+	}
+	other := filepath.Join(t.TempDir(), "secret.txt")
+	if err := os.WriteFile(other, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ws.ReadFile(ctx, other, 0); !errors.Is(err, ErrPathOutsideRoot) {
+		t.Fatalf("expected rejection of abs path outside all roots, got %v", err)
+	}
+}
+
+func Test_Workspace_WriteFile_never_uses_read_root(t *testing.T) {
+	ctx := context.Background()
+	ws := newTestWorkspace(t)
+	ext := t.TempDir()
+	if err := ws.AddReadRoots(ext); err != nil {
+		t.Fatal(err)
+	}
+	// A read root is read-only: writing into it must be rejected.
+	if err := ws.WriteFile(ctx, filepath.Join(ext, "x.txt"), "data"); !errors.Is(err, ErrPathOutsideRoot) {
+		t.Fatalf("write to read root must be rejected, got %v", err)
+	}
+}
+
+func Test_Workspace_AddReadRoots_skips_missing(t *testing.T) {
+	ws := newTestWorkspace(t)
+	if err := ws.AddReadRoots(filepath.Join(t.TempDir(), "does-not-exist")); err != nil {
+		t.Fatalf("a missing read root should be skipped, not error: %v", err)
+	}
+}

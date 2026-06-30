@@ -36,7 +36,15 @@ func Discover(workspaceRoot string, dirs []string) ([]catalog.SkillSpec, error) 
 		if dir == "" {
 			continue
 		}
-		abs := filepath.Join(workspaceRoot, dir)
+		// A dir may be workspace-relative (joined under workspaceRoot) or an
+		// ABSOLUTE root (e.g. image-baked system skills at /opt/agent-skills),
+		// scanned in place. Absolute roots yield absolute skill Paths the model
+		// reads via a localtools read-only root.
+		absolute := filepath.IsAbs(dir)
+		abs := dir
+		if !absolute {
+			abs = filepath.Join(workspaceRoot, dir)
+		}
 		entries, err := os.ReadDir(abs)
 		if err != nil {
 			if os.IsNotExist(err) {
@@ -52,8 +60,8 @@ func Discover(workspaceRoot string, dirs []string) ([]catalog.SkillSpec, error) 
 		}
 		sort.Strings(names)
 		for _, sub := range names {
-			rel := filepath.Join(dir, sub, skillFileName)
-			content, err := readCapped(filepath.Join(workspaceRoot, rel))
+			full := filepath.Join(abs, sub, skillFileName)
+			content, err := readCapped(full)
 			if err != nil {
 				continue // no SKILL.md (or unreadable) -> not a skill folder
 			}
@@ -62,10 +70,16 @@ func Discover(workspaceRoot string, dirs []string) ([]catalog.SkillSpec, error) 
 				continue
 			}
 			seen[name] = true
+			// Path is what the model read_files: an absolute root yields the absolute
+			// SKILL.md path; a workspace-relative root yields the workspace-relative one.
+			specPath := full
+			if !absolute {
+				specPath = filepath.Join(dir, sub, skillFileName)
+			}
 			out = append(out, catalog.SkillSpec{
 				Name:        name,
 				Description: description,
-				Path:        rel,
+				Path:        specPath,
 				Enabled:     true,
 			})
 			if len(out) >= maxSkills {

@@ -11,6 +11,12 @@ import (
 
 type Workspace struct {
 	root string
+	// readRoots are additional absolute, symlink-evaluated roots that read-only
+	// operations (ReadFile/ReadBytes/InspectFile via resolveExisting) may read
+	// from when given an ABSOLUTE path within one — e.g. image-baked system skills
+	// at /opt/agent-skills. Writes never consult them (resolveForWrite stays
+	// root-only), and relative paths still resolve under root only.
+	readRoots []string
 }
 
 func NewWorkspace(root string) (*Workspace, error) {
@@ -33,6 +39,33 @@ func NewWorkspace(root string) (*Workspace, error) {
 
 func (w *Workspace) Root() string {
 	return w.root
+}
+
+// AddReadRoots registers additional read-only roots (absolute paths) that
+// read-only file ops may read from. Each is resolved to an absolute,
+// symlink-evaluated path; an entry that doesn't exist is skipped (so a deployment
+// with no baked assets is a no-op rather than a startup error). Writes never use
+// these roots.
+func (w *Workspace) AddReadRoots(dirs ...string) error {
+	for _, d := range dirs {
+		d = strings.TrimSpace(d)
+		if d == "" {
+			continue
+		}
+		abs, err := filepath.Abs(d)
+		if err != nil {
+			return fmt.Errorf("%w: read root %s: %w", ErrInvalidRoot, d, err)
+		}
+		evaluated, err := filepath.EvalSymlinks(abs)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return fmt.Errorf("%w: eval read root %s: %w", ErrInvalidRoot, d, err)
+		}
+		w.readRoots = append(w.readRoots, evaluated)
+	}
+	return nil
 }
 
 func (w *Workspace) ReadFile(ctx context.Context, relPath string, maxBytes int64) (string, error) {
@@ -117,7 +150,8 @@ func (w *Workspace) EditFile(ctx context.Context, relPath string, oldText string
 }
 
 func (w *Workspace) resolveExisting(relPath string) (string, error) {
-	candidate, err := w.join(relPath)
+	// Reads may target the workspace root or any registered read-only root.
+	candidate, err := w.join(relPath, true)
 	if err != nil {
 		return "", err
 	}
@@ -125,14 +159,15 @@ func (w *Workspace) resolveExisting(relPath string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("resolve %s: %w", relPath, err)
 	}
-	if !w.contains(evaluated) {
+	if !w.containedInAny(evaluated) {
 		return "", fmt.Errorf("%w: %s", ErrPathOutsideRoot, relPath)
 	}
 	return evaluated, nil
 }
 
 func (w *Workspace) resolveForWrite(relPath string) (string, error) {
-	candidate, err := w.join(relPath)
+	// Writes are confined to the workspace root — never a read-only root.
+	candidate, err := w.join(relPath, false)
 	if err != nil {
 		return "", err
 	}
@@ -151,17 +186,24 @@ func (w *Workspace) resolveForWrite(relPath string) (string, error) {
 	return candidate, nil
 }
 
-func (w *Workspace) join(relPath string) (string, error) {
+func (w *Workspace) join(relPath string, allowReadRoots bool) (string, error) {
 	if filepath.IsAbs(relPath) {
-		// An absolute path is accepted only when it lexically points inside the
-		// workspace root. Models routinely pass /workspace/... (the root itself),
-		// and rejecting every absolute path outright forced a needless retry.
-		// Symlink escapes are still caught downstream by EvalSymlinks + contains().
+		// An absolute path is accepted when it lexically points inside the workspace
+		// root (models routinely pass /workspace/...), or — for reads — inside a
+		// registered read-only root (e.g. image-baked system skills). Symlink escapes
+		// are still caught downstream by EvalSymlinks + containedInAny().
 		clean := filepath.Clean(relPath)
-		if clean != w.root && !strings.HasPrefix(clean, w.root+string(filepath.Separator)) {
-			return "", fmt.Errorf("%w: %s", ErrPathOutsideRoot, relPath)
+		if within(w.root, clean) {
+			return clean, nil
 		}
-		return clean, nil
+		if allowReadRoots {
+			for _, r := range w.readRoots {
+				if within(r, clean) {
+					return clean, nil
+				}
+			}
+		}
+		return "", fmt.Errorf("%w: %s", ErrPathOutsideRoot, relPath)
 	}
 	clean := filepath.Clean(relPath)
 	if clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
@@ -171,6 +213,30 @@ func (w *Workspace) join(relPath string) (string, error) {
 		return w.root, nil
 	}
 	return filepath.Join(w.root, clean), nil
+}
+
+// containedInAny reports whether absPath is within the workspace root or any
+// registered read-only root (used after EvalSymlinks on the read path).
+func (w *Workspace) containedInAny(absPath string) bool {
+	if w.contains(absPath) {
+		return true
+	}
+	for _, r := range w.readRoots {
+		if within(r, absPath) {
+			return true
+		}
+	}
+	return false
+}
+
+// within reports whether absPath is root itself or lexically inside root (both
+// expected to be absolute, cleaned, symlink-evaluated paths).
+func within(root, absPath string) bool {
+	rel, err := filepath.Rel(root, absPath)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (!strings.HasPrefix(rel, "..") && !filepath.IsAbs(rel))
 }
 
 func (w *Workspace) contains(absPath string) bool {
