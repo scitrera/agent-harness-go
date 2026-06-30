@@ -44,6 +44,39 @@ func Test_Workspace_ReadFile_rejects_path_traversal(t *testing.T) {
 	}
 }
 
+func Test_Workspace_ReadFile_accepts_absolute_path_inside_root(t *testing.T) {
+	ctx := context.Background()
+	ws := newTestWorkspace(t)
+	if err := ws.WriteFile(ctx, "work/test.txt", "hello"); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	// The model commonly passes an absolute path under the workspace root
+	// (e.g. /workspace/work/test.txt); it must resolve, not be rejected.
+	abs := filepath.Join(ws.root, "work", "test.txt")
+	got, err := ws.ReadFile(ctx, abs, 0)
+	if err != nil {
+		t.Fatalf("read absolute in-root: %v", err)
+	}
+	if got != "hello" {
+		t.Fatalf("unexpected content %q", got)
+	}
+}
+
+func Test_Workspace_ReadFile_rejects_absolute_path_outside_root(t *testing.T) {
+	ctx := context.Background()
+	ws := newTestWorkspace(t)
+	outside := filepath.Join(t.TempDir(), "secret.txt")
+	if err := os.WriteFile(outside, []byte("secret"), 0o644); err != nil {
+		t.Fatalf("write outside: %v", err)
+	}
+
+	_, err := ws.ReadFile(ctx, outside, 0)
+
+	if !errors.Is(err, ErrPathOutsideRoot) {
+		t.Fatalf("expected ErrPathOutsideRoot for absolute path outside root, got %v", err)
+	}
+}
+
 func Test_Workspace_ReadFile_rejects_symlink_escape(t *testing.T) {
 	ctx := context.Background()
 	ws := newTestWorkspace(t)

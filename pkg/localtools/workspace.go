@@ -121,7 +121,15 @@ func (w *Workspace) resolveForWrite(relPath string) (string, error) {
 
 func (w *Workspace) join(relPath string) (string, error) {
 	if filepath.IsAbs(relPath) {
-		return "", fmt.Errorf("%w: %s", ErrPathOutsideRoot, relPath)
+		// An absolute path is accepted only when it lexically points inside the
+		// workspace root. Models routinely pass /workspace/... (the root itself),
+		// and rejecting every absolute path outright forced a needless retry.
+		// Symlink escapes are still caught downstream by EvalSymlinks + contains().
+		clean := filepath.Clean(relPath)
+		if clean != w.root && !strings.HasPrefix(clean, w.root+string(filepath.Separator)) {
+			return "", fmt.Errorf("%w: %s", ErrPathOutsideRoot, relPath)
+		}
+		return clean, nil
 	}
 	clean := filepath.Clean(relPath)
 	if clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
