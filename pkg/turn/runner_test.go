@@ -183,18 +183,26 @@ func Test_Runner_Run_persists_user_and_assistant_and_publishes_final_event(t *te
 	if err != nil {
 		t.Fatalf("run turn: %v", err)
 	}
-	if assistant.ID != "assistant-1" {
+	// The RETURNED message is the canonical finalized message — it carries the
+	// stream id (not the provider's per-call id), so callers and the persisted
+	// MemoryLayer record match the id the frontend saw stream in.
+	streamID := streamMessageID(protocol.MessageAddress{ThreadID: "thread-1"})
+	if assistant.ID != streamID {
 		t.Fatalf("unexpected assistant: %#v", assistant)
 	}
+	// The session Store keeps the raw per-iteration provider messages (used for
+	// context assembly), so the assistant message there retains its provider id.
 	if len(store.messages) != 2 || store.messages[0].ID != "user-1" || store.messages[1].ID != "assistant-1" {
 		t.Fatalf("unexpected persisted history: %#v", store.messages)
 	}
 	if provider.request.Model != "test-model" || len(provider.request.Messages) != 2 {
 		t.Fatalf("unexpected provider request: %#v", provider.request)
 	}
-	// Egress streams the lifecycle: message_started first, message_finalized last.
-	if len(publisher.events) != 2 {
-		t.Fatalf("expected message_started + message_final, got %#v", publisher.events)
+	// Egress streams the lifecycle: message_started, the answer text appended
+	// (the provider here is non-streaming, so finalize appends it so the
+	// finalized message equals the stream reconstruction), then message_final.
+	if len(publisher.events) != 3 {
+		t.Fatalf("expected message_started + part_appended + message_final, got %#v", publisher.events)
 	}
 	if publisher.events[0].Type != channel.EventMessageStarted {
 		t.Fatalf("first event should be message_started: %#v", publisher.events[0])

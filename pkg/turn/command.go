@@ -99,10 +99,11 @@ func (r *Runner) emitReply(ctx context.Context, addr protocol.MessageAddress, te
 	if err := streamer.start(ctx); err != nil {
 		return protocol.ChatMessage{}, fmt.Errorf("publish message_started: %w", err)
 	}
-	if err := streamer.finalize(ctx, msg); err != nil {
+	finalized, err := streamer.finalize(ctx, msg)
+	if err != nil {
 		return protocol.ChatMessage{}, fmt.Errorf("publish message_finalized: %w", err)
 	}
-	return msg, nil
+	return finalized, nil
 }
 
 // replaceUserText returns a copy of msg whose text content is replaced by text,

@@ -569,10 +569,17 @@ func (r *Runner) Run(ctx context.Context, addr protocol.MessageAddress, user pro
 	}
 	// Fold tool-emitted durable parts (e.g. the latest todo checklist) into the
 	// finalized + committed message so they persist and reload with history.
+	// finalize reconstructs the full turn (text + tool_call/tool_result +
+	// image/file + todo …) from the streamed events and returns the canonical
+	// message; use it for the commit + return so persisted history matches what
+	// the user saw stream in (id-bearing durable parts already streamed are
+	// deduped by id, so this append is a no-op on the streaming path).
 	assistant.Content = append(assistant.Content, emitter.durableParts()...)
-	if err := streamer.finalize(ctx, assistant); err != nil {
+	finalized, err := streamer.finalize(ctx, assistant)
+	if err != nil {
 		return protocol.ChatMessage{}, fmt.Errorf("publish message_finalized: %w", err)
 	}
+	assistant = finalized
 	if r.memAutoCommitAsync {
 		// Detach: never block turn completion on the commit. context.WithoutCancel
 		// keeps trace values but drops the turn's cancellation/deadline so the

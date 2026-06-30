@@ -23,7 +23,7 @@ func TestTurnStreamer_StampsCreatedAt(t *testing.T) {
 	if err := s.start(context.Background()); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	if err := s.finalize(context.Background(), protocol.ChatMessage{Role: protocol.RoleAssistant}); err != nil {
+	if _, err := s.finalize(context.Background(), protocol.ChatMessage{Role: protocol.RoleAssistant}); err != nil {
 		t.Fatalf("finalize: %v", err)
 	}
 
@@ -77,7 +77,7 @@ func TestTurnStreamer_FinalizeKeepsCallerCreatedAt(t *testing.T) {
 	s := newTurnStreamer(pub, addr, streamMessageID(addr), func() time.Time {
 		return time.Date(2026, 6, 24, 12, 0, 0, 0, time.UTC)
 	}, 0)
-	if err := s.finalize(context.Background(), protocol.ChatMessage{Role: protocol.RoleAssistant, CreatedAt: "caller-set"}); err != nil {
+	if _, err := s.finalize(context.Background(), protocol.ChatMessage{Role: protocol.RoleAssistant, CreatedAt: "caller-set"}); err != nil {
 		t.Fatalf("finalize: %v", err)
 	}
 	last := pub.events[len(pub.events)-1]
@@ -126,7 +126,7 @@ func TestTurnStreamer_CoalescesTokenDeltas(t *testing.T) {
 	}
 
 	emit("!") // buffered (no time advance)
-	if err := s.finalize(ctx, protocol.ChatMessage{Role: protocol.RoleAssistant}); err != nil {
+	if _, err := s.finalize(ctx, protocol.ChatMessage{Role: protocol.RoleAssistant}); err != nil {
 		t.Fatalf("finalize: %v", err)
 	}
 	got := streamedDeltas(pub)

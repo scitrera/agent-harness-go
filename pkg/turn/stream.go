@@ -1,10 +1,13 @@
 package turn
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"strings"
 	"time"
+
+	spec "github.com/scitrera/ecosystem-messaging-spec/go"
 
 	"github.com/scitrera/agent-harness-go/pkg/channel"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
@@ -22,6 +25,14 @@ type turnStreamer struct {
 	createdAt string // captured once when start() first fires; reused at finalize
 	index     int
 	started   bool
+
+	// Authoritative reconstruction of the events emitted so far, keyed by
+	// msgID. Every emit method folds its event into this state via the spec
+	// reducer, so finalize can publish a message_finalized whose content
+	// equals the reconstruction of the streamed events (spec §7) — i.e. the
+	// full turn (text + tool_call/tool_result + image/file + todo …), not just
+	// the model's trailing answer message.
+	state spec.MessageState
 
 	// Token-delta coalescing. When flushInterval > 0, streamed deltas are
 	// buffered and emitted as a single token_delta at most once per interval
@@ -88,6 +99,7 @@ func (s *turnStreamer) start(ctx context.Context) error {
 		Addr:          s.addr,
 		Content:       []protocol.ContentPart{},
 	}
+	s.state = spec.ApplyEvent(spec.MessageState{}, spec.MessageStartedEvent{Message: msg})
 	return s.publisher.PublishEvent(ctx, channel.Event{Type: channel.EventMessageStarted, Addr: s.addr, Message: &msg})
 }
 
@@ -109,6 +121,7 @@ func (s *turnStreamer) appendPart(ctx context.Context, part protocol.ContentPart
 	if err := s.publisher.PublishEvent(ctx, channel.Event{Type: channel.EventPartAppended, Addr: s.addr, MessageID: s.msgID, Index: idx, Part: &p}); err != nil {
 		return -1, err
 	}
+	s.state = spec.ApplyEvent(s.state, spec.PartAppendedEvent{MessageID: s.msgID, Index: idx, Part: p})
 	return idx, nil
 }
 
@@ -133,6 +146,7 @@ func (s *turnStreamer) appendTextStream(ctx context.Context) (int, error) {
 	if err := s.publisher.PublishEvent(ctx, channel.Event{Type: channel.EventPartAppended, Addr: s.addr, MessageID: s.msgID, Index: idx, Part: &part}); err != nil {
 		return -1, err
 	}
+	s.state = spec.ApplyEvent(s.state, spec.PartAppendedEvent{MessageID: s.msgID, Index: idx, Part: part})
 	return idx, nil
 }
 
@@ -149,7 +163,11 @@ func (s *turnStreamer) updatePart(ctx context.Context, index int, patch map[stri
 	if err := s.flushPending(ctx); err != nil {
 		return err
 	}
-	return s.publisher.PublishEvent(ctx, channel.Event{Type: channel.EventPartUpdated, Addr: s.addr, MessageID: s.msgID, Index: index, Patch: patch})
+	if err := s.publisher.PublishEvent(ctx, channel.Event{Type: channel.EventPartUpdated, Addr: s.addr, MessageID: s.msgID, Index: index, Patch: patch}); err != nil {
+		return err
+	}
+	s.state = spec.ApplyEvent(s.state, spec.PartUpdatedEvent{MessageID: s.msgID, Index: index, Patch: patch})
+	return nil
 }
 
 // tokenDelta emits token_delta for streamed text into the part at index. With
@@ -192,31 +210,108 @@ func (s *turnStreamer) flushPending(ctx context.Context) error {
 }
 
 func (s *turnStreamer) publishDelta(ctx context.Context, index int, text string) error {
-	return s.publisher.PublishEvent(ctx, channel.Event{Type: channel.EventTokenDelta, Addr: s.addr, MessageID: s.msgID, Index: index, Delta: text})
+	if err := s.publisher.PublishEvent(ctx, channel.Event{Type: channel.EventTokenDelta, Addr: s.addr, MessageID: s.msgID, Index: index, Delta: text}); err != nil {
+		return err
+	}
+	s.state = spec.ApplyEvent(s.state, spec.TokenDeltaEvent{MessageID: s.msgID, Index: index, Text: text})
+	return nil
 }
 
-// finalize emits message_finalized with the authoritative message (id forced to
-// the stream id so started/appended/finalized share one id).
-func (s *turnStreamer) finalize(ctx context.Context, msg protocol.ChatMessage) error {
+// finalize emits message_finalized with the authoritative message and returns
+// the canonical message it published (id forced to the stream id so
+// started/appended/finalized share one id).
+//
+// The finalized message's content is the reconstruction of everything streamed
+// this turn (text + tool_call/tool_result + image/file + todo …), not just the
+// caller's trailing model message. Any parts of msg that were NOT streamed
+// (e.g. the answer text when the provider is non-streaming, or reasoning a
+// provider only returns at the end) are appended via part_appended first, so
+// the finalized payload equals the reconstruction of the streamed events
+// (spec §7). With no publisher (e.g. --chat), the caller's msg stands unchanged.
+func (s *turnStreamer) finalize(ctx context.Context, msg protocol.ChatMessage) (protocol.ChatMessage, error) {
 	if s == nil || s.publisher == nil {
-		return nil
+		return msg, nil
 	}
 	if err := s.start(ctx); err != nil {
-		return err
+		return protocol.ChatMessage{}, err
 	}
 	// Flush any buffered token deltas so the streamed text is complete and
 	// ordered before the authoritative finalized message.
 	if err := s.flushPending(ctx); err != nil {
-		return err
+		return protocol.ChatMessage{}, err
 	}
-	msg.ID = s.msgID
+	// Append any caller parts the stream didn't already carry (keeps the
+	// reconstruction == finalized invariant; a no-op on the streaming path,
+	// where the model's answer text was already streamed via token_delta).
+	recon := s.state[s.msgID]
+	for _, p := range msg.Content {
+		if containsEquivalentPart(recon.Content, p) {
+			continue
+		}
+		if _, err := s.appendPart(ctx, p); err != nil {
+			return protocol.ChatMessage{}, err
+		}
+		recon = s.state[s.msgID]
+	}
+	out := msg
+	out.ID = s.msgID
+	out.Content = recon.Content
 	// Carry the message's creation time (captured at start) so persisted history
 	// orders correctly on reload; don't clobber a caller-provided value.
-	if msg.CreatedAt == "" {
-		msg.CreatedAt = s.createdAt
+	if out.CreatedAt == "" {
+		out.CreatedAt = s.createdAt
 	}
-	if msg.Addr.ThreadID == "" {
-		msg.Addr = s.addr
+	if out.Addr.ThreadID == "" {
+		out.Addr = s.addr
 	}
-	return s.publisher.PublishEvent(ctx, channel.Event{Type: channel.EventMessageFinal, Addr: s.addr, Message: &msg})
+	if err := s.publisher.PublishEvent(ctx, channel.Event{Type: channel.EventMessageFinal, Addr: s.addr, Message: &out}); err != nil {
+		return protocol.ChatMessage{}, err
+	}
+	return out, nil
+}
+
+// containsEquivalentPart reports whether parts already holds a part equivalent
+// to p: by id when p is id-bearing (tool_call/tool_result/todo/…), by
+// (type, text) for text/reasoning parts (so streamed answer text isn't appended
+// twice at finalize), and by raw-JSON equality otherwise.
+func containsEquivalentPart(parts []protocol.ContentPart, p protocol.ContentPart) bool {
+	if id := partID(p); id != "" {
+		for _, q := range parts {
+			if partID(q) == id {
+				return true
+			}
+		}
+		return false
+	}
+	if pt, isText := partText(p); isText {
+		for _, q := range parts {
+			if q.Type() != p.Type() {
+				continue
+			}
+			if qt, ok := partText(q); ok && qt == pt {
+				return true
+			}
+		}
+		return false
+	}
+	praw := p.Raw()
+	for _, q := range parts {
+		if partID(q) == "" && bytes.Equal(q.Raw(), praw) {
+			return true
+		}
+	}
+	return false
+}
+
+// partText returns the "text" field of a text/reasoning part (ok=false for any
+// other part type).
+func partText(p protocol.ContentPart) (string, bool) {
+	if p.Type() != protocol.ContentText && p.Type() != protocol.ContentReasoning {
+		return "", false
+	}
+	var h struct {
+		Text string `json:"text"`
+	}
+	_ = json.Unmarshal(p.Raw(), &h)
+	return h.Text, true
 }
