@@ -45,6 +45,14 @@ type ArtifactConfig struct {
 	InlineMaxBytes int
 	// MaxBytes hard-caps a single artifact read (<=0 → 32 MiB).
 	MaxBytes int
+	// SessionDir, when set, returns the per-(thread,context) working directory a
+	// code session writes relative files into (e.g. sahara's
+	// /workspace/sessions/<key>). A RELATIVE artifact path is resolved against it
+	// first — so a file a kernel saved with a bare name (plt.savefig('p.png')) is
+	// found — falling back to the workspace root. nil (or "" result) → paths
+	// resolve against the workspace root only (the prior behavior). The harness
+	// stays scheme-agnostic; the distribution owns the path derivation.
+	SessionDir func(threadID, context string) string
 }
 
 // RegisterArtifact registers present_artifact: the agent names workspace files it
@@ -67,7 +75,8 @@ func RegisterArtifact(reg *Registry, cfg ArtifactConfig) error {
 	}
 	err := reg.Register(presentArtifactToolName, HandlerFunc(func(ctx context.Context, req Request) (Result, error) {
 		var args struct {
-			Paths []string `json:"paths"`
+			Paths   []string `json:"paths"`
+			Context string   `json:"context"`
 		}
 		if err := decodeArgs(req, &args); err != nil {
 			return Result{}, err
@@ -83,7 +92,7 @@ func RegisterArtifact(reg *Registry, cfg ArtifactConfig) error {
 		}
 		presented := make([]string, 0, len(args.Paths))
 		for _, p := range args.Paths {
-			data, err := cfg.Workspace.ReadBytes(ctx, p, int64(maxBytes))
+			data, err := readArtifactBytes(ctx, cfg, req.Addr.ThreadID, args.Context, p, int64(maxBytes))
 			if err != nil {
 				return errorResult(req, fmt.Sprintf("read %s: %v", p, err))
 			}
@@ -109,10 +118,26 @@ func RegisterArtifact(reg *Registry, cfg ArtifactConfig) error {
 	}
 	reg.Describe(Descriptor{
 		Name:        presentArtifactToolName,
-		Description: "Surface a file you saved in the workspace (e.g. a chart, image, or document) to the user as an inline artifact in your reply. Provide workspace path(s); save the file first, then present it. Images render inline in the chat; other files attach as downloads. Use this instead of a markdown image link — a local file path will NOT render.",
-		Parameters:  json.RawMessage(`{"type":"object","properties":{"paths":{"type":"array","items":{"type":"string"},"description":"Workspace file path(s) to present, e.g. [\"work/plot.png\"]"}},"required":["paths"]}`),
+		Description: "Surface a file you saved (e.g. a chart, image, or document) to the user as an inline artifact in your reply. Save the file first, then present it. A bare relative path (e.g. \"plot.png\") resolves to your code session's working directory — exactly where the python tool saves relative files — so you can present what you just wrote without an absolute path. Images render inline; other files attach as downloads. Use this instead of a markdown image link — a local file path will NOT render. If you saved under a named `context`, pass the same `context` here.",
+		Parameters:  json.RawMessage(`{"type":"object","properties":{"paths":{"type":"array","items":{"type":"string"},"description":"File path(s) to present; a bare name resolves to your code session dir, e.g. [\"plot.png\"]"},"context":{"type":"string","description":"Optional: the code context label the file was saved under (omit for the main session)"}},"required":["paths"]}`),
 	})
 	return nil
+}
+
+// readArtifactBytes reads an artifact's bytes. A RELATIVE path is resolved
+// against the (thread,context) code-session dir first — where a kernel writes
+// relative files (plt.savefig('p.png')) — then falls back to the workspace root
+// (where write_file etc. write); an ABSOLUTE path is read directly. SessionDir is
+// the distribution-provided derivation (nil → workspace-root only).
+func readArtifactBytes(ctx context.Context, cfg ArtifactConfig, threadID, contextLabel, p string, maxBytes int64) ([]byte, error) {
+	if !filepath.IsAbs(p) && cfg.SessionDir != nil {
+		if dir := cfg.SessionDir(threadID, contextLabel); dir != "" {
+			if b, err := cfg.Workspace.ReadBytes(ctx, dir+"/"+p, maxBytes); err == nil {
+				return b, nil
+			}
+		}
+	}
+	return cfg.Workspace.ReadBytes(ctx, p, maxBytes)
 }
 
 // buildArtifactPart turns artifact bytes into the content part to stream: an

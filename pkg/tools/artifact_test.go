@@ -124,3 +124,70 @@ func TestPresentArtifact_requiresPaths(t *testing.T) {
 		t.Fatal("expected an error result when no paths are given")
 	}
 }
+
+// A bare relative path resolves against the code-session dir (SessionDir) first,
+// so the model can present what a kernel saved with plt.savefig('plot.png').
+func TestPresentArtifact_resolvesRelativeAgainstSessionDir(t *testing.T) {
+	ws := artifactWorkspace(t, map[string]string{"sessions/t1/plot.png": "PNGDATA"})
+	em := &capturingEmitter{}
+	reg := NewRegistry()
+	cfg := ArtifactConfig{
+		Workspace:      ws,
+		Uploader:       &fakeUploader{},
+		InlineMaxBytes: 1 << 20,
+		// Mirrors sahara's /workspace/sessions/<key>, but relative to the test root.
+		SessionDir: func(threadID, _ string) string { return "sessions/" + threadID },
+	}
+	if err := RegisterArtifact(reg, cfg); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	ctx := WithPartEmitter(context.Background(), em)
+	res, err := reg.Invoke(ctx, Request{
+		CallID:    "c1",
+		Name:      presentArtifactToolName,
+		Addr:      protocol.MessageAddress{ThreadID: "t1"},
+		Arguments: json.RawMessage(`{"paths":["plot.png"]}`),
+	})
+	if err != nil {
+		t.Fatalf("invoke: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected error: %s", res.Payload)
+	}
+	if len(em.parts) != 1 {
+		t.Fatalf("expected 1 part, got %d", len(em.parts))
+	}
+	img, ok := em.parts[0].AsImage()
+	if !ok || !strings.HasPrefix(img.DataURI, "data:image/png;base64,") {
+		t.Fatalf("expected inline png resolved from the session dir, got %+v ok=%v", img, ok)
+	}
+}
+
+// With SessionDir set but the file only at the workspace root, present_artifact
+// falls back to the root (covers files written via write_file).
+func TestPresentArtifact_sessionDirFallsBackToRoot(t *testing.T) {
+	ws := artifactWorkspace(t, map[string]string{"rootonly.png": "ROOTPNG"})
+	em := &capturingEmitter{}
+	reg := NewRegistry()
+	if err := RegisterArtifact(reg, ArtifactConfig{
+		Workspace:      ws,
+		Uploader:       &fakeUploader{},
+		InlineMaxBytes: 1 << 20,
+		SessionDir:     func(threadID, _ string) string { return "sessions/" + threadID },
+	}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	ctx := WithPartEmitter(context.Background(), em)
+	res, err := reg.Invoke(ctx, Request{
+		CallID:    "c1",
+		Name:      presentArtifactToolName,
+		Addr:      protocol.MessageAddress{ThreadID: "t1"},
+		Arguments: json.RawMessage(`{"paths":["rootonly.png"]}`),
+	})
+	if err != nil {
+		t.Fatalf("invoke: %v", err)
+	}
+	if res.IsError || len(em.parts) != 1 {
+		t.Fatalf("expected root fallback to find the file: isErr=%v parts=%d", res.IsError, len(em.parts))
+	}
+}
