@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync/atomic"
 
 	"github.com/scitrera/agent-harness-go/pkg/bootstrap"
 	"github.com/scitrera/agent-harness-go/pkg/harness"
@@ -14,6 +15,13 @@ import (
 	"github.com/scitrera/agent-harness-go/pkg/telemetry"
 	"github.com/scitrera/agent-harness-go/pkg/tools"
 )
+
+// subagentSeq is a process-wide monotonic counter that makes each subagent
+// invocation's threadID unique (so sibling subagents get distinct kernels).
+var subagentSeq atomic.Uint64
+
+// nextSubagentSeq returns the next process-wide subagent sequence number.
+func nextSubagentSeq() uint64 { return subagentSeq.Add(1) }
 
 // RunSubagent runs a bounded, ephemeral sub-agent turn and returns its final
 // text. It reuses the runner's tools, bootstrap loader, context manager, and
@@ -32,7 +40,11 @@ func (r *Runner) RunSubagent(ctx context.Context, req subagent.Request) (_ subag
 	if thread == "" {
 		thread = "subagent"
 	}
-	addr.ThreadID = thread + "::sub"
+	// Make the subagent threadID UNIQUE PER INVOCATION (a process-wide counter), so
+	// sibling subagents of the same parent don't collide on one threadID. Downstream
+	// (sahara codeexec) keys the python kernel by threadID, so a unique threadID gives
+	// each subagent invocation its own kernel; execd's idle-reap cleans them up.
+	addr.ThreadID = fmt.Sprintf("%s::sub::%d", thread, nextSubagentSeq())
 
 	auth := tools.MemoryAuthority{GrantID: req.GrantID, SubjectType: req.SubjectType, SubjectID: req.SubjectID}
 	// Carry the subagent's OBO on ctx so per-turn tool discovery + dynamic tool
