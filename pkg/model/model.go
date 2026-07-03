@@ -28,26 +28,60 @@ func (c Capabilities) Satisfies(req Capabilities) bool {
 
 // Model is a registry entry: a logical name (what the provider/sidecar routes to
 // a real upstream) plus capabilities and an open Tier label for distribution-side
-// routing policies (e.g. a sahara cost router's "light"/"primary").
+// routing policies (e.g. a sahara cost router's "light"/"primary"). Provider is
+// the optional NAME of a ProviderConfig (in the registry's provider set) this
+// model routes to; empty means "use the runner's single configured provider".
 type Model struct {
 	Name         string       `json:"name" yaml:"name"`
 	Capabilities Capabilities `json:"capabilities" yaml:"capabilities"`
 	Tier         string       `json:"tier,omitempty" yaml:"tier,omitempty"`
+	Provider     string       `json:"provider,omitempty" yaml:"provider,omitempty"`
+	// Context is the model's total context window in tokens (0 = unknown). Used to
+	// budget compaction to the model actually being called — critical when a turn
+	// escalates from a large-context orchestrator to a smaller-context vision model,
+	// so history is trimmed to fit the target instead of overflowing it.
+	Context int `json:"context,omitempty" yaml:"context,omitempty"`
+}
+
+// ProviderConfig is a named upstream a model can be routed to: a base URL, an
+// inline API key (APIKey) or the env var holding it (APIKeyEnv), and a wire
+// Format ("openai"/"native"). It is pure data — construction of an actual
+// provider client from it lives in the turn package (which imports provider),
+// keeping this package free of a provider dependency. Missing fields are filled
+// from the runner's env default by the resolver, not here.
+type ProviderConfig struct {
+	Name      string `json:"name" yaml:"name"`
+	BaseURL   string `json:"base_url,omitempty" yaml:"base_url,omitempty"`
+	APIKey    string `json:"api_key,omitempty" yaml:"api_key,omitempty"`
+	APIKeyEnv string `json:"api_key_env,omitempty" yaml:"api_key_env,omitempty"`
+	Format    string `json:"format,omitempty" yaml:"format,omitempty"`
 }
 
 // Registry is the set of available models + the default. Built from config
 // (sahara) or left nil (oss falls back to the runner's single configured model).
 type Registry struct {
-	byName  map[string]Model
-	order   []string // declaration order, for stable List()
-	defName string
+	byName    map[string]Model
+	order     []string // declaration order, for stable List()
+	defName   string
+	providers map[string]ProviderConfig
 }
 
 // NewRegistry builds a registry from models + a default name. Duplicate names
 // keep the first occurrence. defaultName need not be present (Default() reports
 // absence); callers decide how to handle a missing default.
 func NewRegistry(models []Model, defaultName string) *Registry {
-	r := &Registry{byName: make(map[string]Model, len(models)), defName: defaultName}
+	return NewRegistryWithProviders(models, defaultName, nil)
+}
+
+// NewRegistryWithProviders is NewRegistry plus a set of named provider configs a
+// model can reference (Model.Provider). Duplicate provider names keep the first
+// occurrence. Providers with an empty Name are skipped.
+func NewRegistryWithProviders(models []Model, defaultName string, providers []ProviderConfig) *Registry {
+	r := &Registry{
+		byName:    make(map[string]Model, len(models)),
+		defName:   defaultName,
+		providers: make(map[string]ProviderConfig, len(providers)),
+	}
 	for _, m := range models {
 		if m.Name == "" {
 			continue
@@ -58,7 +92,35 @@ func NewRegistry(models []Model, defaultName string) *Registry {
 		r.byName[m.Name] = m
 		r.order = append(r.order, m.Name)
 	}
+	for _, p := range providers {
+		if p.Name == "" {
+			continue
+		}
+		if _, dup := r.providers[p.Name]; dup {
+			continue
+		}
+		r.providers[p.Name] = p
+	}
 	return r
+}
+
+// ProviderFor returns the ProviderConfig the named model references. It reports
+// (_, false) when the registry is nil, the model is unknown, the model declares
+// no provider, or the referenced provider name is not configured — in every one
+// of those cases the caller should fall back to the default provider.
+func (r *Registry) ProviderFor(modelName string) (ProviderConfig, bool) {
+	if r == nil {
+		return ProviderConfig{}, false
+	}
+	m, ok := r.byName[modelName]
+	if !ok || m.Provider == "" {
+		return ProviderConfig{}, false
+	}
+	pc, ok := r.providers[m.Provider]
+	if !ok {
+		return ProviderConfig{}, false
+	}
+	return pc, true
 }
 
 // Get returns the model with the given name.
