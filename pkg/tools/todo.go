@@ -56,6 +56,12 @@ func todoWrite(ctx context.Context, req Request) (Result, error) {
 			return Result{}, fmt.Errorf("emit todo part: %w", err)
 		}
 	}
+	// Record the board into the durable, aged world-state so the todo list
+	// survives compaction (the emitted part is folded into the assistant message,
+	// which is droppable; this ledger rides ExtractWorldState).
+	if sink, ok := WorldStateSinkFrom(ctx); ok {
+		sink.RecordTodos(items)
+	}
 
 	// Echo a concise summary back as the tool result so the model sees the
 	// recorded state (counts by status), without re-sending the whole list.

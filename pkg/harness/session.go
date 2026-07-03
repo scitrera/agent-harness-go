@@ -115,6 +115,11 @@ func (s *Session) invokeTool(ctx context.Context, env protocol.ToolInvokeEnvelop
 	req := tools.RequestFromEnvelope(env)
 	req.Authority = s.authority
 	req.Approved = approved
+	// The enclosing assistant message id (carried on ctx by the turn loop) lets
+	// tools that create cross-thread back-refs record the parent MESSAGE id.
+	if id, ok := tools.MessageIDFrom(ctx); ok {
+		req.MessageID = id
+	}
 	// Invocation only — the caller (the turn loop) owns persisting the result to
 	// history, in ONE place for every tool (static, dynamic, denied, errored), so
 	// the "append the result" responsibility can't silently diverge per path.
@@ -125,7 +130,16 @@ func (s *Session) invokeTool(ctx context.Context, env protocol.ToolInvokeEnvelop
 // The turn loop calls it for every tool outcome — success, denial, and error —
 // so the result reliably enters the history sent back to the model.
 func (s *Session) AppendToolResult(ctx context.Context, callID string, part protocol.ContentPart) error {
-	msg := protocol.ChatMessage{ID: callID + "-result", Role: protocol.RoleToolResult, Addr: s.addr, Content: []protocol.ContentPart{part}}
+	return s.AppendToolResultParts(ctx, callID, part)
+}
+
+// AppendToolResultParts persists one tool-result message carrying the given
+// parts (the tool_result part plus any extra parts a tool co-located with it,
+// e.g. a subagent reference part). Co-locating on the tool-result message keeps
+// the provider message non-empty (it already carries the tool_result part), so
+// an extra reference part can't produce an empty provider message.
+func (s *Session) AppendToolResultParts(ctx context.Context, callID string, parts ...protocol.ContentPart) error {
+	msg := protocol.ChatMessage{ID: callID + "-result", Role: protocol.RoleToolResult, Addr: s.addr, Content: parts}
 	return s.Append(ctx, msg)
 }
 

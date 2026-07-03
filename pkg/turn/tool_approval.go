@@ -86,6 +86,9 @@ func (r *Runner) invokeDynamic(ctx context.Context, call protocol.ToolInvokeEnve
 	if auth, ok := tools.MemoryAuthorityFrom(ctx); ok {
 		req.Authority = auth
 	}
+	if id, ok := tools.MessageIDFrom(ctx); ok {
+		req.MessageID = id
+	}
 	return r.dynamicTools.Invoke(ctx, req)
 }
 
