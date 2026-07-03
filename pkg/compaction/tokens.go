@@ -12,6 +12,13 @@ const bytesPerToken = 4
 // adds per message.
 const perMessageOverheadTokens = 4
 
+// fixedImageTokens is the flat token cost charged per image content part. A
+// vision model tiles an image to roughly a fixed number of tokens regardless of
+// the encoded byte length, so counting a data_uri's base64 bytes as text badly
+// over-charges an inline image (and a bare vfs_ref/uri image would be badly
+// under-charged). This flat estimate keeps the budget honest for both carriers.
+const fixedImageTokens = 1200
+
 // EstimateTokens returns a rough token estimate for a message slice.
 func EstimateTokens(messages []protocol.ChatMessage) int {
 	total := 0
@@ -23,10 +30,18 @@ func EstimateTokens(messages []protocol.ChatMessage) int {
 
 func estimateMessageTokens(m protocol.ChatMessage) int {
 	bytes := 0
+	imageTokens := 0
 	for _, part := range m.Content {
+		// An image is charged a flat per-image cost (vision models tile to ~a
+		// fixed token count); its raw bytes — a base64 data_uri or a bare ref —
+		// are NOT a meaningful text-token proxy, so skip the byte accumulation.
+		if part.Type() == protocol.ContentImage {
+			imageTokens += fixedImageTokens
+			continue
+		}
 		bytes += len(part.Raw())
 	}
-	return perMessageOverheadTokens + bytes/bytesPerToken
+	return perMessageOverheadTokens + bytes/bytesPerToken + imageTokens
 }
 
 // trimToTokenBudget drops the oldest messages until the estimate fits maxTokens,
