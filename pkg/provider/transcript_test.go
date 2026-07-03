@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
@@ -84,5 +85,46 @@ func TestSanitizeTranscriptStripsUnansweredToolCall(t *testing.T) {
 	// The tool_call message had only the call part -> dropped entirely.
 	if len(out) != 2 {
 		t.Fatalf("expected emptied tool_call message dropped, got %#v", out)
+	}
+}
+
+// A tool-result message that ALSO carries an extra subagent reference part must
+// lower to exactly the same single OpenAI "tool" message as a plain tool-result
+// message: the extra part is ignored (lowerMessage has no case for it) and never
+// leaks into the tool content. This guards the co-located subagent-part change.
+func TestLowerMessageIgnoresExtraSubagentPartOnToolResult(t *testing.T) {
+	tr, err := protocol.NewToolResultPart("c1", "tool", []byte(`"ok"`), false)
+	if err != nil {
+		t.Fatalf("tool result: %v", err)
+	}
+	sp, err := protocol.NewSubagentPart(protocol.SubagentPart{
+		ID:       "c1",
+		Name:     "child",
+		ThreadID: "t::sub::1",
+		Status:   protocol.SubagentCompleted,
+		Summary:  "child summary",
+	})
+	if err != nil {
+		t.Fatalf("subagent part: %v", err)
+	}
+
+	plain := lowerMessage(protocol.ChatMessage{Role: protocol.RoleToolResult, Content: []protocol.ContentPart{tr}})
+	withExtra := lowerMessage(protocol.ChatMessage{Role: protocol.RoleToolResult, Content: []protocol.ContentPart{tr, sp}})
+
+	if len(plain) != 1 || len(withExtra) != 1 {
+		t.Fatalf("expected exactly one tool message each, got plain=%d withExtra=%d", len(plain), len(withExtra))
+	}
+	if withExtra[0].Role != "tool" {
+		t.Fatalf("role = %q, want tool", withExtra[0].Role)
+	}
+	// openAIMessage has a slice field (not ==-comparable); compare via JSON.
+	plainJSON, _ := json.Marshal(plain[0])
+	extraJSON, _ := json.Marshal(withExtra[0])
+	if string(plainJSON) != string(extraJSON) {
+		t.Fatalf("extra subagent part changed the lowered tool message: plain=%s withExtra=%s", plainJSON, extraJSON)
+	}
+	// The subagent summary must not leak into the tool content.
+	if s, ok := withExtra[0].Content.(string); ok && s != `"ok"` {
+		t.Fatalf("tool content = %q, want \"ok\" (no subagent leakage)", s)
 	}
 }

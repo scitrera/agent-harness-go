@@ -72,6 +72,46 @@ func TestTextPartRoundTrip(t *testing.T) {
 	}
 }
 
+func TestSubagentPartRoundTrip(t *testing.T) {
+	part, err := NewSubagentPart(SubagentPart{
+		ID:       "call-1",
+		Name:     "reviewer",
+		ThreadID: "parent::sub::3",
+		Status:   SubagentCompleted,
+		Summary:  "did the thing",
+	})
+	if err != nil {
+		t.Fatalf("subagent part: %v", err)
+	}
+	if part.Type() != ContentSubagent {
+		t.Fatalf("type = %s", part.Type())
+	}
+	sp, ok := part.AsSubagent()
+	if !ok {
+		t.Fatal("expected subagent part")
+	}
+	if sp.ID != "call-1" || sp.Name != "reviewer" || sp.ThreadID != "parent::sub::3" {
+		t.Fatalf("fields not preserved: %+v", sp)
+	}
+	if sp.Status != SubagentCompleted || sp.Summary != "did the thing" {
+		t.Fatalf("status/summary not preserved: %+v", sp)
+	}
+}
+
+func TestSubagentPartDefaultsStatusPending(t *testing.T) {
+	part, err := NewSubagentPart(SubagentPart{ID: "c1", ThreadID: "t"})
+	if err != nil {
+		t.Fatalf("subagent part: %v", err)
+	}
+	sp, ok := part.AsSubagent()
+	if !ok {
+		t.Fatal("expected subagent part")
+	}
+	if sp.Status != SubagentPending {
+		t.Fatalf("status = %q, want pending", sp.Status)
+	}
+}
+
 func TestUnknownPartTypePreserved(t *testing.T) {
 	var msg ChatMessage
 	raw := []byte(`{"id":"m1","role":"user","addr":{"thread_id":"thr"},"content":[{"type":"image","uri":"vfs://image","x-extra":{"kept":true}}]}`)

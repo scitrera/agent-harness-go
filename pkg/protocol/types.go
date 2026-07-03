@@ -24,6 +24,8 @@ type (
 	ToolError          = spec.ToolError
 	ImagePart          = spec.ImagePart
 	FilePart           = spec.FilePart
+	SubagentPart       = spec.SubagentPart
+	SubagentStatus     = spec.SubagentStatus
 )
 
 // NewImagePart builds an image content part (keeps the harness's historical
@@ -35,6 +37,14 @@ func NewImagePart(body ImagePart) (ContentPart, error) {
 // NewFilePart builds a file content part.
 func NewFilePart(body FilePart) (ContentPart, error) {
 	return spec.NewFilePart(body), nil
+}
+
+// NewSubagentPart builds a subagent reference part (keeps the harness's
+// historical (ContentPart, error) signature; the spec constructor cannot fail).
+// It defaults Status to SubagentPending when unset. AsSubagent (a method on the
+// aliased ContentPart) reads it back.
+func NewSubagentPart(body SubagentPart) (ContentPart, error) {
+	return spec.NewSubagentPart(body), nil
 }
 
 // ErrInvalidContentPart is re-exported from the spec.
@@ -64,6 +74,15 @@ const (
 	ContentSubagent   = spec.PartSubagent
 	ContentFeedback   = spec.PartFeedback
 	ContentControl    = spec.PartControl
+)
+
+// Subagent lifecycle statuses, re-exported from the spec.
+const (
+	SubagentPending   = spec.SubagentPending
+	SubagentRunning   = spec.SubagentRunning
+	SubagentCompleted = spec.SubagentCompleted
+	SubagentFailed    = spec.SubagentFailed
+	SubagentCancelled = spec.SubagentCancelled
 )
 
 // NewTextPart builds a text content part. It keeps the harness's historical
