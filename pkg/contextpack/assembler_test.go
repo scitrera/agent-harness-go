@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/scitrera/agent-harness-go/pkg/bootstrap"
+	"github.com/scitrera/agent-harness-go/pkg/compaction"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 )
 
@@ -53,5 +54,37 @@ func Test_Assembler_Build_includes_bootstrap_then_compacted_history(t *testing.T
 	}
 	if messages[1].ID != "compaction-summary" || messages[2].ID != "m2" {
 		t.Fatalf("unexpected message order: %#v", messages)
+	}
+}
+
+// A WorldState carrying an active sub-agent (its thread_id handle surviving in
+// history meta) is surfaced as a "## Sub-agents" prompt line — the spawn→sink→
+// WorldState→prompt flow end-to-end.
+func Test_Assembler_Build_surfaces_active_subagents(t *testing.T) {
+	ctx := compaction.WithTurnNumber(context.Background(), 6)
+	history := worldStateHistory(t, compaction.WorldState{
+		Turn: 5,
+		ActiveSubagents: []compaction.SubagentHandle{
+			{ID: "parent::sub::3", Name: "reviewer", Status: "completed", Summary: "found the bug", LastTurn: 5},
+		},
+	})
+	a := NewAssembler(Config{})
+	msgs, err := a.Build(ctx, nil, history)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	txt := promptText(t, msgs)
+	for _, want := range []string{
+		"## Sub-agents",
+		"reviewer (parent::sub::3): completed — found the bug (1 turn ago)",
+	} {
+		if !strings.Contains(txt, want) {
+			t.Fatalf("prompt missing %q:\n%s", want, txt)
+		}
+	}
+	// No sub-agents in history -> no section.
+	empty := promptText(t, mustBuild(t, NewAssembler(Config{})))
+	if strings.Contains(empty, "## Sub-agents") {
+		t.Fatalf("no sub-agents should mean no section:\n%s", empty)
 	}
 }

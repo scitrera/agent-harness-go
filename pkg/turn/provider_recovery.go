@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/scitrera/agent-harness-go/pkg/bootstrap"
+	"github.com/scitrera/agent-harness-go/pkg/compaction"
 	modelpkg "github.com/scitrera/agent-harness-go/pkg/model"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 	"github.com/scitrera/agent-harness-go/pkg/provider"
@@ -46,7 +47,14 @@ func (r *Runner) callWithRecovery(ctx context.Context, addr protocol.MessageAddr
 	transientRetries := 0
 	var modelAttempts []modelpkg.Attempt
 	for {
-		contextMessages, err := r.ctxMgr.Build(ctx, bootstrap, trimOldest(history, overflowTrim))
+		// Budget compaction to the model we're about to call: on escalation to a
+		// smaller-context model, its window (not the orchestrator's) bounds history,
+		// so the assembler trims to fit instead of overflowing the target.
+		buildCtx := ctx
+		if budget := r.modelContextBudget(model); budget > 0 {
+			buildCtx = compaction.WithContextBudget(ctx, budget)
+		}
+		contextMessages, err := r.ctxMgr.Build(buildCtx, bootstrap, trimOldest(history, overflowTrim))
 		if err != nil {
 			return provider.ChatResponse{}, model, fmt.Errorf("assemble context: %w", err)
 		}
@@ -223,7 +231,16 @@ func (r *Runner) invokeProvider(ctx context.Context, req provider.ChatRequest, s
 			)
 		}
 	}()
-	if sp, ok := r.provider.(StreamingProvider); ok && r.streaming {
+	// Per-turn provider selection: a model that references a named provider
+	// (multi-provider config/models.yaml) is served by that upstream; a bare model
+	// — or any resolution miss/failure — uses the runner's default provider.
+	p := r.provider
+	if r.providerResolver != nil {
+		if rp, ok := r.providerResolver.ProviderForModel(req.Model); ok {
+			p = rp
+		}
+	}
+	if sp, ok := p.(StreamingProvider); ok && r.streaming {
 		textIndex := -1
 		onDelta := func(text string) error {
 			if textIndex < 0 {
@@ -238,6 +255,6 @@ func (r *Runner) invokeProvider(ctx context.Context, req provider.ChatRequest, s
 		resp, err = sp.ChatStream(ctx, req, onDelta)
 		return resp, err
 	}
-	resp, err = r.provider.Chat(ctx, req)
+	resp, err = p.Chat(ctx, req)
 	return resp, err
 }
