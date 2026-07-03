@@ -6,7 +6,7 @@ require (
 	charm.land/bubbles/v2 v2.1.0
 	charm.land/bubbletea/v2 v2.0.7
 	charm.land/lipgloss/v2 v2.0.4
-	github.com/scitrera/ecosystem-messaging-spec/go v1.2.0
+	github.com/scitrera/ecosystem-messaging-spec/go v1.2.2
 	go.opentelemetry.io/otel v1.43.0
 	go.opentelemetry.io/otel/trace v1.43.0
 )
@@ -33,4 +33,5 @@ require (
 	go.opentelemetry.io/otel/metric v1.43.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/sys v0.45.0 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
