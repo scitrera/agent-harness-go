@@ -2,6 +2,7 @@ package turn
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync/atomic"
@@ -23,11 +24,17 @@ var subagentSeq atomic.Uint64
 // nextSubagentSeq returns the next process-wide subagent sequence number.
 func nextSubagentSeq() uint64 { return subagentSeq.Add(1) }
 
-// RunSubagent runs a bounded, ephemeral sub-agent turn and returns its final
-// text. It reuses the runner's tools, bootstrap loader, context manager, and
-// model, but on a throwaway in-memory session: no durable history, no memory
-// recall/commit, and no stream egress (the sub-agent is internal). The parent's
-// OBO grant is carried through so tools act on behalf of the same principal.
+// RunSubagent runs a bounded sub-agent turn on its OWN durable, persisted child
+// thread and returns its final text plus the re-addressable thread handle. It
+// reuses the runner's tools, bootstrap loader, context manager, and model. A new
+// child thread is minted as "<parentThread>::sub::<seq>"; passing
+// Request.ResumeThreadID instead CONTINUES that existing child thread (resume
+// continuity comes for free from the injected store's LoadHistory cold-load).
+// The child thread's task message back-references the spawning message via
+// MessageRef{parent_thread_id, parent_message_id}, so the sub-agent is durable,
+// recallable (a thread query), and re-addressable. The parent's OBO grant is
+// carried through so tools act on behalf of the same principal; no stream egress
+// (the sub-agent is internal) and no auto-recall (resume covers continuity).
 //
 // This is the in-process backend for the spawn_subagent tool; the
 // subagent.Runner interface lets an Aether-task backend replace it later.
@@ -35,22 +42,32 @@ func (r *Runner) RunSubagent(ctx context.Context, req subagent.Request) (_ subag
 	ctx, span := telemetry.StartSubagent(ctx, req.Depth)
 	defer telemetry.Finish(span, &err)
 
-	addr := req.Parent
-	thread := addr.ThreadID
-	if thread == "" {
-		thread = "subagent"
+	parentThread := req.Parent.ThreadID
+	// Resolve the child thread id: resume an existing child thread verbatim, or
+	// mint a NEW one unique per invocation (a process-wide counter) so sibling
+	// subagents of the same parent don't collide. Downstream (sahara codeexec)
+	// keys the python kernel by threadID, so a unique threadID gives each new
+	// subagent its own kernel; a resumed thread reuses its handle.
+	resume := req.ResumeThreadID != ""
+	childThreadID := req.ResumeThreadID
+	if !resume {
+		base := parentThread
+		if base == "" {
+			base = "subagent"
+		}
+		childThreadID = fmt.Sprintf("%s::sub::%d", base, nextSubagentSeq())
 	}
-	// Make the subagent threadID UNIQUE PER INVOCATION (a process-wide counter), so
-	// sibling subagents of the same parent don't collide on one threadID. Downstream
-	// (sahara codeexec) keys the python kernel by threadID, so a unique threadID gives
-	// each subagent invocation its own kernel; execd's idle-reap cleans them up.
-	addr.ThreadID = fmt.Sprintf("%s::sub::%d", thread, nextSubagentSeq())
+	addr := req.Parent
+	addr.ThreadID = childThreadID
 
 	auth := tools.MemoryAuthority{GrantID: req.GrantID, SubjectType: req.SubjectType, SubjectID: req.SubjectID}
 	// Carry the subagent's OBO on ctx so per-turn tool discovery + dynamic tool
 	// invocations act under the user's grant (mirrors Run).
 	ctx = tools.WithMemoryAuthority(ctx, auth)
-	session, err := harness.NewSession(ctx, addr, harness.NewMemoryStore(), r.registry, auth)
+	// Use the DURABLE store (not a throwaway in-memory one): on resume, the
+	// injected store cold-loads the child thread's prior history via LoadHistory,
+	// giving resume-continuity without an explicit recall.
+	session, err := harness.NewSession(ctx, addr, r.store, r.registry, auth)
 	if err != nil {
 		return subagent.Result{}, fmt.Errorf("subagent session: %w", err)
 	}
@@ -59,6 +76,13 @@ func (r *Runner) RunSubagent(ctx context.Context, req subagent.Request) (_ subag
 		return subagent.Result{}, err
 	}
 	userMsg := protocol.ChatMessage{Role: protocol.RoleUser, Addr: addr, Content: []protocol.ContentPart{taskPart}}
+	if !resume {
+		// New child thread: stamp the cross-thread back-ref to the spawning message
+		// and the spawn provenance meta. On resume the thread already exists, so we
+		// skip both (the follow-up is just another turn on the same child thread).
+		userMsg.Ref = &protocol.MessageRef{ParentThreadID: parentThread, ParentMessageID: req.ParentMessageID}
+		userMsg.Meta = stampSubagentSpawnMeta(userMsg.Meta, req.Parent.AgentID)
+	}
 	if err := session.Append(ctx, userMsg); err != nil {
 		return subagent.Result{}, fmt.Errorf("subagent append task: %w", err)
 	}
@@ -83,7 +107,45 @@ func (r *Runner) RunSubagent(ctx context.Context, req subagent.Request) (_ subag
 	if err != nil {
 		return subagent.Result{}, err
 	}
-	return subagent.Result{Text: textOf(assistant)}, nil
+	// Persist the child thread to memory exactly like Run (assistant-only vs
+	// user+assistant per memAutoCommitAsstOnly) so the sub-agent is durable and
+	// recallable in sahara (MemoryLayer). No auto-recall: resume continuity comes
+	// from the store's LoadHistory cold-load.
+	r.commitToMemory(ctx, auth, addr, userMsg, assistant)
+	text := textOf(assistant)
+	return subagent.Result{Text: text, ThreadID: childThreadID, Summary: summarizeSubagent(text)}, nil
+}
+
+// stampSubagentSpawnMeta records spawn provenance on the child thread's task
+// message under meta["scitrera"].spawn = {"by": <parent agent id>, "kind":
+// "delegation"} (mirrors how other turn code stamps meta as json.RawMessage).
+func stampSubagentSpawnMeta(meta map[string]json.RawMessage, parentAgentID string) map[string]json.RawMessage {
+	if meta == nil {
+		meta = map[string]json.RawMessage{}
+	}
+	raw, err := json.Marshal(map[string]any{
+		"spawn": map[string]any{"by": parentAgentID, "kind": "delegation"},
+	})
+	if err != nil {
+		return meta
+	}
+	meta["scitrera"] = raw
+	return meta
+}
+
+// summarizeSubagent returns a compact one-line digest of the sub-agent answer
+// (first line, trimmed, capped at ~200 chars) for the parent to keep as a
+// reference alongside the thread handle.
+func summarizeSubagent(text string) string {
+	s := strings.TrimSpace(text)
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	s = strings.TrimSpace(s)
+	if len(s) > 200 {
+		s = strings.TrimSpace(s[:200])
+	}
+	return s
 }
 
 func subagentBootstrap(files []bootstrap.File, req subagent.Request) []bootstrap.File {

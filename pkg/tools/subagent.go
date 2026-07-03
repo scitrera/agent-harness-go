@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/scitrera/agent-harness-go/pkg/protocol"
 	"github.com/scitrera/agent-harness-go/pkg/subagent"
 )
 
@@ -40,11 +41,12 @@ func RegisterSubagentWithConfig(reg *Registry, cfg SubagentConfig) error {
 			return errorResult(req, fmt.Sprintf("sub-agent depth limit (%d) reached; handle this task directly", cfg.MaxDepth))
 		}
 		var args struct {
-			Task  string   `json:"task"`
-			Model string   `json:"model"`
-			Agent string   `json:"agent"`
-			Type  string   `json:"type"`
-			Tools []string `json:"tools"`
+			Task   string   `json:"task"`
+			Model  string   `json:"model"`
+			Agent  string   `json:"agent"`
+			Type   string   `json:"type"`
+			Tools  []string `json:"tools"`
+			Thread string   `json:"thread"`
 		}
 		if err := decodeArgs(req, &args); err != nil {
 			return Result{}, err
@@ -74,6 +76,14 @@ func RegisterSubagentWithConfig(reg *Registry, cfg SubagentConfig) error {
 			SubjectType: req.Authority.SubjectType,
 			SubjectID:   req.Authority.SubjectID,
 			Model:       args.Model,
+			// A non-empty thread continues an existing child sub-agent thread
+			// (its handle is the thread_id returned from a prior spawn) instead
+			// of minting a new one.
+			ResumeThreadID: args.Thread,
+			// ParentMessageID is the spawning assistant message's id, carried on
+			// req.MessageID by the turn loop, recorded on the child thread's task
+			// message as MessageRef.ParentMessageID (the cross-thread back-ref).
+			ParentMessageID: req.MessageID,
 		}
 		if selected {
 			applyDefinition(&subReq, def)
@@ -82,21 +92,71 @@ func RegisterSubagentWithConfig(reg *Registry, cfg SubagentConfig) error {
 		if err != nil {
 			return errorResult(req, "sub-agent failed: "+err.Error())
 		}
-		out, err := json.Marshal(map[string]string{"result": res.Text})
+		name := subagentPartName(selected, def, args.Agent, args.Type)
+		// Record the sub-agent on the per-turn world-state sink (both new spawns and
+		// resumes) so its thread_id handle + name + summary age in WorldState and
+		// surface to the orchestrator, which can then route a follow-up back to it.
+		if sink, ok := WorldStateSinkFrom(ctx); ok {
+			sink.RecordSubagent(res.ThreadID, name, "completed", res.Summary)
+		}
+		out, err := json.Marshal(map[string]string{
+			"result":    res.Text,
+			"thread_id": res.ThreadID,
+			"summary":   res.Summary,
+		})
 		if err != nil {
 			return Result{}, err
 		}
-		return NewJSONResult(req.CallID, req.Name, out)
+		result, err := NewJSONResult(req.CallID, req.Name, out)
+		if err != nil {
+			return Result{}, err
+		}
+		// Record a structured subagent reference part (thread linkage + summary)
+		// alongside the tool result so the parent conversation carries the
+		// reference for recall/UI (spec §3.9/§11.3). The turn loop co-locates it
+		// on the tool-result message.
+		sp, perr := protocol.NewSubagentPart(protocol.SubagentPart{
+			ID:       req.CallID,
+			Name:     name,
+			ThreadID: res.ThreadID,
+			Status:   protocol.SubagentCompleted,
+			Summary:  res.Summary,
+		})
+		if perr == nil {
+			result.Parts = []protocol.ContentPart{sp}
+		}
+		return result, nil
 	}))
 	if err != nil {
 		return err
 	}
 	reg.Describe(Descriptor{
 		Name:        subagentToolName,
-		Description: "Delegate a self-contained sub-task to a fresh sub-agent (bounded; no shared conversation history). Returns the sub-agent's final answer. Use for focused research/analysis you want isolated from the main thread, or to consult a specific/specialist model via the optional 'model' argument.",
-		Parameters:  json.RawMessage(`{"type":"object","properties":{"task":{"type":"string","description":"A self-contained instruction for the sub-agent"},"agent":{"type":"string","description":"Optional: filesystem agent type/name from the local catalog."},"type":{"type":"string","description":"Alias for agent."},"model":{"type":"string","description":"Optional: a specific model name to run the sub-agent on (e.g. a vision or stronger model). Omit to use the default or selected agent model."},"tools":{"type":"array","items":{"type":"string"},"description":"Optional requested tool names checked against the selected agent definition."}},"required":["task"]}`),
+		Description: "Delegate a self-contained sub-task to a sub-agent that runs on its own durable, persisted thread (bounded; isolated from the main conversation). Returns the sub-agent's final answer plus a `thread_id` handle and a short `summary`. Use for focused research/analysis you want isolated from the main thread, or to consult a specific/specialist model via the optional 'model' argument. Pass the optional `thread` (a prior `thread_id`) to CONTINUE a previous sub-agent instead of spawning a new one; the returned `thread_id` is that handle. PREFER continuing an existing sub-agent when a follow-up builds on work it already did: it keeps its own context (e.g. a document or image it already inspected, or a model it was pinned to) that you do not otherwise hold — reuse its handle rather than re-delegating the task from scratch.",
+		Parameters:  json.RawMessage(`{"type":"object","properties":{"task":{"type":"string","description":"A self-contained instruction for the sub-agent"},"agent":{"type":"string","description":"Optional: filesystem agent type/name from the local catalog."},"type":{"type":"string","description":"Alias for agent."},"model":{"type":"string","description":"Optional: a specific model name to run the sub-agent on (e.g. a vision or stronger model). Omit to use the default or selected agent model."},"tools":{"type":"array","items":{"type":"string"},"description":"Optional requested tool names checked against the selected agent definition."},"thread":{"type":"string","description":"Optional: a thread_id returned by a previous spawn_subagent call. Provide it to CONTINUE that same sub-agent thread (route a follow-up to it) instead of creating a new sub-agent."}},"required":["task"]}`),
 	})
 	return nil
+}
+
+// subagentPartName resolves a display name for the subagent reference part:
+// the selected catalog definition's name/type when one was used, else the
+// requested agent/type argument, else a generic "subagent".
+func subagentPartName(selected bool, def subagent.Definition, agentArg, typeArg string) string {
+	if selected {
+		if def.Name != "" {
+			return string(def.Name)
+		}
+		if def.Type != "" {
+			return string(def.Type)
+		}
+	}
+	if agentArg != "" {
+		return agentArg
+	}
+	if typeArg != "" {
+		return typeArg
+	}
+	return "subagent"
 }
 
 func selectAgentDefinition(ctx context.Context, catalog subagent.Catalog, selection agentSelection) (subagent.Definition, bool, error) {

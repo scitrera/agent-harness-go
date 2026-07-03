@@ -29,6 +29,16 @@ type Request struct {
 	// Model optionally pins the sub-agent to a specific model (validated against
 	// the registry by the runner; empty → the runner's normal per-turn selection).
 	Model string
+	// ResumeThreadID, when set, CONTINUES an existing child sub-agent thread
+	// (used verbatim as the child thread id) instead of minting a new
+	// "<parentThread>::sub::<seq>" thread. It is the handle returned as
+	// Result.ThreadID from a prior spawn; empty → create a new child thread.
+	ResumeThreadID string
+	// ParentMessageID is the id of the spawning parent message, recorded on the
+	// child thread's task message as MessageRef.ParentMessageID (the cross-thread
+	// back-ref). Empty is acceptable (the back-ref still carries the parent
+	// thread id).
+	ParentMessageID string
 	// Agent fields are populated when a file-backed catalog definition is used.
 	// The OSS in-process runner applies Instructions, MaxTurns, AllowedTools,
 	// DeniedTools, and Model. Skills, MCPServers, PermissionMode,
@@ -50,6 +60,12 @@ type Request struct {
 // Result is the sub-agent's final answer.
 type Result struct {
 	Text string
+	// ThreadID is the child sub-agent thread's id — the re-addressable handle.
+	// Pass it back as Request.ResumeThreadID to continue the same sub-agent.
+	ThreadID string
+	// Summary is a compact one-line digest of the answer (first line / first
+	// ~200 chars), suitable for the parent to keep as a reference.
+	Summary string
 }
 
 // Runner executes a sub-agent request.

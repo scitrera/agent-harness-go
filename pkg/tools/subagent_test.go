@@ -8,19 +8,27 @@ import (
 	"path/filepath"
 	"testing"
 
+	spec "github.com/scitrera/ecosystem-messaging-spec/go"
+
+	"github.com/scitrera/agent-harness-go/pkg/protocol"
 	"github.com/scitrera/agent-harness-go/pkg/subagent"
 )
 
 type spySubagent struct {
-	called       bool
-	task         string
-	depth        int
-	agentType    subagent.AgentType
-	model        string
-	maxTurns     int
-	allowedTools []string
-	deniedTools  []string
-	instructions string
+	called          bool
+	task            string
+	depth           int
+	agentType       subagent.AgentType
+	model           string
+	maxTurns        int
+	allowedTools    []string
+	deniedTools     []string
+	instructions    string
+	resumeThreadID  string
+	parentMessageID string
+	// resultThreadID/resultSummary let a test control the returned handle+digest.
+	resultThreadID string
+	resultSummary  string
 }
 
 func (s *spySubagent) RunSubagent(_ context.Context, req subagent.Request) (subagent.Result, error) {
@@ -33,7 +41,9 @@ func (s *spySubagent) RunSubagent(_ context.Context, req subagent.Request) (suba
 	s.allowedTools = append([]string(nil), req.AllowedTools...)
 	s.deniedTools = append([]string(nil), req.DeniedTools...)
 	s.instructions = req.Instructions
-	return subagent.Result{Text: "sub-agent answer"}, nil
+	s.resumeThreadID = req.ResumeThreadID
+	s.parentMessageID = req.ParentMessageID
+	return subagent.Result{Text: "sub-agent answer", ThreadID: s.resultThreadID, Summary: s.resultSummary}, nil
 }
 
 func TestRegisterSubagentInvokes(t *testing.T) {
@@ -62,6 +72,127 @@ func TestRegisterSubagentInvokes(t *testing.T) {
 	}
 	if !bytes.Contains(res.Payload, []byte("sub-agent answer")) {
 		t.Fatalf("result missing sub-agent answer: %s", res.Payload)
+	}
+}
+
+func TestRegisterSubagentThreadResumeAndHandlePayload(t *testing.T) {
+	reg := NewRegistry()
+	spy := &spySubagent{resultThreadID: "parent::sub::9", resultSummary: "did the thing"}
+	if err := RegisterSubagent(reg, spy, 2); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	// The optional "thread" arg maps to ResumeThreadID so a follow-up routes to
+	// an existing sub-agent thread.
+	res, err := reg.Invoke(context.Background(), Request{
+		CallID:    "c1",
+		Name:      "spawn_subagent",
+		Arguments: json.RawMessage(`{"task":"continue","thread":"parent::sub::9"}`),
+	})
+	if err != nil {
+		t.Fatalf("invoke: %v", err)
+	}
+	if spy.resumeThreadID != "parent::sub::9" {
+		t.Fatalf("ResumeThreadID = %q, want parent::sub::9", spy.resumeThreadID)
+	}
+	// The success payload surfaces the re-addressable handle + summary.
+	if !bytes.Contains(res.Payload, []byte(`"thread_id":"parent::sub::9"`)) {
+		t.Fatalf("payload missing thread_id handle: %s", res.Payload)
+	}
+	if !bytes.Contains(res.Payload, []byte(`"summary":"did the thing"`)) {
+		t.Fatalf("payload missing summary: %s", res.Payload)
+	}
+	if !bytes.Contains(res.Payload, []byte("sub-agent answer")) {
+		t.Fatalf("payload missing result text: %s", res.Payload)
+	}
+}
+
+func TestRegisterSubagentEmitsSubagentPart(t *testing.T) {
+	reg := NewRegistry()
+	spy := &spySubagent{resultThreadID: "parent::sub::4", resultSummary: "found it"}
+	if err := RegisterSubagent(reg, spy, 2); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	res, err := reg.Invoke(context.Background(), Request{
+		CallID:    "c1",
+		Name:      "spawn_subagent",
+		MessageID: "assistant-1",
+		Arguments: json.RawMessage(`{"task":"research X"}`),
+	})
+	if err != nil {
+		t.Fatalf("invoke: %v", err)
+	}
+	// The parent MESSAGE id flows into the subagent request's ParentMessageID.
+	if spy.parentMessageID != "assistant-1" {
+		t.Fatalf("ParentMessageID = %q, want assistant-1", spy.parentMessageID)
+	}
+	// The success result carries a subagent reference part (thread linkage +
+	// summary + completed status) for the turn loop to co-locate on history.
+	if len(res.Parts) != 1 {
+		t.Fatalf("expected 1 extra part, got %d", len(res.Parts))
+	}
+	sp, ok := res.Parts[0].AsSubagent()
+	if !ok {
+		t.Fatalf("extra part is not a subagent part: %s", res.Parts[0].Type())
+	}
+	if sp.ThreadID != "parent::sub::4" {
+		t.Fatalf("subagent part thread = %q, want parent::sub::4", sp.ThreadID)
+	}
+	if sp.Status != protocol.SubagentCompleted {
+		t.Fatalf("subagent part status = %q, want completed", sp.Status)
+	}
+	if sp.Summary != "found it" {
+		t.Fatalf("subagent part summary = %q, want found it", sp.Summary)
+	}
+	if sp.ID != "c1" {
+		t.Fatalf("subagent part id = %q, want c1", sp.ID)
+	}
+}
+
+// recordingSink is a WorldStateSink that captures RecordSubagent calls.
+type recordingSink struct {
+	subID, subName, subStatus, subSummary string
+	recorded                              bool
+}
+
+func (r *recordingSink) RecordInvokedSkill(string, string) {}
+func (r *recordingSink) RecordFile(string, string)         {}
+func (r *recordingSink) RecordTodos([]spec.TodoItem)       {}
+func (r *recordingSink) RecordSubagent(id, name, status, summary string) {
+	r.recorded = true
+	r.subID, r.subName, r.subStatus, r.subSummary = id, name, status, summary
+}
+
+func TestRegisterSubagentRecordsWorldStateHandle(t *testing.T) {
+	reg := NewRegistry()
+	spy := &spySubagent{resultThreadID: "parent::sub::7", resultSummary: "did the analysis"}
+	if err := RegisterSubagent(reg, spy, 2); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	sink := &recordingSink{}
+	ctx := WithWorldStateSink(context.Background(), sink)
+	_, err := reg.Invoke(ctx, Request{
+		CallID:    "c1",
+		Name:      "spawn_subagent",
+		Arguments: json.RawMessage(`{"task":"analyze X"}`),
+	})
+	if err != nil {
+		t.Fatalf("invoke: %v", err)
+	}
+	if !sink.recorded {
+		t.Fatal("expected the sub-agent handle to be recorded on the world-state sink")
+	}
+	if sink.subID != "parent::sub::7" {
+		t.Fatalf("recorded id = %q, want res.ThreadID parent::sub::7", sink.subID)
+	}
+	if sink.subName != "subagent" {
+		t.Fatalf("recorded name = %q, want subagent (no catalog selection)", sink.subName)
+	}
+	if sink.subStatus != "completed" {
+		t.Fatalf("recorded status = %q, want completed", sink.subStatus)
+	}
+	if sink.subSummary != "did the analysis" {
+		t.Fatalf("recorded summary = %q, want did the analysis", sink.subSummary)
 	}
 }
 
