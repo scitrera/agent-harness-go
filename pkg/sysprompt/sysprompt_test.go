@@ -102,6 +102,26 @@ func TestBuildToolSection(t *testing.T) {
 	}
 }
 
+func TestBuildSubagentsSection(t *testing.T) {
+	p := Build(Input{Subagents: []SubagentLine{
+		{Name: "reviewer", ThreadID: "parent::sub::4", Status: "completed", Summary: "found the bug", AgeTurns: 2},
+	}})
+	for _, want := range []string{
+		"## Sub-agents",
+		"spawn_subagent(thread=<id>)",
+		"reviewer (parent::sub::4): completed — found the bug (2 turns ago)",
+	} {
+		if !strings.Contains(p.DynamicSuffix, want) {
+			t.Fatalf("subagents section missing %q: %s", want, p.DynamicSuffix)
+		}
+	}
+	// Empty -> no section.
+	off := Build(Input{})
+	if strings.Contains(off.DynamicSuffix, "## Sub-agents") {
+		t.Fatalf("subagents section should be absent when none spawned: %s", off.DynamicSuffix)
+	}
+}
+
 func TestMessageCarriesCacheHint(t *testing.T) {
 	msg, err := Build(Input{WorkspaceDir: "/w", Now: time.Unix(0, 0)}).Message()
 	if err != nil {

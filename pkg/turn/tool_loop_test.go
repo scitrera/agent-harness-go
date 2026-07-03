@@ -248,6 +248,84 @@ func Test_Runner_Run_invokes_tool_call_and_reprompts_provider(t *testing.T) {
 	}
 }
 
+// A tool that returns extra Result.Parts (e.g. a subagent reference part) must
+// have those parts co-located ON THE SAME tool-result message as the tool_result
+// part, and the enclosing assistant message id must reach the tool as
+// Request.MessageID (so back-refs can record the parent MESSAGE id).
+func Test_Runner_Run_records_extra_result_parts_on_tool_result_message(t *testing.T) {
+	ctx := context.Background()
+	store := &fakeStore{}
+	registry := tools.NewRegistry()
+	var seenMessageID string
+	if err := registry.Register("delegate", tools.HandlerFunc(func(_ context.Context, req tools.Request) (tools.Result, error) {
+		seenMessageID = req.MessageID
+		res, err := tools.NewJSONResult(req.CallID, req.Name, json.RawMessage(`{"ok":true}`))
+		if err != nil {
+			return tools.Result{}, err
+		}
+		sp, perr := protocol.NewSubagentPart(protocol.SubagentPart{
+			ID:       req.CallID,
+			Name:     "child",
+			ThreadID: "thread-1::sub::1",
+			Status:   protocol.SubagentCompleted,
+			Summary:  "child summary",
+		})
+		if perr != nil {
+			return tools.Result{}, perr
+		}
+		res.Parts = []protocol.ContentPart{sp}
+		return res, nil
+	})); err != nil {
+		t.Fatalf("register tool: %v", err)
+	}
+	callPart, err := protocol.NewToolCallPart(protocol.ToolInvokeEnvelope{CallID: "call-1", Name: "delegate"})
+	if err != nil {
+		t.Fatalf("tool call part: %v", err)
+	}
+	finalPart, err := protocol.NewTextPart("done")
+	if err != nil {
+		t.Fatalf("final text: %v", err)
+	}
+	provider := &scriptedProvider{responses: []provider.ChatResponse{
+		{Message: protocol.ChatMessage{ID: "assistant-tool", Role: protocol.RoleAssistant, Content: []protocol.ContentPart{callPart}}},
+		{Message: protocol.ChatMessage{ID: "assistant-final", Role: protocol.RoleAssistant, Content: []protocol.ContentPart{finalPart}}},
+	}}
+	runner, err := NewRunner(Config{
+		Store:             store,
+		Loader:            fakeLoader{},
+		Registry:          registry,
+		Provider:          provider,
+		Assembler:         contextpack.NewAssembler(contextpack.Config{MaxHistoryMessages: 10}),
+		MaxToolIterations: 2,
+	})
+	if err != nil {
+		t.Fatalf("runner: %v", err)
+	}
+
+	if _, err := runner.Run(ctx, protocol.MessageAddress{ThreadID: "thread-1"}, protocol.ChatMessage{ID: "user-1", Role: protocol.RoleUser}); err != nil {
+		t.Fatalf("run turn: %v", err)
+	}
+
+	// The tool saw the spawning assistant message id (the tool-call message).
+	if seenMessageID != "assistant-tool" {
+		t.Fatalf("Request.MessageID = %q, want assistant-tool", seenMessageID)
+	}
+	// The persisted tool-result message co-locates [tool_result, subagent].
+	if len(store.messages) < 3 || store.messages[2].Role != protocol.RoleToolResult {
+		t.Fatalf("expected a tool-result message at index 2, got %#v", store.messages)
+	}
+	trMsg := store.messages[2]
+	if len(trMsg.Content) != 2 ||
+		trMsg.Content[0].Type() != protocol.ContentToolResult ||
+		trMsg.Content[1].Type() != protocol.ContentSubagent {
+		t.Fatalf("expected [tool_result, subagent] on the tool-result message, got %#v", trMsg.Content)
+	}
+	sp, ok := trMsg.Content[1].AsSubagent()
+	if !ok || sp.ThreadID != "thread-1::sub::1" || sp.Status != protocol.SubagentCompleted {
+		t.Fatalf("subagent part not recorded correctly: %+v (ok=%v)", sp, ok)
+	}
+}
+
 func Test_Runner_Run_stops_when_tool_loop_exceeds_limit(t *testing.T) {
 	// Given
 	ctx := context.Background()
@@ -348,5 +426,92 @@ func Test_Runner_Run_failed_tool_call_is_returned_to_model_not_aborted(t *testin
 	}
 	if !sawToolResult {
 		t.Fatal("expected a tool_result error part streamed to the UI")
+	}
+}
+
+// Test_Runner_Run_failed_turn_finalizes_with_reason asserts that a turn which
+// FAILS on a live context (here: the tool-loop limit) still publishes a terminal
+// message_final event carrying the failure reason in meta.error — symmetric with
+// the cancel path — so a client streaming the reply lane sees the message end
+// instead of spinning until its own timeout. Regression for the gap where the
+// failure branch returned the error with no finalize (reason reached only the log
+// + the Aether FailTask).
+func Test_Runner_Run_failed_turn_finalizes_with_reason(t *testing.T) {
+	ctx := context.Background()
+	registry := tools.NewRegistry()
+	if err := registry.Register("record", tools.HandlerFunc(func(_ context.Context, req tools.Request) (tools.Result, error) {
+		return tools.NewJSONResult(req.CallID, req.Name, json.RawMessage(`{"recorded":true}`))
+	})); err != nil {
+		t.Fatalf("register tool: %v", err)
+	}
+	callPart, err := protocol.NewToolCallPart(protocol.ToolInvokeEnvelope{CallID: "call-1", Name: "record", Args: protocol.RawToArgs(json.RawMessage(`{"value":1}`))})
+	if err != nil {
+		t.Fatalf("tool call part: %v", err)
+	}
+	// The model never stops calling tools, so the loop hits MaxToolIterations=1
+	// and returns ErrToolLoopLimit on the second iteration.
+	provider := &scriptedProvider{responses: []provider.ChatResponse{
+		{Message: protocol.ChatMessage{ID: "assistant-tool-1", Role: protocol.RoleAssistant, Content: []protocol.ContentPart{callPart}}},
+		{Message: protocol.ChatMessage{ID: "assistant-tool-2", Role: protocol.RoleAssistant, Content: []protocol.ContentPart{callPart}}},
+	}}
+	publisher := &fakePublisher{}
+	store := &fakeStore{}
+	runner, err := NewRunner(Config{
+		Store:             store,
+		Loader:            fakeLoader{},
+		Registry:          registry,
+		Provider:          provider,
+		Publisher:         publisher,
+		Assembler:         contextpack.NewAssembler(contextpack.Config{MaxHistoryMessages: 10}),
+		MaxToolIterations: 1,
+	})
+	if err != nil {
+		t.Fatalf("runner: %v", err)
+	}
+	userPart, err := protocol.NewTextPart("please record")
+	if err != nil {
+		t.Fatalf("user text: %v", err)
+	}
+
+	finalized, err := runner.Run(ctx, protocol.MessageAddress{ThreadID: "thread-1"}, protocol.ChatMessage{ID: "user-1", Role: protocol.RoleUser, Content: []protocol.ContentPart{userPart}})
+
+	// The turn errors with the loop-limit sentinel (so the task layer FailTasks)...
+	if !errors.Is(err, ErrToolLoopLimit) {
+		t.Fatalf("expected ErrToolLoopLimit, got %v", err)
+	}
+	// ...but the returned message is the finalized partial, annotated with the reason.
+	if finalized.ID != streamMessageID(protocol.MessageAddress{ThreadID: "thread-1"}) {
+		t.Fatalf("expected finalized stream id, got %q", finalized.ID)
+	}
+	raw, ok := finalized.Meta[metaErrorKey]
+	if !ok {
+		t.Fatalf("expected meta[%q] on failed-turn finalize, meta=%v", metaErrorKey, finalized.Meta)
+	}
+	var reason string
+	if err := json.Unmarshal(raw, &reason); err != nil || reason != ErrToolLoopLimit.Error() {
+		t.Fatalf("expected meta.error = %q, got %q (err %v)", ErrToolLoopLimit.Error(), reason, err)
+	}
+	if _, cancelled := finalized.Meta[metaCancelledKey]; cancelled {
+		t.Fatalf("a failed turn must not be marked cancelled")
+	}
+	// A terminal message_final event reached the reply lane, carrying the reason.
+	var final *channel.Event
+	for i := range publisher.events {
+		if publisher.events[i].Type == channel.EventMessageFinal {
+			final = &publisher.events[i]
+		}
+	}
+	if final == nil {
+		t.Fatal("expected a terminal message_final event on the failed turn")
+	}
+	if final.Message == nil {
+		t.Fatal("message_final event carried no message")
+	}
+	if _, ok := final.Message.Meta[metaErrorKey]; !ok {
+		t.Fatalf("message_final must carry meta.error, meta=%v", final.Message.Meta)
+	}
+	// The partial turn was committed to history (so the failure persists on reload).
+	if len(store.messages) == 0 {
+		t.Fatal("expected the failed turn to be committed to the store")
 	}
 }

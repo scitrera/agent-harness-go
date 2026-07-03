@@ -14,6 +14,7 @@ import (
 	"github.com/scitrera/agent-harness-go/pkg/bootstrap"
 	"github.com/scitrera/agent-harness-go/pkg/channel"
 	"github.com/scitrera/agent-harness-go/pkg/commands"
+	"github.com/scitrera/agent-harness-go/pkg/compaction"
 	"github.com/scitrera/agent-harness-go/pkg/contextpack"
 	"github.com/scitrera/agent-harness-go/pkg/dailynotes"
 	"github.com/scitrera/agent-harness-go/pkg/harness"
@@ -61,15 +62,19 @@ type ContextManager interface {
 type EventPublisher = channel.Publisher
 
 type Runner struct {
-	store             harness.HistoryStore
-	loader            BootstrapLoader
-	registry          *tools.Registry
-	provider          Provider
-	publisher         EventPublisher
-	ctxMgr            ContextManager
-	model             string
-	modelRegistry     *modelpkg.Registry
-	modelSelector     modelpkg.Selector
+	store         harness.HistoryStore
+	loader        BootstrapLoader
+	registry      *tools.Registry
+	provider      Provider
+	publisher     EventPublisher
+	ctxMgr        ContextManager
+	model         string
+	modelRegistry *modelpkg.Registry
+	modelSelector modelpkg.Selector
+	// providerResolver, when set, maps the per-turn model to a distinct Provider
+	// (multi-provider config/models.yaml). nil → the single r.provider is always
+	// used; a per-model miss also falls back to r.provider.
+	providerResolver ProviderResolver
 	// threadModels holds the per-thread model pinned via /model <name>
 	// (runner-lifetime; reset when the runner is rebuilt or the process restarts).
 	// Guarded by threadModelsMu.
@@ -154,9 +159,9 @@ type Config struct {
 	Publisher EventPublisher
 	// Assembler is the default context manager. ContextManager, when set,
 	// overrides it (e.g. a MemoryLayer-backed strategy).
-	Assembler         contextpack.Assembler
-	ContextManager    ContextManager
-	Model             string
+	Assembler      contextpack.Assembler
+	ContextManager ContextManager
+	Model          string
 	// ModelRegistry is the set of available models + default. When set, the runner
 	// selects the per-turn model from it (capability-matched), honoring an
 	// explicit /command override first. nil → the single Model is always used.
@@ -165,7 +170,13 @@ type Config struct {
 	// (an explicit override wins). nil with a non-nil ModelRegistry →
 	// model.CapabilityDefault. The distribution plugs in a cost/complexity router
 	// here (policy stays out of oss).
-	ModelSelector     modelpkg.Selector
+	ModelSelector modelpkg.Selector
+	// ProviderResolver, when set, maps the per-turn model to a distinct Provider
+	// (multi-provider config/models.yaml: a model referencing a named provider is
+	// served by that upstream). A model with no provider — or any resolution
+	// failure — falls back to Provider. nil → the single Provider is always used
+	// (unchanged single-provider behavior). Build it via NewProviderResolver.
+	ProviderResolver ProviderResolver
 	// MaxModelAttempts bounds how many distinct models a single turn may try
 	// before surfacing the error (the initial model plus cross-model fallbacks).
 	// Only relevant with a ModelSelector that opts into fallback — oss's
@@ -337,6 +348,7 @@ func NewRunner(cfg Config) (*Runner, error) {
 		model:                 cfg.Model,
 		modelRegistry:         cfg.ModelRegistry,
 		modelSelector:         modelSelector,
+		providerResolver:      cfg.ProviderResolver,
 		threadModels:          map[string]string{},
 		maxToolIterations:     cfg.MaxToolIterations,
 		streaming:             cfg.Streaming,
@@ -472,8 +484,16 @@ func toolSpecsFrom(reg *tools.Registry) []provider.ToolSpec {
 // metaCancelledKey marks a finalized assistant message whose turn the user
 // cancelled mid-flight. Persisted in message meta so history reload (and the
 // frontend) can surface a "turn cancelled" indicator. Kept in sync with the
-// frontend's ``msg.meta.cancelled`` read.
+// frontend's “msg.meta.cancelled“ read.
 const metaCancelledKey = "cancelled"
+
+// metaErrorKey marks a finalized assistant message whose turn FAILED (the model
+// or tool loop errored out — e.g. the tool-loop limit, a provider error), and
+// carries the failure reason (a JSON string). Persisted in message meta so a
+// streaming client / history reload can surface "turn failed: <reason>" instead
+// of an empty bubble. Symmetric with metaCancelledKey; the terminal event is the
+// same message_finalized either way (the spec has no dedicated failure event).
+const metaErrorKey = "error"
 
 func (r *Runner) Run(ctx context.Context, addr protocol.MessageAddress, user protocol.ChatMessage) (_ protocol.ChatMessage, err error) {
 	// Link to the upstream trace (if the inbound address carries one) and open
@@ -569,6 +589,16 @@ func (r *Runner) Run(ctx context.Context, addr protocol.MessageAddress, user pro
 	// on this message's stream and have it folded into the finalized message.
 	emitter := newTurnPartEmitter(streamer)
 	ctx = tools.WithPartEmitter(ctx, emitter)
+	// Per-turn world-state sink: lets tools record durable, compaction-surviving
+	// state (e.g. load_skill → invoked skills). Advance the per-thread turn counter
+	// (carried in world-state meta on the assistant message) so invoked skills can
+	// be aged; the counter survives compaction via ExtractWorldState.
+	wsTurn := compaction.ExtractWorldState(session.History()).Turn + 1
+	wsSink := newTurnWorldStateSink(wsTurn)
+	ctx = tools.WithWorldStateSink(ctx, wsSink)
+	// Carry the current turn number so the assembler ages invoked skills against
+	// "now" (the in-flight turn), not the last turn already stamped in history.
+	ctx = compaction.WithTurnNumber(ctx, wsTurn)
 	// Per-turn tool set: static tools plus any dynamically-discovered ones (the
 	// DynamicToolProvider is queried with the user's message for relevant tools).
 	tt := r.assembleTurnTools(ctx, addr, user)
@@ -601,7 +631,36 @@ func (r *Runner) Run(ctx context.Context, addr protocol.MessageAddress, user pro
 				slog.String("thread", addr.ThreadID), slog.Int("parts", len(finalized.Content)))
 			return finalized, turncancel.ErrTurnCancelled
 		}
-		return protocol.ChatMessage{}, err
+		// Turn FAILED on a live context (not a cancellation): the tool loop errored
+		// out — tool-loop limit, a provider error, an append failure. The happy and
+		// cancel paths both publish a terminal message_finalized; without one here a
+		// client streaming the reply lane never sees the message end and spins until
+		// its own timeout, while the reason reaches only the log + the Aether
+		// FailTask. Mirror the cancel wrap-up: finalize the PARTIAL turn (everything
+		// streamed so far) annotated with the failure reason in meta.error, commit it
+		// so history reflects what happened, then return the error so the task layer
+		// still marks the Aether task FAILED (chat-lane terminal event and task-state
+		// FAILED are different layers — both fire). Detached ctx so the finalize +
+		// commit aren't aborted if the turn ctx is on the edge of a deadline.
+		detached := context.WithoutCancel(ctx)
+		reason, _ := json.Marshal(err.Error())
+		partial := protocol.ChatMessage{
+			Role: protocol.RoleAssistant,
+			Addr: addr,
+			Meta: map[string]json.RawMessage{metaErrorKey: reason},
+		}
+		partial.Content = append(partial.Content, emitter.durableParts()...)
+		finalized, ferr := streamer.finalize(detached, partial)
+		if ferr != nil {
+			slog.WarnContext(detached, "turn failed: finalize failed",
+				slog.String("thread", addr.ThreadID), slog.Any("err", ferr))
+			return protocol.ChatMessage{}, err
+		}
+		r.commitToMemory(detached, auth, addr, user, finalized)
+		slog.ErrorContext(detached, "turn failed: finalized partial turn",
+			slog.String("thread", addr.ThreadID),
+			slog.Int("parts", len(finalized.Content)), slog.Any("err", err))
+		return finalized, err
 	}
 	// Fold tool-emitted durable parts (e.g. the latest todo checklist) into the
 	// finalized + committed message so they persist and reload with history.
@@ -666,6 +725,64 @@ func (r *Runner) resolveTurnModel(ctx context.Context, addr protocol.MessageAddr
 		return r.model
 	}
 	return sel
+}
+
+// escalateModel re-selects the turn's model mid-loop when a new capability
+// becomes required (inject_image adds Vision when its image enters context).
+// callWithRecovery only re-selects on ERROR, so an in-context image would
+// otherwise stay on a non-vision model; this composes with the multi-provider
+// resolver (the escalated model routes to its provider via invokeProvider). It is
+// best-effort — it never fails the turn: with no registry, or when the current
+// model already satisfies the requirement, or when no capable model exists, it
+// returns the current model unchanged.
+func (r *Runner) escalateModel(ctx context.Context, addr protocol.MessageAddress, user protocol.ChatMessage, required modelpkg.Capabilities, current string) string {
+	if r.modelRegistry == nil {
+		return current // single-model mode: nothing to escalate to.
+	}
+	if m, ok := r.modelRegistry.Get(current); ok && m.Capabilities.Satisfies(required) {
+		return current // the current model already covers the new requirement.
+	}
+	if r.modelSelector == nil {
+		return current
+	}
+	next, err := r.modelSelector.SelectModel(ctx, modelpkg.SelectInput{
+		Addr:     addr,
+		User:     user,
+		Required: required,
+		Registry: r.modelRegistry,
+		Default:  r.model,
+	})
+	if err != nil || next == "" {
+		slog.WarnContext(ctx, "inject_image needs vision but no vision-capable model available; continuing on current model",
+			slog.String("model", current), slog.Any("err", err))
+		return current
+	}
+	slog.InfoContext(ctx, "escalating model for in-context image (vision required)",
+		slog.String("from", current), slog.String("to", next))
+	return next
+}
+
+// modelContextBudget returns the usable history token budget for the model the
+// runner is about to call: its registry context window minus a reserve for the
+// model's own output plus the rough token estimate's undercount. Returns 0 when
+// the window is unknown (no registry, no entry, or no `context` in models.yaml) —
+// the assembler then keeps its static MaxContextTokens, so behavior is unchanged
+// unless a per-model window is configured.
+func (r *Runner) modelContextBudget(model string) int {
+	if r.modelRegistry == nil {
+		return 0
+	}
+	m, ok := r.modelRegistry.Get(model)
+	if !ok || m.Context <= 0 {
+		return 0
+	}
+	// Budget to HALF the window. compaction.EstimateTokens uses ~4 bytes/token, which
+	// runs low (observed ~1.6x) on the dense JSON tool-result history a real turn
+	// accumulates, so a naive ¾ budget still overshot (196k est → 319k real on a 262k
+	// model). Half the window leaves headroom for that estimate undercount AND the
+	// model's own output. Overflow is still caught (finalize-on-failure) if a turn is
+	// pathologically dense.
+	return m.Context / 2
 }
 
 // requiredCapabilities derives the capabilities this turn needs: Tools is always

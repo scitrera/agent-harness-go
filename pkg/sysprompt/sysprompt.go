@@ -41,25 +41,82 @@ type ToolSummary struct {
 }
 
 // SkillSummary is a skill the agent can load on demand (lazy: the model reads
-// the file at Path when it decides to use the skill).
+// the file at Path when it decides to use the skill). Note is an optional
+// relevance hint (from a SkillRelevanceProvider) shown next to the skill.
 type SkillSummary struct {
 	Name        string
 	Description string
 	Path        string
+	Note        string
+}
+
+// AutoLoadedSkill is a skill whose full body was injected into context this turn
+// because a relevance provider judged it relevant (no load_skill call needed).
+type AutoLoadedSkill struct {
+	Name string
+	Body string
+}
+
+// LoadedSkill is a skill previously loaded via load_skill this session, with its
+// age in turns (0 = loaded this turn). Rendered in the dynamic suffix so the model
+// knows what it has loaded and how stale it is — its body may have been compacted
+// out of context, in which case it should reload.
+type LoadedSkill struct {
+	Name     string
+	AgeTurns int
+}
+
+// RecentFile is a file the agent wrote/edited this session, with its age in turns.
+// Rendered so the model recalls what it produced even after the tool result that
+// created it was compacted out.
+type RecentFile struct {
+	Path     string
+	Kind     string // write | edit
+	AgeTurns int
+}
+
+// TodoLine is a todo from the agent's board, with its age (turns since last
+// updated). Rendered so the working checklist survives compaction.
+type TodoLine struct {
+	Content  string
+	Status   string
+	AgeTurns int
+}
+
+// SubagentLine is a specialist the agent delegated to this session (via
+// spawn_subagent), with its re-addressable thread_id handle, status, short
+// summary, and age. Rendered so the orchestrator sees its live sub-agents and can
+// route a follow-up to one (spawn_subagent thread=<id>) instead of re-delegating.
+type SubagentLine struct {
+	Name     string
+	ThreadID string
+	Status   string
+	Summary  string
+	AgeTurns int
 }
 
 // Input is the data composed into the system prompt.
 type Input struct {
-	Base         string // base instructions; DefaultBase if empty
-	Bootstrap    []bootstrap.File
-	Tools        []ToolSummary
-	Skills       []SkillSummary
-	MemoryTools  bool // emit the Memory guidance section (memory_search/memory_get available)
-	MaxFileBytes int  // per-file cap for bootstrap content; 0 disables capping
-	WorkspaceDir string
-	Model        string
-	SandboxID    string
-	Now          time.Time // zero -> runtime line omits time
+	Base      string // base instructions; DefaultBase if empty
+	Bootstrap []bootstrap.File
+	Tools     []ToolSummary
+	Skills    []SkillSummary
+	// SkillsDynamic renders the "## Skills" listing in the dynamic suffix rather
+	// than the cacheable prefix — set when a relevance provider makes the listing
+	// per-turn. Off (default) keeps the full catalog in the stable, cacheable prefix.
+	SkillsDynamic    bool
+	AutoLoadedSkills []AutoLoadedSkill // bodies injected this turn by a relevance provider (dynamic)
+	LoadedSkills     []LoadedSkill     // previously loaded via load_skill (dynamic; carries age)
+	RecentFiles      []RecentFile      // files written/edited this session (dynamic; carries age)
+	Todos            []TodoLine        // the agent's todo board (dynamic; carries age)
+	Subagents        []SubagentLine    // sub-agents delegated to this session (dynamic; carries age)
+	MemoryTools      bool              // emit the Memory guidance section (memory_search/memory_get available)
+	SubagentsEnabled bool              // emit the delegation guidance section (spawn_subagent available)
+	MaxFileBytes     int               // per-file cap for bootstrap content; 0 disables capping
+	WorkspaceDir     string
+	Model            string
+	SandboxID        string
+	Now              time.Time // zero -> runtime line omits time
 }
 
 // Prompt is the assembled system prompt, split for cacheability.
@@ -120,9 +177,17 @@ func Build(in Input) Prompt {
 		prefix.WriteString("\n\n")
 		prefix.WriteString(section)
 	}
-	if section := skillSection(in.Skills); section != "" {
+	if section := orchestrationSection(in.SubagentsEnabled); section != "" {
 		prefix.WriteString("\n\n")
 		prefix.WriteString(section)
+	}
+	// The skills listing stays in the cacheable prefix by default. A relevance
+	// provider makes it per-turn (SkillsDynamic) → render it in the suffix instead.
+	if !in.SkillsDynamic {
+		if section := skillSection(in.Skills); section != "" {
+			prefix.WriteString("\n\n")
+			prefix.WriteString(section)
+		}
 	}
 	if in.MemoryTools {
 		prefix.WriteString("\n\n")
@@ -133,10 +198,165 @@ func Build(in Input) Prompt {
 		prefix.WriteString(section)
 	}
 
-	return Prompt{
-		StablePrefix:  prefix.String(),
-		DynamicSuffix: runtimeLine(in),
+	var dynamicSkills string
+	if in.SkillsDynamic {
+		dynamicSkills = skillSection(in.Skills)
 	}
+	return Prompt{
+		StablePrefix: prefix.String(),
+		DynamicSuffix: joinNonEmpty("\n\n",
+			runtimeLine(in),
+			dynamicSkills,
+			autoLoadedSkillsSection(in.AutoLoadedSkills),
+			loadedSkillsSection(in.LoadedSkills),
+			recentFilesSection(in.RecentFiles),
+			todosSection(in.Todos),
+			subagentsSection(in.Subagents),
+		),
+	}
+}
+
+// autoLoadedSkillsSection injects the full bodies of skills a relevance provider
+// realized this turn, so the model can act on them without a load_skill call.
+// Lives in the dynamic suffix: the set is per-turn and the bodies are large.
+func autoLoadedSkillsSection(skills []AutoLoadedSkill) string {
+	if len(skills) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("## Auto-loaded skills\n")
+	b.WriteString("These skills were automatically loaded because they are relevant to your current task. Follow their instructions; you do not need to load them again:\n")
+	for _, s := range skills {
+		b.WriteString("\n### ")
+		b.WriteString(s.Name)
+		b.WriteString("\n")
+		b.WriteString(s.Body)
+		b.WriteString("\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// recentFilesSection lists files the agent wrote/edited this session with their
+// age in turns, so it recalls what it produced after those tool results were
+// compacted out. Dynamic (ages change), so it lives in the suffix.
+func recentFilesSection(files []RecentFile) string {
+	if len(files) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("## Recent files\n")
+	b.WriteString("Files you created or edited earlier this session (turns since touched):\n")
+	for _, f := range files {
+		b.WriteString("- ")
+		b.WriteString(f.Path)
+		if f.Kind != "" {
+			b.WriteString(" (" + f.Kind + ", " + ageWord(f.AgeTurns) + ")")
+		} else {
+			b.WriteString(" (" + ageWord(f.AgeTurns) + ")")
+		}
+		b.WriteString("\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// todosSection renders the agent's todo board (surviving compaction) with age.
+func todosSection(todos []TodoLine) string {
+	if len(todos) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("## Todos\n")
+	b.WriteString("Your current checklist (survives compaction; turns since last updated):\n")
+	for _, t := range todos {
+		b.WriteString("- ")
+		if t.Status != "" {
+			b.WriteString("[" + t.Status + "] ")
+		}
+		b.WriteString(t.Content)
+		b.WriteString(" (" + ageWord(t.AgeTurns) + ")")
+		b.WriteString("\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// subagentsSection lists the specialists the agent delegated to this session, with
+// each one's re-addressable thread_id handle, status, summary, and age. Rendered so
+// the orchestrator routes a follow-up back to a live sub-agent (it keeps its own
+// context) instead of re-delegating. Dynamic (ages change), so it lives in the
+// suffix. Omitted when empty.
+func subagentsSection(subs []SubagentLine) string {
+	if len(subs) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("## Sub-agents\n")
+	b.WriteString("Specialists you delegated to this session — route a follow-up to one with spawn_subagent(thread=<id>) instead of re-delegating (it keeps its own context):\n")
+	for _, s := range subs {
+		b.WriteString("- ")
+		b.WriteString(s.Name)
+		b.WriteString(" (")
+		b.WriteString(s.ThreadID)
+		b.WriteString("): ")
+		b.WriteString(s.Status)
+		if s.Summary != "" {
+			b.WriteString(" — ")
+			b.WriteString(truncateSummary(s.Summary, 160))
+		}
+		b.WriteString(" (" + ageWord(s.AgeTurns) + ")")
+		b.WriteString("\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// truncateSummary caps a sub-agent summary for a single prompt line.
+func truncateSummary(s string, max int) string {
+	if max <= 0 || len(s) <= max {
+		return s
+	}
+	return s[:max] + "…"
+}
+
+// ageWord renders a turn age as a short phrase.
+func ageWord(age int) string {
+	switch age {
+	case 0:
+		return "this turn"
+	case 1:
+		return "1 turn ago"
+	default:
+		return fmt.Sprintf("%d turns ago", age)
+	}
+}
+
+// loadedSkillsSection lists skills already loaded this session with their age in
+// turns, so the model can tell which loaded instructions may have been compacted
+// out of context and reload them. Lives in the dynamic suffix (age changes each
+// turn), not the cacheable prefix.
+func loadedSkillsSection(loaded []LoadedSkill) string {
+	if len(loaded) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("## Loaded skills\n")
+	b.WriteString("Skills you loaded earlier this session (turns since loaded). Older ones may have scrolled out of context — reload with load_skill if you need their instructions again:\n")
+	for _, s := range loaded {
+		b.WriteString("- ")
+		b.WriteString(s.Name)
+		b.WriteString(" (" + ageWord(s.AgeTurns) + ")")
+		b.WriteString("\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// joinNonEmpty joins the non-empty parts with sep.
+func joinNonEmpty(sep string, parts ...string) string {
+	kept := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p != "" {
+			kept = append(kept, p)
+		}
+	}
+	return strings.Join(kept, sep)
 }
 
 func toolSection(tools []ToolSummary) string {
@@ -158,6 +378,29 @@ func toolSection(tools []ToolSummary) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
+// orchestrationSection teaches delegation of context-heavy work to sub-agents so
+// the raw material stays in the sub-agent's isolated thread and the orchestrator
+// holds only summaries + handles. Rendered only when sub-agents are enabled
+// (spawn_subagent available), so it never promises a tool the model lacks. Gated on
+// the Subagents flag rather than the Tools listing, because a distribution may leave
+// the sysprompt Tools list empty (the model gets tools via the API tool-specs). Lives
+// in the cacheable prefix — stable guidance, not per-turn state.
+func orchestrationSection(enabled bool) string {
+	if !enabled {
+		return ""
+	}
+	return orchestrationText
+}
+
+const orchestrationText = `## Delegating context-heavy work
+You can spawn sub-agents (spawn_subagent) that run on their own isolated, durable thread. Use them to keep YOUR context lean: whatever a sub-agent reads stays in ITS thread — you get back only a short summary plus a re-addressable thread_id handle.
+
+- Delegate context-heavy sub-tasks: reading a large document, extracting from a big file, digesting a large dataset — anything that would otherwise pull a lot of raw content into your context. Ask the sub-agent for the distilled result you need (the figures, findings, quotes, structure), not a raw dump.
+- Keep only the summary + handle. Do NOT then re-read the source yourself — continue the sub-agent instead (spawn_subagent with thread=<handle>) to pull specific details on demand; it still holds the material you do not.
+- This is the primary way to stay within the context window on long, multi-source tasks — prefer it over reading many large files into your own context.
+
+When you are yourself a sub-agent given such a task, return a concise, self-contained answer (the extracted facts/structure requested) and keep bulky intermediate content in your code kernel or working notes, not your reply.`
+
 const memorySection = `## Memory
 You have durable memory across sessions. Use it on demand:
 - memory_search(query): recall relevant facts, decisions, and context from past turns.
@@ -178,6 +421,11 @@ func skillSection(skills []SkillSummary) string {
 		if s.Description != "" {
 			b.WriteString(": ")
 			b.WriteString(s.Description)
+		}
+		if s.Note != "" {
+			b.WriteString(" [")
+			b.WriteString(s.Note)
+			b.WriteString("]")
 		}
 		if s.Path != "" {
 			b.WriteString(" (read: ")
