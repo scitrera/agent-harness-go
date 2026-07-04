@@ -68,6 +68,11 @@ func (w *Workspace) AddReadRoots(dirs ...string) error {
 	return nil
 }
 
+// defaultReadFileMaxBytes bounds an uncapped read_file so a huge file can't OOM
+// the harness. Far larger than any model context window, so it never truncates a
+// legitimately-usable text read — purely a DoS guardrail.
+const defaultReadFileMaxBytes = 10 << 20 // 10 MiB
+
 func (w *Workspace) ReadFile(ctx context.Context, relPath string, maxBytes int64) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
@@ -76,12 +81,22 @@ func (w *Workspace) ReadFile(ctx context.Context, relPath string, maxBytes int64
 	if err != nil {
 		return "", err
 	}
-	data, err := os.ReadFile(path)
+	limit := maxBytes
+	if limit <= 0 {
+		limit = defaultReadFileMaxBytes
+	}
+	f, err := os.Open(path)
 	if err != nil {
 		return "", fmt.Errorf("read %s: %w", relPath, err)
 	}
-	if maxBytes > 0 && int64(len(data)) > maxBytes {
-		data = data[:maxBytes]
+	defer f.Close()
+	// Bound the read: never pull more than the cap into memory. os.ReadFile would
+	// read the whole file first, so max_bytes gave no OOM protection. Text reads
+	// truncate to the cap (unlike ReadBytes, which errors — a truncated binary is
+	// corrupt).
+	data, err := io.ReadAll(io.LimitReader(f, limit))
+	if err != nil {
+		return "", fmt.Errorf("read %s: %w", relPath, err)
 	}
 	return string(data), nil
 }

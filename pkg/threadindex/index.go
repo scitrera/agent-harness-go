@@ -3,8 +3,6 @@
 package threadindex
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -13,6 +11,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/scitrera/agent-harness-go/pkg/atomicfile"
+	"github.com/scitrera/agent-harness-go/pkg/ids"
 )
 
 const defaultTitle = "New chat"
@@ -73,15 +74,8 @@ func (x *Index) saveLocked() error {
 	if err != nil {
 		return fmt.Errorf("encode sessions: %w", err)
 	}
-	if err := os.MkdirAll(filepath.Dir(x.path), 0o755); err != nil {
-		return fmt.Errorf("mkdir state: %w", err)
-	}
-	tmp := x.path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return fmt.Errorf("write sessions: %w", err)
-	}
-	if err := os.Rename(tmp, x.path); err != nil {
-		return fmt.Errorf("commit sessions: %w", err)
+	if err := atomicfile.Write(x.path, data, 0o644); err != nil {
+		return fmt.Errorf("save sessions: %w", err)
 	}
 	return nil
 }
@@ -173,11 +167,7 @@ func (x *Index) Delete(id string) error {
 
 // NewID returns prefix plus a random hex token.
 func NewID(prefix string) (string, error) {
-	b := make([]byte, 8)
-	if _, err := rand.Read(b); err != nil {
-		return "", fmt.Errorf("random id: %w", err)
-	}
-	return prefix + hex.EncodeToString(b), nil
+	return ids.New(prefix)
 }
 
 func title(s string) string {

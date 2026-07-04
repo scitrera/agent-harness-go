@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/scitrera/agent-harness-go/pkg/atomicfile"
 	"github.com/scitrera/agent-harness-go/pkg/bootstrap"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 )
@@ -64,20 +65,12 @@ func (s *FileStore) LoadHistory(_ context.Context, threadID string) ([]protocol.
 func (s *FileStore) SaveHistory(_ context.Context, threadID string, messages []protocol.ChatMessage) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	path := s.historyPath(threadID)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("mkdir history: %w", err)
-	}
 	data, err := json.Marshal(messages)
 	if err != nil {
 		return fmt.Errorf("encode history: %w", err)
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return fmt.Errorf("write history: %w", err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		return fmt.Errorf("commit history: %w", err)
+	if err := atomicfile.Write(s.historyPath(threadID), data, 0o644); err != nil {
+		return fmt.Errorf("save history: %w", err)
 	}
 	return nil
 }

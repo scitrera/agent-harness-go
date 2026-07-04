@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/scitrera/agent-harness-go/pkg/atomicfile"
 )
 
 var stateFileLocks sync.Map
@@ -97,39 +99,12 @@ func (s *FileStore) writeState(ctx context.Context, state fileState) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
-		return fmt.Errorf("mkdir task state: %w", err)
-	}
 	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode task state: %w", err)
 	}
-	dir := filepath.Dir(s.path)
-	tmp, err := os.CreateTemp(dir, filepath.Base(s.path)+".*.tmp")
-	if err != nil {
-		return fmt.Errorf("create task state temp: %w", err)
-	}
-	tmpName := tmp.Name()
-	committed := false
-	defer func() {
-		if !committed {
-			_ = os.Remove(tmpName)
-		}
-	}()
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
+	if err := atomicfile.Write(s.path, data, 0o644); err != nil {
 		return fmt.Errorf("write task state: %w", err)
 	}
-	if err := tmp.Chmod(0o644); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("chmod task state: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("close task state: %w", err)
-	}
-	if err := os.Rename(tmpName, s.path); err != nil {
-		return fmt.Errorf("commit task state: %w", err)
-	}
-	committed = true
 	return nil
 }
