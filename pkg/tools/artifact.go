@@ -9,12 +9,42 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/scitrera/agent-harness-go/pkg/localtools"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 )
 
 const presentArtifactToolName = "present_artifact"
+
+// presentedSet remembers which artifact paths each thread has already presented,
+// so a repeat present of the same deliverable can be flagged. Keyed by thread id
+// then raw path; small (paths are short) and bounded by live threads.
+type presentedSet struct {
+	mu   sync.Mutex
+	seen map[string]map[string]struct{}
+}
+
+func newPresentedSet() *presentedSet {
+	return &presentedSet{seen: map[string]map[string]struct{}{}}
+}
+
+// mark records (thread, path) and reports whether it was new (true) or a repeat
+// (false).
+func (p *presentedSet) mark(thread, path string) (isNew bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	byPath := p.seen[thread]
+	if byPath == nil {
+		byPath = map[string]struct{}{}
+		p.seen[thread] = byPath
+	}
+	if _, ok := byPath[path]; ok {
+		return false
+	}
+	byPath[path] = struct{}{}
+	return true
+}
 
 // defaultArtifactInlineMax: an image at or below this size is inlined as a
 // data_uri (no upload round-trip); a larger image, or any non-image file, is
@@ -73,6 +103,12 @@ func RegisterArtifact(reg *Registry, cfg ArtifactConfig) error {
 	if maxBytes <= 0 {
 		maxBytes = defaultArtifactMaxBytes
 	}
+	// seen tracks paths already presented on each thread so a repeat present of
+	// the same deliverable returns a gentle "already submitted" note. present is a
+	// completion signal; re-presenting the same file in a tight refine loop
+	// (without terminating) is a known failure mode. The note nudges termination
+	// without blocking a legitimate revision (the part is still emitted).
+	seen := newPresentedSet()
 	err := reg.Register(presentArtifactToolName, HandlerFunc(func(ctx context.Context, req Request) (Result, error) {
 		var args struct {
 			Paths   []string `json:"paths"`
@@ -91,6 +127,7 @@ func RegisterArtifact(reg *Registry, cfg ArtifactConfig) error {
 			return errorResult(req, "cannot present artifacts on this turn (no streaming surface)")
 		}
 		presented := make([]string, 0, len(args.Paths))
+		repeats := make([]string, 0)
 		for _, p := range args.Paths {
 			data, err := readArtifactBytes(ctx, cfg, req.Addr.ThreadID, args.Context, p, int64(maxBytes))
 			if err != nil {
@@ -106,8 +143,17 @@ func RegisterArtifact(reg *Registry, cfg ArtifactConfig) error {
 				return Result{}, fmt.Errorf("emit artifact part: %w", err)
 			}
 			presented = append(presented, fmt.Sprintf("%s (%s)", name, desc))
+			if !seen.mark(req.Addr.ThreadID, p) {
+				repeats = append(repeats, name)
+			}
 		}
-		payload, err := json.Marshal(map[string]any{"presented": presented})
+		result := map[string]any{"presented": presented}
+		if len(repeats) > 0 {
+			result["note"] = fmt.Sprintf("You have already presented %s. present_artifact submits a COMPLETED deliverable; "+
+				"only re-present a file if you substantively revised it. If every deliverable is final and presented, "+
+				"you are done: give a brief summary and stop.", strings.Join(repeats, ", "))
+		}
+		payload, err := json.Marshal(result)
 		if err != nil {
 			return Result{}, err
 		}
@@ -118,7 +164,7 @@ func RegisterArtifact(reg *Registry, cfg ArtifactConfig) error {
 	}
 	reg.Describe(Descriptor{
 		Name:        presentArtifactToolName,
-		Description: "Surface a file you saved (e.g. a chart, image, or document) to the user as an inline artifact in your reply. Save the file first, then present it. A bare relative path (e.g. \"plot.png\") resolves to your code session's working directory — exactly where the python tool saves relative files — so you can present what you just wrote without an absolute path. Images render inline; other files attach as downloads. Use this instead of a markdown image link — a local file path will NOT render. If you saved under a named `context`, pass the same `context` here.",
+		Description: "Surface a COMPLETED deliverable you saved (e.g. a chart, image, or document) to the user as an inline artifact in your reply. Presenting is a completion signal: finish the file fully first, then present it once — do NOT present drafts, previews, or work-in-progress, and do not re-present a file you have not substantively revised. When every deliverable is final and presented, give a brief summary and stop. A bare relative path (e.g. \"plot.png\") resolves to your code session's working directory — exactly where the python tool saves relative files — so you can present what you just wrote without an absolute path. Images render inline; other files attach as downloads. Use this instead of a markdown image link — a local file path will NOT render. If you saved under a named `context`, pass the same `context` here.",
 		Parameters:  json.RawMessage(`{"type":"object","properties":{"paths":{"type":"array","items":{"type":"string"},"description":"File path(s) to present; a bare name resolves to your code session dir, e.g. [\"plot.png\"]"},"context":{"type":"string","description":"Optional: the code context label the file was saved under (omit for the main session)"}},"required":["paths"]}`),
 	})
 	return nil

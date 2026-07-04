@@ -53,6 +53,45 @@ func invokeArtifact(t *testing.T, cfg ArtifactConfig, em *capturingEmitter, path
 	return res
 }
 
+func TestPresentArtifact_repeatPresentGetsNote(t *testing.T) {
+	ws := artifactWorkspace(t, map[string]string{"plot.png": "PNGBYTES"})
+	em := &capturingEmitter{}
+	reg := NewRegistry()
+	if err := RegisterArtifact(reg, ArtifactConfig{Workspace: ws, InlineMaxBytes: 16}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	ctx := WithPartEmitter(context.Background(), em)
+	req := Request{CallID: "c1", Name: presentArtifactToolName, Arguments: json.RawMessage(`{"paths":["plot.png"]}`)}
+
+	// First present of a path: clean result, no repeat note.
+	res1, err := reg.Invoke(ctx, req)
+	if err != nil {
+		t.Fatalf("invoke1: %v", err)
+	}
+	if res1.IsError {
+		t.Fatalf("res1 error: %s", res1.Payload)
+	}
+	if strings.Contains(string(res1.Payload), "already presented") {
+		t.Fatalf("first present must not carry a repeat note: %s", res1.Payload)
+	}
+
+	// Re-presenting the same path on the same thread carries a termination nudge,
+	// but still emits the part (a legitimate revision is not blocked).
+	res2, err := reg.Invoke(ctx, req)
+	if err != nil {
+		t.Fatalf("invoke2: %v", err)
+	}
+	if res2.IsError {
+		t.Fatalf("res2 error: %s", res2.Payload)
+	}
+	if !strings.Contains(string(res2.Payload), "already presented") {
+		t.Fatalf("repeat present must carry a note, got: %s", res2.Payload)
+	}
+	if len(em.parts) != 2 {
+		t.Fatalf("expected 2 emitted parts (repeat still emits), got %d", len(em.parts))
+	}
+}
+
 func TestPresentArtifact_inlinesSmallImage(t *testing.T) {
 	ws := artifactWorkspace(t, map[string]string{"plot.png": "PNGBYTES"}) // 8 bytes
 	up := &fakeUploader{}
