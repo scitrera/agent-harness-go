@@ -43,6 +43,26 @@ func ContextBudgetFrom(ctx context.Context) (int, bool) {
 	return n, ok
 }
 
+type compactionCounterKey struct{}
+
+// WithCompactionCounter returns ctx carrying a fresh per-turn compaction-event
+// counter plus its pointer. The assembler bumps it (NoteCompaction) each time a
+// context Build drops messages; the turn's world-state sink reads it to persist a
+// running per-thread total (WorldState.Compactions).
+func WithCompactionCounter(ctx context.Context) (context.Context, *int) {
+	p := new(int)
+	return context.WithValue(ctx, compactionCounterKey{}, p), p
+}
+
+// NoteCompaction bumps the ctx compaction-event counter (if present) by one. Called
+// by the assembler when a Reduce actually dropped messages — counts EVENTS (per
+// compacting provider call), not messages.
+func NoteCompaction(ctx context.Context) {
+	if p, ok := ctx.Value(compactionCounterKey{}).(*int); ok && p != nil {
+		*p++
+	}
+}
+
 const (
 	MetaWorldState    = "scitrera_world_state"
 	MetaContextBudget = "scitrera_context_budget"
@@ -58,7 +78,13 @@ type WorldState struct {
 	// Turn is a monotonic per-thread turn counter that survives compaction (it
 	// rides the WorldState meta). Used to age InvokedSkills: a skill's staleness
 	// is Turn - SkillRef.LastTurn.
-	Turn            int              `json:"turn,omitempty"`
+	Turn int `json:"turn,omitempty"`
+	// Compactions is a monotonic per-thread count of context-compaction events (each
+	// provider call whose context Build dropped messages). Survives compaction via the
+	// WorldState meta. Record-keeping today (no behavioral effect); a future signal
+	// source — e.g. a hint that older detail was compacted out and should be searched
+	// in history/memory rather than assumed gone.
+	Compactions     int              `json:"compactions,omitempty"`
 	PlanRefs        []PlanRef        `json:"plan_refs,omitempty"`
 	Tasks           []TaskState      `json:"tasks,omitempty"`
 	Todos           []TodoState      `json:"todos,omitempty"`
@@ -178,6 +204,9 @@ func MergeWorldState(states ...WorldState) WorldState {
 	for _, state := range states {
 		if state.Turn > out.Turn {
 			out.Turn = state.Turn
+		}
+		if state.Compactions > out.Compactions {
+			out.Compactions = state.Compactions
 		}
 		for _, item := range state.PlanRefs {
 			if item.ID != "" {

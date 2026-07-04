@@ -281,7 +281,7 @@ func (a Assembler) Build(ctx context.Context, bootstrap []bootstrap.File, histor
 			historyTokenBudget = 1 // keep at least the most recent message
 		}
 	}
-	reduced, err := compaction.Reduce(history, compaction.Config{
+	report, err := compaction.ReduceWithReport(history, compaction.Config{
 		MaxMessages:      a.cfg.MaxHistoryMessages,
 		MaxTextPartBytes: a.cfg.MaxTextPartBytes,
 		MaxTokens:        historyTokenBudget,
@@ -289,6 +289,11 @@ func (a Assembler) Build(ctx context.Context, bootstrap []bootstrap.File, histor
 	if err != nil {
 		return nil, fmt.Errorf("compact context: %w", err)
 	}
-	messages = append(messages, reduced...)
+	// Record a compaction EVENT when this Build actually dropped messages, so the
+	// per-thread WorldState.Compactions counter advances (record-keeping only).
+	if report.Budget.CompactedMessages > 0 {
+		compaction.NoteCompaction(ctx)
+	}
+	messages = append(messages, report.Messages...)
 	return messages, nil
 }

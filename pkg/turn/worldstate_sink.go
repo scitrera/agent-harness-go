@@ -18,21 +18,28 @@ import (
 // runner writes onto the turn's assistant message meta so it survives compaction
 // via ExtractWorldState.
 type turnWorldStateSink struct {
-	turn      int
-	mu        sync.Mutex
-	skills    map[string]compaction.SkillRef
-	files     map[string]compaction.FileMetadata
-	todos     map[string]compaction.TodoState
-	subagents map[string]compaction.SubagentHandle
+	turn int
+	// baseCompactions is the prior per-thread compaction total (from history);
+	// compactions is the ctx counter the assembler bumps this turn. Persisted total
+	// = baseCompactions + *compactions.
+	baseCompactions int
+	compactions     *int
+	mu              sync.Mutex
+	skills          map[string]compaction.SkillRef
+	files           map[string]compaction.FileMetadata
+	todos           map[string]compaction.TodoState
+	subagents       map[string]compaction.SubagentHandle
 }
 
-func newTurnWorldStateSink(turn int) *turnWorldStateSink {
+func newTurnWorldStateSink(turn, baseCompactions int, compactions *int) *turnWorldStateSink {
 	return &turnWorldStateSink{
-		turn:      turn,
-		skills:    map[string]compaction.SkillRef{},
-		files:     map[string]compaction.FileMetadata{},
-		todos:     map[string]compaction.TodoState{},
-		subagents: map[string]compaction.SubagentHandle{},
+		turn:            turn,
+		baseCompactions: baseCompactions,
+		compactions:     compactions,
+		skills:          map[string]compaction.SkillRef{},
+		files:           map[string]compaction.FileMetadata{},
+		todos:           map[string]compaction.TodoState{},
+		subagents:       map[string]compaction.SubagentHandle{},
 	}
 }
 
@@ -88,7 +95,10 @@ func (s *turnWorldStateSink) RecordSubagent(id, name, status, summary string) {
 func (s *turnWorldStateSink) worldState() compaction.WorldState {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	out := compaction.WorldState{Turn: s.turn}
+	out := compaction.WorldState{Turn: s.turn, Compactions: s.baseCompactions}
+	if s.compactions != nil {
+		out.Compactions += *s.compactions
+	}
 	for _, sk := range s.skills {
 		out.InvokedSkills = append(out.InvokedSkills, sk)
 	}
