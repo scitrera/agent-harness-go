@@ -19,6 +19,7 @@ type fakeMemory struct {
 	recallWorkspace string
 	recallQuery     string
 	recallGrant     string
+	ensured         []ThreadSpec
 }
 
 func (m *fakeMemory) Recall(_ context.Context, auth tools.MemoryAuthority, workspace, query string, _ int) ([]tools.MemoryHit, error) {
@@ -33,6 +34,13 @@ func (m *fakeMemory) AppendThreadMessages(_ context.Context, auth tools.MemoryAu
 	m.appendThread = threadID
 	m.appendGrant = auth.GrantID
 	m.appended = append(m.appended, msgs)
+	return nil
+}
+
+// EnsureThread makes fakeMemory satisfy turn.ThreadRegistrar (the optional
+// thread-hierarchy seam), recording the declared thread specs.
+func (m *fakeMemory) EnsureThread(_ context.Context, _ tools.MemoryAuthority, spec ThreadSpec) error {
+	m.ensured = append(m.ensured, spec)
 	return nil
 }
 

@@ -35,6 +35,18 @@ func toolIterationLimit(ctx context.Context, fallback int) int {
 
 func (r *Runner) runProviderLoop(ctx context.Context, session *harness.Session, addr protocol.MessageAddress, user protocol.ChatMessage, bootstrap []bootstrap.File, streamer *turnStreamer, injected []protocol.ChatMessage, model string, perTurnApprovers []hooks.ToolApprover, tt turnTools) (protocol.ChatMessage, error) {
 	required := requiredCapabilities(user)
+	// One-time pre-turn vision escalation: the loaded history (or injected messages)
+	// may ALREADY carry images — e.g. a persistent sub-agent thread that inspected an
+	// image on a prior turn, or a continued/reloaded thread — while the current user
+	// message is text-only. requiredCapabilities only inspects the user message, and
+	// the reactive escalation in the loop only fires on a NEW inject_image, so without
+	// this the first provider call would ship those history-carried images to a
+	// non-vision model (400 "does not support image inputs"). Checked once here; images
+	// that arrive DURING the turn are handled by the in-loop escalation below.
+	if !required.Vision && (messagesHaveImage(session.History()) || messagesHaveImage(injected)) {
+		required.Vision = true
+		model = r.escalateModel(ctx, addr, user, required, model)
+	}
 	maxToolIterations := toolIterationLimit(ctx, r.maxToolIterations)
 	toolIterations := 0
 	for {
@@ -222,6 +234,19 @@ func (r *Runner) runProviderLoop(ctx context.Context, session *harness.Session, 
 			if _, err := streamer.appendPart(ctx, part); err != nil {
 				return protocol.ChatMessage{}, fmt.Errorf("stream tool result: %w", err)
 			}
+			// Stream the co-located extra parts too (e.g. spawn_subagent's
+			// SubagentPart carrying the child thread_id). They were persisted to the
+			// tool-result message above, but the tool-result message is NOT what the
+			// end-of-turn memory commit writes — that commits the finalized assistant,
+			// reconstructed from the STREAM. Without streaming them, the subagent
+			// linkage never reaches MemoryLayer (parent→child would survive only via
+			// the "::sub::" thread-name convention). Streaming folds them into the
+			// finalized assistant so the committed turn carries the reference.
+			for _, extra := range result.Parts {
+				if _, err := streamer.appendPart(ctx, extra); err != nil {
+					return protocol.ChatMessage{}, fmt.Errorf("stream tool result extra part: %w", err)
+				}
+			}
 			// A tool (inject_image) may ask to place parts into the model's OWN
 			// context as a user message. Collect them in call order; append after
 			// every tool_call is answered (below), never on the tool_result message
@@ -251,6 +276,18 @@ func (r *Runner) runProviderLoop(ctx context.Context, session *harness.Session, 
 func containsImage(parts []protocol.ContentPart) bool {
 	for _, p := range parts {
 		if p.Type() == protocol.ContentImage {
+			return true
+		}
+	}
+	return false
+}
+
+// messagesHaveImage reports whether any message carries an image content part —
+// used for the one-time pre-turn vision check (history/injected images that a
+// text-only user message wouldn't reveal).
+func messagesHaveImage(msgs []protocol.ChatMessage) bool {
+	for _, m := range msgs {
+		if containsImage(m.Content) {
 			return true
 		}
 	}

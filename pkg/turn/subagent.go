@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync/atomic"
 
@@ -107,11 +108,40 @@ func (r *Runner) RunSubagent(ctx context.Context, req subagent.Request) (_ subag
 	if err != nil {
 		return subagent.Result{}, err
 	}
-	// Persist the child thread to memory exactly like Run (assistant-only vs
-	// user+assistant per memAutoCommitAsstOnly) so the sub-agent is durable and
-	// recallable in sahara (MemoryLayer). No auto-recall: resume continuity comes
-	// from the store's LoadHistory cold-load.
-	r.commitToMemory(ctx, auth, addr, userMsg, assistant)
+	// New child thread: DECLARE it (with its parent) via the optional thread
+	// registry seam BEFORE the commit below auto-materializes it. A backend with
+	// native thread hierarchy (sahara → MemoryLayer's chat_threads.parent_thread)
+	// then records + indexes the parent link, which the message-level MessageRef
+	// alone can't (that lives inside message metadata, not an indexed thread
+	// column). Best-effort + optional: on a backend without the capability the
+	// commit still carries the ref. Skipped on resume (the thread already exists),
+	// and only when auto-commit is on (else the commit below no-ops and we'd be
+	// declaring a thread we never populate).
+	if !resume && r.memAutoCommit {
+		if reg, ok := r.memory.(ThreadRegistrar); ok {
+			if err := reg.EnsureThread(ctx, auth, ThreadSpec{
+				WorkspaceID:    addr.WorkspaceID,
+				ThreadID:       childThreadID,
+				ParentThreadID: parentThread,
+				Origin:         "subagent",
+			}); err != nil {
+				slog.WarnContext(ctx, "subagent: ensure child thread failed",
+					slog.String("thread", childThreadID),
+					slog.String("parent", parentThread), slog.Any("err", err))
+			}
+		}
+	}
+	// Persist the child thread to memory so the sub-agent is durable and recallable
+	// in sahara (MemoryLayer). No auto-recall: resume continuity comes from the
+	// store's LoadHistory cold-load. Commit the task message AND the assistant
+	// (never assistant-only here): the assistant-only mode exists because a host
+	// pre-commits the parent thread's user turn, but NOTHING pre-commits this
+	// internally-minted child task message — and it is the ONLY message carrying the
+	// cross-thread back-ref (MessageRef{parent_thread_id, parent_message_id}) + spawn
+	// meta. Dropping it would leave the child→parent linkage nowhere in memory except
+	// the "::sub::" thread-name convention. On resume the task message has no ref
+	// (skipped above), so committing it is still correct (just the follow-up turn).
+	r.commitMessages(ctx, auth, addr, []protocol.ChatMessage{userMsg, assistant})
 	text := textOf(assistant)
 	return subagent.Result{Text: text, ThreadID: childThreadID, Summary: summarizeSubagent(text)}, nil
 }

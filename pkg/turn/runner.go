@@ -46,6 +46,33 @@ type MemoryService interface {
 	AppendThreadMessages(ctx context.Context, auth tools.MemoryAuthority, workspace, threadID string, messages []protocol.ChatMessage) error
 }
 
+// ThreadSpec describes a thread to declare durably, independent of its message
+// content. ThreadID + ParentThreadID are the load-bearing fields; the rest are
+// optional hints a backend MAY persist (e.g. as thread metadata) or ignore. It
+// is a struct — not a fixed argument list — so the seam can grow (title, tags,
+// expiry…) without breaking implementers: oss is meant to be a base for backends
+// beyond MemoryLayer.
+type ThreadSpec struct {
+	WorkspaceID    string
+	ThreadID       string
+	ParentThreadID string
+	// Origin records what created the thread (e.g. "subagent"); a hint only.
+	Origin string
+}
+
+// ThreadRegistrar is an OPTIONAL capability a MemoryService (or any backend) may
+// implement to durably DECLARE a thread and its parent relationship, separate
+// from the per-message MessageRef the commit already carries. The turn runner
+// calls EnsureThread when it mints a NEW child thread (a sub-agent spawn) so a
+// backend with native thread hierarchy can record + index the parent link. It is
+// idempotent (create-or-noop) and best-effort: a backend that does not implement
+// it loses only the thread-level index, not the message-level linkage. oss owns
+// this abstraction + the call site; the distribution implements it against its
+// store (sahara → MemoryLayer's chat_threads.parent_thread).
+type ThreadRegistrar interface {
+	EnsureThread(ctx context.Context, auth tools.MemoryAuthority, spec ThreadSpec) error
+}
+
 type BootstrapLoader interface {
 	LoadBootstrap(ctx context.Context) ([]bootstrap.File, error)
 }
@@ -593,8 +620,12 @@ func (r *Runner) Run(ctx context.Context, addr protocol.MessageAddress, user pro
 	// state (e.g. load_skill → invoked skills). Advance the per-thread turn counter
 	// (carried in world-state meta on the assistant message) so invoked skills can
 	// be aged; the counter survives compaction via ExtractWorldState.
-	wsTurn := compaction.ExtractWorldState(session.History()).Turn + 1
-	wsSink := newTurnWorldStateSink(wsTurn)
+	prior := compaction.ExtractWorldState(session.History())
+	wsTurn := prior.Turn + 1
+	// Per-turn compaction-event counter: the assembler bumps it each time a context
+	// Build drops messages; the sink persists prior.Compactions + this turn's count.
+	ctx, compCounter := compaction.WithCompactionCounter(ctx)
+	wsSink := newTurnWorldStateSink(wsTurn, prior.Compactions, compCounter)
 	ctx = tools.WithWorldStateSink(ctx, wsSink)
 	// Carry the current turn number so the assembler ages invoked skills against
 	// "now" (the in-flight turn), not the last turn already stamped in history.
@@ -854,14 +885,21 @@ func (r *Runner) dailyNotesMessage(ctx context.Context, addr protocol.MessageAdd
 // assistant-only when MemoryAutoCommitAssistantOnly is set (the host persists
 // the user message). Best-effort: errors are logged, never returned.
 func (r *Runner) commitToMemory(ctx context.Context, auth tools.MemoryAuthority, addr protocol.MessageAddress, user, assistant protocol.ChatMessage) {
-	if !r.memAutoCommit || r.memory == nil {
-		return
-	}
 	msgs := []protocol.ChatMessage{user, assistant}
 	if r.memAutoCommitAsstOnly {
 		// Host owns the user-message persistence; commit only the assistant to
 		// avoid duplicating the user turn in the thread.
 		msgs = []protocol.ChatMessage{assistant}
+	}
+	r.commitMessages(ctx, auth, addr, msgs)
+}
+
+// commitMessages is the shared MemoryLayer auto-commit core: it appends the
+// given messages to the thread when auto-commit is on. Best-effort: errors are
+// logged, never returned.
+func (r *Runner) commitMessages(ctx context.Context, auth tools.MemoryAuthority, addr protocol.MessageAddress, msgs []protocol.ChatMessage) {
+	if !r.memAutoCommit || r.memory == nil {
+		return
 	}
 	if err := r.memory.AppendThreadMessages(ctx, auth, addr.WorkspaceID, addr.ThreadID, msgs); err != nil {
 		slog.WarnContext(ctx, "memory auto-commit failed", slog.Any("err", err))

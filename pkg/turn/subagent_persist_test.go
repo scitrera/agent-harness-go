@@ -120,6 +120,105 @@ func Test_Runner_RunSubagent_persists_child_thread_with_backref(t *testing.T) {
 	}
 }
 
+func Test_Runner_RunSubagent_commits_backref_even_under_assistant_only(t *testing.T) {
+	// Given: auto-commit in ASSISTANT-ONLY mode — the production sahara setting
+	// (MemoryAutoCommitAssistantOnly: true, because a host pre-commits the PARENT
+	// thread's user turn). A child sub-agent thread is minted internally, so nothing
+	// pre-commits its task message — and that task message is the ONLY carrier of the
+	// child→parent back-ref. Assistant-only must NOT drop it, or the linkage is lost
+	// to everything but the "::sub::" thread-name convention (Gap B).
+	store := &recordingStore{}
+	mem := &fakeMemory{}
+	r, err := NewRunner(Config{
+		Store:                         store,
+		Loader:                        fakeLoader{},
+		Provider:                      &fakeProvider{},
+		Assembler:                     contextpack.NewAssembler(contextpack.Config{MaxHistoryMessages: 8}),
+		Memory:                        mem,
+		MemoryAutoCommit:              true,
+		MemoryAutoCommitAssistantOnly: true,
+	})
+	if err != nil {
+		t.Fatalf("runner: %v", err)
+	}
+
+	res, err := r.RunSubagent(context.Background(), subagent.Request{
+		Task:            "research the API",
+		Depth:           1,
+		Parent:          protocol.MessageAddress{ThreadID: "parent-thread", WorkspaceID: "ws1", AgentID: "falcon"},
+		ParentMessageID: "msg-parent-7",
+	})
+	if err != nil {
+		t.Fatalf("run subagent: %v", err)
+	}
+
+	// Even under assistant-only, the child commit carries BOTH the task and the
+	// assistant (assistant-only applies to the parent thread, not internally-minted
+	// child threads).
+	if len(mem.appended) != 1 || len(mem.appended[0]) != 2 {
+		t.Fatalf("expected one [task, assistant] child commit under assistant-only, got %#v", mem.appended)
+	}
+	task := mem.appended[0][0]
+	if task.Role != protocol.RoleUser {
+		t.Fatalf("first committed child message should be the task (user), got %s", task.Role)
+	}
+	if task.Ref == nil || task.Ref.ParentThreadID != "parent-thread" || task.Ref.ParentMessageID != "msg-parent-7" {
+		t.Fatalf("child→parent back-ref lost under assistant-only: task.Ref = %#v", task.Ref)
+	}
+	if mem.appendThread != res.ThreadID {
+		t.Fatalf("committed thread = %q, want child %q", mem.appendThread, res.ThreadID)
+	}
+}
+
+func Test_Runner_RunSubagent_declares_child_thread_parent_via_registrar(t *testing.T) {
+	// Given: a memory backend that also implements ThreadRegistrar (the optional
+	// thread-hierarchy seam). fakeMemory records EnsureThread calls.
+	mem := &fakeMemory{}
+	r, err := NewRunner(Config{
+		Store:            &recordingStore{},
+		Loader:           fakeLoader{},
+		Provider:         &fakeProvider{},
+		Assembler:        contextpack.NewAssembler(contextpack.Config{MaxHistoryMessages: 8}),
+		Memory:           mem,
+		MemoryAutoCommit: true,
+	})
+	if err != nil {
+		t.Fatalf("runner: %v", err)
+	}
+
+	// When: a NEW sub-agent runs under a parent thread.
+	res, err := r.RunSubagent(context.Background(), subagent.Request{
+		Task:            "research",
+		Parent:          protocol.MessageAddress{ThreadID: "parent-thread", WorkspaceID: "ws1"},
+		ParentMessageID: "msg-7",
+	})
+	if err != nil {
+		t.Fatalf("run subagent: %v", err)
+	}
+
+	// Then: the runner DECLARED the child thread with its parent, before the commit.
+	if len(mem.ensured) != 1 {
+		t.Fatalf("expected one EnsureThread call, got %#v", mem.ensured)
+	}
+	got := mem.ensured[0]
+	if got.ThreadID != res.ThreadID || got.ParentThreadID != "parent-thread" ||
+		got.WorkspaceID != "ws1" || got.Origin != "subagent" {
+		t.Fatalf("declared thread = %#v, want {thread=%s, parent=parent-thread, ws=ws1, origin=subagent}", got, res.ThreadID)
+	}
+
+	// And: resuming that child thread does NOT re-declare it (it already exists).
+	if _, err := r.RunSubagent(context.Background(), subagent.Request{
+		Task:           "follow up",
+		Parent:         protocol.MessageAddress{ThreadID: "parent-thread", WorkspaceID: "ws1"},
+		ResumeThreadID: res.ThreadID,
+	}); err != nil {
+		t.Fatalf("resume run: %v", err)
+	}
+	if len(mem.ensured) != 1 {
+		t.Fatalf("resume must not re-declare the thread, got %#v", mem.ensured)
+	}
+}
+
 func Test_Runner_RunSubagent_resume_reuses_child_thread(t *testing.T) {
 	// Given: a durable store + memory hook.
 	store := &recordingStore{}

@@ -515,3 +515,92 @@ func Test_Runner_Run_failed_turn_finalizes_with_reason(t *testing.T) {
 		t.Fatal("expected the failed turn to be committed to the store")
 	}
 }
+
+// Test_Runner_Run_streams_tool_extra_parts_into_finalized_assistant asserts that
+// a tool's co-located extra parts (result.Parts — e.g. spawn_subagent's
+// SubagentPart carrying the child thread_id) are streamed and therefore folded
+// into the finalized assistant, so the end-of-turn memory commit (which writes
+// the finalized assistant, not the tool-result message) carries the subagent
+// linkage. Regression for Gap A: previously only the tool_result part was
+// streamed, so the SubagentPart never reached MemoryLayer and parent→child
+// survived only via the "::sub::" thread-name convention.
+func Test_Runner_Run_streams_tool_extra_parts_into_finalized_assistant(t *testing.T) {
+	ctx := context.Background()
+	const childThread = "thread-1::sub::1"
+	registry := tools.NewRegistry()
+	if err := registry.Register("delegate", tools.HandlerFunc(func(_ context.Context, req tools.Request) (tools.Result, error) {
+		res, err := tools.NewJSONResult(req.CallID, req.Name, json.RawMessage(`{"thread_id":"`+childThread+`"}`))
+		if err != nil {
+			return tools.Result{}, err
+		}
+		sp, perr := protocol.NewSubagentPart(protocol.SubagentPart{
+			ID: req.CallID, Name: "researcher", ThreadID: childThread,
+			Status: protocol.SubagentCompleted, Summary: "did research",
+		})
+		if perr != nil {
+			return tools.Result{}, perr
+		}
+		res.Parts = []protocol.ContentPart{sp}
+		return res, nil
+	})); err != nil {
+		t.Fatalf("register tool: %v", err)
+	}
+	callPart, err := protocol.NewToolCallPart(protocol.ToolInvokeEnvelope{CallID: "call-1", Name: "delegate", Args: protocol.RawToArgs(json.RawMessage(`{}`))})
+	if err != nil {
+		t.Fatalf("tool call part: %v", err)
+	}
+	finalPart, err := protocol.NewTextPart("done")
+	if err != nil {
+		t.Fatalf("final text: %v", err)
+	}
+	provider := &scriptedProvider{responses: []provider.ChatResponse{
+		{Message: protocol.ChatMessage{ID: "a1", Role: protocol.RoleAssistant, Content: []protocol.ContentPart{callPart}}},
+		{Message: protocol.ChatMessage{ID: "a2", Role: protocol.RoleAssistant, Content: []protocol.ContentPart{finalPart}}},
+	}}
+	mem := &fakeMemory{}
+	runner, err := NewRunner(Config{
+		Store:                         &fakeStore{},
+		Loader:                        fakeLoader{},
+		Registry:                      registry,
+		Provider:                      provider,
+		Publisher:                     &fakePublisher{},
+		Assembler:                     contextpack.NewAssembler(contextpack.Config{MaxHistoryMessages: 10}),
+		MaxToolIterations:             2,
+		Memory:                        mem,
+		MemoryAutoCommit:              true,
+		MemoryAutoCommitAssistantOnly: true, // production sahara setting
+	})
+	if err != nil {
+		t.Fatalf("runner: %v", err)
+	}
+	userPart, err := protocol.NewTextPart("please delegate")
+	if err != nil {
+		t.Fatalf("user text: %v", err)
+	}
+
+	finalized, err := runner.Run(ctx, protocol.MessageAddress{ThreadID: "thread-1"}, protocol.ChatMessage{ID: "user-1", Role: protocol.RoleUser, Content: []protocol.ContentPart{userPart}})
+	if err != nil {
+		t.Fatalf("run turn: %v", err)
+	}
+
+	// The finalized assistant carries the SubagentPart (folded in from the stream).
+	findSubagent := func(m protocol.ChatMessage) bool {
+		for _, p := range m.Content {
+			if sp, ok := p.AsSubagent(); ok && sp.ThreadID == childThread {
+				return true
+			}
+		}
+		return false
+	}
+	if !findSubagent(finalized) {
+		t.Fatalf("finalized assistant missing SubagentPart(thread=%s): %#v", childThread, finalized.Content)
+	}
+	// And the end-of-turn memory commit (assistant-only) carried it — so parent→child
+	// linkage reaches MemoryLayer, not just the thread-name convention.
+	if len(mem.appended) != 1 || len(mem.appended[0]) != 1 {
+		t.Fatalf("expected one assistant-only commit, got %#v", mem.appended)
+	}
+	if !findSubagent(mem.appended[0][0]) {
+		t.Fatalf("committed assistant missing SubagentPart(thread=%s): %#v", childThread, mem.appended[0][0].Content)
+	}
+}
