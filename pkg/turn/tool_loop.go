@@ -74,12 +74,34 @@ func (r *Runner) runProviderLoop(ctx context.Context, session *harness.Session, 
 		// (Request.MessageID); the tool CallID alone doesn't identify it.
 		ctx = tools.WithMessageID(ctx, assistant.ID)
 
-		// Stream the tool_call parts so the UI surfaces tool activity in real time.
+		// Surface this iteration's assistant content on the stream in content
+		// order. Non-tool-call parts (preamble text, reasoning) that weren't
+		// already streamed live are appended here so they render inline at their
+		// real position instead of being dropped (non-streaming providers emit no
+		// token deltas, so their preamble text would otherwise never reach the UI
+		// and the turn's only text would collapse to the finalize tail). On the
+		// streaming path these are already in the reconstruction, so appending is
+		// a no-op. The tool_call parts themselves stream per-call below — right
+		// before their approval + result — so an approval_request renders adjacent
+		// to its own call instead of after the whole batch.
 		for _, part := range assistant.Content {
 			if part.Type() == protocol.ContentToolCall {
-				if _, err := streamer.appendPart(ctx, part); err != nil {
-					return protocol.ChatMessage{}, fmt.Errorf("stream tool call: %w", err)
-				}
+				continue
+			}
+			if _, err := streamer.appendUnstreamed(ctx, part); err != nil {
+				return protocol.ChatMessage{}, fmt.Errorf("stream assistant part: %w", err)
+			}
+		}
+		// Index the iteration's tool_call parts by call id so each can be streamed
+		// immediately before its approval/execution (interleaved), keeping the
+		// approval_request adjacent to the call it gates.
+		toolCallParts := make(map[string]protocol.ContentPart, len(calls))
+		for _, part := range assistant.Content {
+			if part.Type() != protocol.ContentToolCall {
+				continue
+			}
+			if env, ok := protocol.ToolCallFromPart(part); ok {
+				toolCallParts[env.CallID] = part
 			}
 		}
 		// Parts a tool asks to inject into the model's OWN context as a NEW
@@ -91,6 +113,14 @@ func (r *Runner) runProviderLoop(ctx context.Context, session *harness.Session, 
 		for _, call := range calls {
 			if call.Addr.ThreadID == "" {
 				call.Addr = addr
+			}
+			// Stream this call's tool_call part now (just before its approval +
+			// execution) so it renders immediately above its approval_request /
+			// result rather than being batched ahead of every approval.
+			if tcPart, ok := toolCallParts[call.CallID]; ok {
+				if _, err := streamer.appendUnstreamed(ctx, tcPart); err != nil {
+					return protocol.ChatMessage{}, fmt.Errorf("stream tool call: %w", err)
+				}
 			}
 			hc := hooks.ToolCall{CallID: call.CallID, Name: call.Name, Args: protocol.ArgsToRaw(call.Args), Addr: call.Addr}
 			r.publishToolEvent(ctx, toolEventFromCall(tools.ToolEventQueued, call))

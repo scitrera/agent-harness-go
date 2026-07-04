@@ -125,6 +125,26 @@ func (s *turnStreamer) appendPart(ctx context.Context, part protocol.ContentPart
 	return idx, nil
 }
 
+// appendUnstreamed appends part only when an equivalent part isn't already in
+// the reconstruction, so a part already streamed live (e.g. a text part fed by
+// token_delta on the streaming path, or a tool_call streamed earlier this turn)
+// isn't duplicated. Returns whether it was appended. Used to surface an
+// assistant message's parts (preamble text/reasoning, tool_call) in content
+// order regardless of whether the provider streamed them — a no-op on the
+// streaming path, the sole emit site on the non-streaming path.
+func (s *turnStreamer) appendUnstreamed(ctx context.Context, part protocol.ContentPart) (bool, error) {
+	if s == nil || s.publisher == nil {
+		return false, nil
+	}
+	if containsEquivalentPart(s.state[s.msgID].Content, part) {
+		return false, nil
+	}
+	if _, err := s.appendPart(ctx, part); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // appendTextStream appends an empty text part to stream tokens into, returning
 // its index (or -1 when there is no publisher).
 func (s *turnStreamer) appendTextStream(ctx context.Context) (int, error) {
