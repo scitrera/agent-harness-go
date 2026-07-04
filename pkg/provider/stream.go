@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 )
@@ -28,6 +29,20 @@ func (c *SidecarClient) ChatStream(ctx context.Context, chat ChatRequest, onDelt
 	if err != nil {
 		return ChatResponse{}, fmt.Errorf("marshal chat request: %w", err)
 	}
+	// Liveness deadline (NOT a total timeout): generous window for the FIRST chunk
+	// (time-to-first-token), then a tight gap between subsequent chunks. Each received
+	// line resets to the inter-chunk bound, so a long-but-live generation runs to
+	// completion — unlike http.Client.Timeout, which caps the whole call and kills long
+	// streams mid-body.
+	reset := func() {}
+	if c.streamFirstChunk > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithCancel(ctx)
+		defer cancel()
+		timer := time.AfterFunc(c.streamFirstChunk, cancel)
+		defer timer.Stop()
+		reset = func() { timer.Reset(c.streamIdle) }
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint(), bytes.NewReader(body))
 	if err != nil {
 		return ChatResponse{}, fmt.Errorf("create chat request: %w", err)
@@ -37,7 +52,7 @@ func (c *SidecarClient) ChatStream(ctx context.Context, chat ChatRequest, onDelt
 	if c.authHeader != "" {
 		req.Header.Set("authorization", c.authHeader)
 	}
-	resp, err := c.client.Do(req)
+	resp, err := c.streamClient.Do(req)
 	if err != nil {
 		return ChatResponse{}, classifyTransport(err)
 	}
@@ -64,7 +79,7 @@ func (c *SidecarClient) ChatStream(ctx context.Context, chat ChatRequest, onDelt
 		}
 		return out, nil
 	}
-	return parseSSEStream(resp.Body, onDelta)
+	return parseSSEStream(resp.Body, onDelta, reset)
 }
 
 type sseToolAccumulator struct {
@@ -73,7 +88,7 @@ type sseToolAccumulator struct {
 	args strings.Builder
 }
 
-func parseSSEStream(r io.Reader, onDelta DeltaFunc) (ChatResponse, error) {
+func parseSSEStream(r io.Reader, onDelta DeltaFunc, reset func()) (ChatResponse, error) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), 8<<20)
 
@@ -84,6 +99,9 @@ func parseSSEStream(r io.Reader, onDelta DeltaFunc) (ChatResponse, error) {
 	var order []int
 
 	for scanner.Scan() {
+		if reset != nil {
+			reset() // any received line = the stream is alive → reset the idle deadline
+		}
 		line := strings.TrimSpace(scanner.Text())
 		if !strings.HasPrefix(line, "data:") {
 			continue // skip blank lines, comments, event: lines

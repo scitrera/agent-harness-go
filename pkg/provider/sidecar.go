@@ -46,6 +46,12 @@ type SidecarConfig struct {
 	ChatPath   string
 	Format     WireFormat
 	HTTPClient *http.Client
+	// StreamFirstChunk bounds the wait for the FIRST streamed chunk (time-to-first-
+	// token — long for big-context reasoning). StreamIdle bounds the gap between
+	// SUBSEQUENT chunks (once tokens flow, gaps are short). Neither is a total-duration
+	// cap. 0 → defaults (see NewSidecarClient).
+	StreamFirstChunk time.Duration
+	StreamIdle       time.Duration
 	// Guard, when set, validates BaseURL + AuthHeader (e.g. SandboxGuard).
 	Guard Guard
 }
@@ -56,6 +62,11 @@ type SidecarClient struct {
 	authHeader string
 	format     WireFormat
 	client     *http.Client
+	// streamClient has NO total timeout (a streaming generation legitimately exceeds
+	// one); ChatStream enforces liveness via first-chunk + inter-chunk deadlines.
+	streamClient     *http.Client
+	streamFirstChunk time.Duration
+	streamIdle       time.Duration
 }
 
 type ChatRequest struct {
@@ -111,6 +122,18 @@ func NewSidecarClient(cfg SidecarConfig) (*SidecarClient, error) {
 	if client == nil {
 		client = &http.Client{Timeout: 60 * time.Second}
 	}
+	// Streaming gets its own client with NO total timeout — a long generation would
+	// otherwise be killed mid-stream ("Client.Timeout ... reading body"). Reuse the
+	// base client's transport; ChatStream bounds it by an inter-chunk idle deadline.
+	streamClient := &http.Client{Transport: client.Transport, Timeout: 0}
+	streamFirstChunk := cfg.StreamFirstChunk
+	if streamFirstChunk <= 0 {
+		streamFirstChunk = 300 * time.Second // time-to-first-token can be long
+	}
+	streamIdle := cfg.StreamIdle
+	if streamIdle <= 0 {
+		streamIdle = 15 * time.Second // once tokens flow, gaps are short
+	}
 	chatPath := cfg.ChatPath
 	if chatPath == "" {
 		chatPath = "/v1/chat/completions"
@@ -119,7 +142,7 @@ func NewSidecarClient(cfg SidecarConfig) (*SidecarClient, error) {
 	if format == "" {
 		format = FormatNative
 	}
-	return &SidecarClient{baseURL: parsed, chatPath: chatPath, authHeader: cfg.AuthHeader, format: format, client: client}, nil
+	return &SidecarClient{baseURL: parsed, chatPath: chatPath, authHeader: cfg.AuthHeader, format: format, client: client, streamClient: streamClient, streamFirstChunk: streamFirstChunk, streamIdle: streamIdle}, nil
 }
 
 func (c *SidecarClient) BaseURL() string {
