@@ -50,9 +50,11 @@ func (r *Runner) RunOnce(ctx context.Context) (protocol.ChatMessage, error) {
 // cancellable per-turn context (keyed by task id), and runs the turn.
 func (r *Runner) runTask(ctx context.Context, envelope channel.Inbound) (protocol.ChatMessage, error) {
 	addr := turnAddress(envelope)
-	if addr.ThreadID == "" {
-		return protocol.ChatMessage{}, ErrMissingThreadID
-	}
+	// A missing thread id is NOT an error here: the turn executor resolves it — a
+	// new chat from a "dumb" client mints one (canonical via the backend thread
+	// registrar, else a local id) and the resolved id rides back on the egress
+	// stream + the returned message. The runtime loop delegates thread-id policy to
+	// the executor rather than hard-requiring the caller to supply one.
 	turnCtx, done := r.canceller.Begin(ctx, addr.TaskID)
 	defer done()
 	assistant, err := r.executor.Run(turnCtx, addr, envelope.Message)

@@ -19,6 +19,7 @@ import (
 	"github.com/scitrera/agent-harness-go/pkg/dailynotes"
 	"github.com/scitrera/agent-harness-go/pkg/harness"
 	"github.com/scitrera/agent-harness-go/pkg/hooks"
+	"github.com/scitrera/agent-harness-go/pkg/ids"
 	modelpkg "github.com/scitrera/agent-harness-go/pkg/model"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 	"github.com/scitrera/agent-harness-go/pkg/provider"
@@ -61,16 +62,19 @@ type ThreadSpec struct {
 }
 
 // ThreadRegistrar is an OPTIONAL capability a MemoryService (or any backend) may
-// implement to durably DECLARE a thread and its parent relationship, separate
-// from the per-message MessageRef the commit already carries. The turn runner
-// calls EnsureThread when it mints a NEW child thread (a sub-agent spawn) so a
-// backend with native thread hierarchy can record + index the parent link. It is
-// idempotent (create-or-noop) and best-effort: a backend that does not implement
-// it loses only the thread-level index, not the message-level linkage. oss owns
-// this abstraction + the call site; the distribution implements it against its
-// store (sahara → MemoryLayer's chat_threads.parent_thread).
+// implement to durably DECLARE (and, when asked, MINT) a thread plus its parent
+// relationship, separate from the per-message MessageRef the commit carries. The
+// turn runner calls EnsureThread in two cases: declaring a NEW sub-agent child
+// thread (spec.ThreadID set → returned unchanged), and minting a thread for a
+// new chat that arrived with none (spec.ThreadID empty → the backend generates a
+// canonical id and returns it). It is idempotent (create-or-noop) and
+// best-effort: a backend that does not implement it loses only the thread-level
+// index, not the message-level linkage; when it is absent the runner mints a
+// local id instead. oss owns this abstraction + the call sites; the distribution
+// implements it against its store (sahara → MemoryLayer's chat_threads, whose
+// server mints the id when none is supplied).
 type ThreadRegistrar interface {
-	EnsureThread(ctx context.Context, auth tools.MemoryAuthority, spec ThreadSpec) error
+	EnsureThread(ctx context.Context, auth tools.MemoryAuthority, spec ThreadSpec) (threadID string, err error)
 }
 
 type BootstrapLoader interface {
@@ -128,10 +132,14 @@ type Runner struct {
 	dailyNotesDir  string
 	dailyNotesDays int
 	now            func() time.Time
+	// newThreadID mints a local thread id when a turn arrives with none and no
+	// backend ThreadRegistrar is wired (or it fails). Defaults to a random hex id.
+	newThreadID func() string
 
 	commands          *commands.Registry
 	approvers         []hooks.ToolApprover
 	observers         []hooks.ToolObserver
+	turnObservers     []hooks.TurnObserver
 	authorityFn       AuthorityFunc
 	dedupTrailingUser bool
 
@@ -256,6 +264,10 @@ type Config struct {
 	DailyNotesDir  string
 	DailyNotesDays int
 	Now            func() time.Time
+	// NewThreadID mints a local thread id for a new chat that arrived with no
+	// thread (and no ThreadRegistrar minted one). Defaults to a random hex id;
+	// override for deterministic tests.
+	NewThreadID func() string
 
 	// Commands holds discovered workspace slash commands. Reserved built-ins
 	// (/help, /commands, /clear) are always available; a nil registry just means
@@ -268,6 +280,12 @@ type Config struct {
 	// observer can be plugged in later.
 	Approvers []hooks.ToolApprover
 	Observers []hooks.ToolObserver
+	// TurnObservers watch the TURN lifecycle (start, each model call, compaction,
+	// finish) — no veto. Peer to Observers (tool sub-lifecycle). A checkpoint/sync
+	// or audit backend implements hooks.TurnObserver; unset → the turn fires
+	// nothing. The distribution can also pass its command-hook Runtime here (it
+	// implements TurnObserver) to drive external UserPromptSubmit/PostCompact hooks.
+	TurnObservers []hooks.TurnObserver
 
 	// Authority derives each turn's OBO authority from the inbound message. Core
 	// leaves it nil; the distribution wires the grant extractor.
@@ -395,9 +413,11 @@ func NewRunner(cfg Config) (*Runner, error) {
 		dailyNotesDir:         cfg.DailyNotesDir,
 		dailyNotesDays:        cfg.DailyNotesDays,
 		now:                   cfg.Now,
+		newThreadID:           cfg.NewThreadID,
 		commands:              cfg.Commands,
 		approvers:             cfg.Approvers,
 		observers:             cfg.Observers,
+		turnObservers:         cfg.TurnObservers,
 		authorityFn:           cfg.Authority,
 		dedupTrailingUser:     cfg.DedupTrailingUserTurn,
 		approvals:             cfg.Approvals,
@@ -523,11 +543,35 @@ const metaCancelledKey = "cancelled"
 const metaErrorKey = "error"
 
 func (r *Runner) Run(ctx context.Context, addr protocol.MessageAddress, user protocol.ChatMessage) (_ protocol.ChatMessage, err error) {
-	// Link to the upstream trace (if the inbound address carries one) and open
-	// the per-turn span.
+	// Link to the upstream trace (if the inbound address carries one).
 	ctx = telemetry.LinkUpstream(ctx, addr)
+	// The turn's OBO authority is derived by the configured Authority hook (the
+	// distribution reads the inbound grant; core leaves it zero so memory uses its
+	// default authority). Computed up front — before anything keys off the address
+	// — because thread-id minting may need it (an OBO write to the backend).
+	var auth tools.MemoryAuthority
+	if r.authorityFn != nil {
+		auth = r.authorityFn(addr, user)
+	}
+	// Resolve a missing thread id before anything keys off it: a turn may arrive
+	// with no thread (a new chat from a "dumb" CLI/TUI/web client). Mint one — via
+	// the backend thread registrar (canonical, e.g. MemoryLayer's server-owned id)
+	// when wired, else a local id — and adopt it so the command/model state,
+	// session, stream egress, commit, and the returned message all carry it. The
+	// client learns the id from the egress addr (and the returned message).
+	if addr.ThreadID == "" {
+		addr.ThreadID = r.resolveNewThreadID(ctx, auth, addr, user)
+	}
+	// Open the per-turn span with the resolved address.
 	ctx, span := telemetry.StartTurn(ctx, addr)
 	defer telemetry.Finish(span, &err)
+	// Turn-lifecycle observers (checkpoint/sync, audit, external hooks). TurnStarted
+	// fires now that the address is resolved; TurnFinished fires on every exit path
+	// (the deferred closure reads the final addr + named return err).
+	r.notifyTurn(ctx, hooks.TurnEvent{Phase: hooks.PhaseTurnStarted, Addr: addr})
+	defer func() {
+		r.notifyTurn(ctx, hooks.TurnEvent{Phase: hooks.PhaseTurnFinished, Addr: addr, Err: err})
+	}()
 
 	// Intercept OpenClaw-style slash commands. Built-ins short-circuit (reply
 	// without calling the model); workspace commands rewrite the user message
@@ -540,6 +584,9 @@ func (r *Runner) Run(ctx context.Context, addr protocol.MessageAddress, user pro
 		return reply, nil
 	}
 	user = rewritten
+	// The effective user prompt for this turn is now resolved (command rewrites
+	// applied). Fire UserPromptSubmit before any model call.
+	r.notifyTurn(ctx, hooks.TurnEvent{Phase: hooks.PhaseUserPromptSubmit, Addr: addr})
 	// Log inbound multimodal sources at turn entry. Attachments arrive on the user
 	// message as image/file parts carrying a vfs_ref, uri, or inline data_uri; the
 	// harness has no VFS resolver, so a vfs_ref-only attachment never reaches the
@@ -565,17 +612,10 @@ func (r *Runner) Run(ctx context.Context, addr protocol.MessageAddress, user pro
 	if len(allowedTools) > 0 {
 		perTurnApprovers = append(perTurnApprovers, hooks.NewAllowList(allowedTools, "tool not permitted by the active command's allowed-tools"))
 	}
-	// The turn's OBO authority is derived by the configured Authority hook (the
-	// distribution reads the inbound grant; core leaves it zero so memory uses
-	// its default authority). Per-turn, never a stale foundational grant.
-	var auth tools.MemoryAuthority
-	if r.authorityFn != nil {
-		auth = r.authorityFn(addr, user)
-	}
-	// Carry the per-turn OBO on the turn ctx so ctx-based consumers (the durable
-	// tool-grant store, an authority-aware history store) act under the user's
-	// grant. Tools also receive it via req.Authority on the session; this covers
-	// the ctx path.
+	// Carry the per-turn OBO (computed above) on the turn ctx so ctx-based
+	// consumers (the durable tool-grant store, an authority-aware history store)
+	// act under the user's grant. Tools also receive it via req.Authority on the
+	// session; this covers the ctx path.
 	ctx = tools.WithMemoryAuthority(ctx, auth)
 	session, err := harness.NewSession(ctx, addr, r.store, r.registry, auth)
 	if err != nil {
@@ -644,21 +684,12 @@ func (r *Runner) Run(ctx context.Context, addr protocol.MessageAddress, user pro
 		// detached from the cancelled turn ctx so the message_finalized publish +
 		// memory commit aren't themselves immediately aborted.
 		if ctx.Err() != nil {
-			detached := context.WithoutCancel(ctx)
-			partial := protocol.ChatMessage{
-				Role: protocol.RoleAssistant,
-				Addr: addr,
-				Meta: map[string]json.RawMessage{metaCancelledKey: json.RawMessage("true")},
-			}
-			partial.Content = append(partial.Content, emitter.durableParts()...)
-			finalized, ferr := streamer.finalize(detached, partial)
-			if ferr != nil {
-				slog.WarnContext(detached, "turn cancelled: finalize failed",
-					slog.String("thread", addr.ThreadID), slog.Any("err", ferr))
+			finalized, ok := r.finalizePartialTurn(ctx, addr, user, auth, streamer, emitter,
+				map[string]json.RawMessage{metaCancelledKey: json.RawMessage("true")})
+			if !ok {
 				return protocol.ChatMessage{}, errors.Join(turncancel.ErrTurnCancelled, err)
 			}
-			r.commitToMemory(detached, auth, addr, user, finalized)
-			slog.InfoContext(detached, "turn cancelled: finalized partial turn",
+			slog.InfoContext(ctx, "turn cancelled: finalized partial turn",
 				slog.String("thread", addr.ThreadID), slog.Int("parts", len(finalized.Content)))
 			return finalized, turncancel.ErrTurnCancelled
 		}
@@ -673,22 +704,13 @@ func (r *Runner) Run(ctx context.Context, addr protocol.MessageAddress, user pro
 		// still marks the Aether task FAILED (chat-lane terminal event and task-state
 		// FAILED are different layers — both fire). Detached ctx so the finalize +
 		// commit aren't aborted if the turn ctx is on the edge of a deadline.
-		detached := context.WithoutCancel(ctx)
 		reason, _ := json.Marshal(err.Error())
-		partial := protocol.ChatMessage{
-			Role: protocol.RoleAssistant,
-			Addr: addr,
-			Meta: map[string]json.RawMessage{metaErrorKey: reason},
-		}
-		partial.Content = append(partial.Content, emitter.durableParts()...)
-		finalized, ferr := streamer.finalize(detached, partial)
-		if ferr != nil {
-			slog.WarnContext(detached, "turn failed: finalize failed",
-				slog.String("thread", addr.ThreadID), slog.Any("err", ferr))
+		finalized, ok := r.finalizePartialTurn(ctx, addr, user, auth, streamer, emitter,
+			map[string]json.RawMessage{metaErrorKey: reason})
+		if !ok {
 			return protocol.ChatMessage{}, err
 		}
-		r.commitToMemory(detached, auth, addr, user, finalized)
-		slog.ErrorContext(detached, "turn failed: finalized partial turn",
+		slog.ErrorContext(ctx, "turn failed: finalized partial turn",
 			slog.String("thread", addr.ThreadID),
 			slog.Int("parts", len(finalized.Content)), slog.Any("err", err))
 		return finalized, err
@@ -716,6 +738,52 @@ func (r *Runner) Run(ctx context.Context, addr protocol.MessageAddress, user pro
 		r.commitToMemory(ctx, auth, addr, user, assistant)
 	}
 	return assistant, nil
+}
+
+// notifyTurn fans a turn-lifecycle event out to the configured TurnObservers
+// (best-effort, no-op when none are set).
+func (r *Runner) notifyTurn(ctx context.Context, ev hooks.TurnEvent) {
+	if len(r.turnObservers) == 0 {
+		return
+	}
+	hooks.NotifyTurn(ctx, ev, r.turnObservers)
+}
+
+// resolveNewThreadID mints a thread id for a chat that arrived with none. It
+// prefers the backend ThreadRegistrar (so the id is canonical + hierarchy-aware,
+// e.g. MemoryLayer's server-owned id) and falls back to a local random id so a
+// no-backend/offline client still works. Best-effort: any registrar error falls
+// through to the local id. Gated on memAutoCommit for the registrar path — with
+// auto-commit off the backend thread would never be populated, so mint locally.
+func (r *Runner) resolveNewThreadID(ctx context.Context, auth tools.MemoryAuthority, addr protocol.MessageAddress, _ protocol.ChatMessage) string {
+	if reg, ok := r.memory.(ThreadRegistrar); ok && r.memAutoCommit {
+		id, err := reg.EnsureThread(ctx, auth, ThreadSpec{WorkspaceID: addr.WorkspaceID, Origin: "chat"})
+		if err == nil && id != "" {
+			slog.InfoContext(ctx, "turn: minted new thread via registrar", slog.String("thread", id))
+			return id
+		}
+		if err != nil {
+			slog.WarnContext(ctx, "turn: registrar thread mint failed; using local id", slog.Any("err", err))
+		}
+	}
+	id := r.localThreadID()
+	slog.InfoContext(ctx, "turn: minted new thread locally", slog.String("thread", id))
+	return id
+}
+
+// localThreadID returns a locally-minted thread id: the configured NewThreadID
+// (deterministic tests) or a random hex fallback. Never returns empty.
+func (r *Runner) localThreadID() string {
+	if r.newThreadID != nil {
+		if id := r.newThreadID(); id != "" {
+			return id
+		}
+	}
+	if id, err := ids.New("th-"); err == nil {
+		return id
+	}
+	// crypto/rand basically never fails; keep a non-empty, unique fallback.
+	return fmt.Sprintf("th-%d", nextSubagentSeq())
 }
 
 // resolveTurnModel picks the model for this turn: an explicit command/override
@@ -879,6 +947,27 @@ func (r *Runner) dailyNotesMessage(ctx context.Context, addr protocol.MessageAdd
 		Addr:          addr,
 		Content:       []protocol.ContentPart{part},
 	}, true
+}
+
+// finalizePartialTurn publishes + commits a PARTIAL turn (everything streamed so
+// far) annotated with meta, on a context detached from the (cancelled, or
+// deadline-edge) turn ctx so the message_finalized publish + memory commit aren't
+// themselves aborted. Returns (finalized, true) on success, or (zero, false) when
+// finalize failed. Shared by the cancel and failure wrap-ups so their terminal
+// publish+commit can't drift; each caller supplies its own meta key and decides
+// the log level + the error to surface.
+func (r *Runner) finalizePartialTurn(ctx context.Context, addr protocol.MessageAddress, user protocol.ChatMessage, auth tools.MemoryAuthority, streamer *turnStreamer, emitter *turnPartEmitter, meta map[string]json.RawMessage) (protocol.ChatMessage, bool) {
+	detached := context.WithoutCancel(ctx)
+	partial := protocol.ChatMessage{Role: protocol.RoleAssistant, Addr: addr, Meta: meta}
+	partial.Content = append(partial.Content, emitter.durableParts()...)
+	finalized, err := streamer.finalize(detached, partial)
+	if err != nil {
+		slog.WarnContext(detached, "finalize partial turn failed",
+			slog.String("thread", addr.ThreadID), slog.Any("err", err))
+		return protocol.ChatMessage{}, false
+	}
+	r.commitToMemory(detached, auth, addr, user, finalized)
+	return finalized, true
 }
 
 // commitToMemory appends the turn to the thread — user + assistant, or

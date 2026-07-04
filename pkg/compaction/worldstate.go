@@ -63,6 +63,16 @@ func NoteCompaction(ctx context.Context) {
 	}
 }
 
+// CompactionCount returns the current value of the ctx compaction-event counter
+// (0 when absent). Lets the turn loop detect a compaction event by comparing the
+// count across a context Build, without threading the counter pointer around.
+func CompactionCount(ctx context.Context) int {
+	if p, ok := ctx.Value(compactionCounterKey{}).(*int); ok && p != nil {
+		return *p
+	}
+	return 0
+}
+
 const (
 	MetaWorldState    = "scitrera_world_state"
 	MetaContextBudget = "scitrera_context_budget"

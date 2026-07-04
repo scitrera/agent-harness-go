@@ -2,6 +2,7 @@ package turn
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -20,6 +21,7 @@ type fakeMemory struct {
 	recallQuery     string
 	recallGrant     string
 	ensured         []ThreadSpec
+	mintCount       int
 }
 
 func (m *fakeMemory) Recall(_ context.Context, auth tools.MemoryAuthority, workspace, query string, _ int) ([]tools.MemoryHit, error) {
@@ -38,10 +40,16 @@ func (m *fakeMemory) AppendThreadMessages(_ context.Context, auth tools.MemoryAu
 }
 
 // EnsureThread makes fakeMemory satisfy turn.ThreadRegistrar (the optional
-// thread-hierarchy seam), recording the declared thread specs.
-func (m *fakeMemory) EnsureThread(_ context.Context, _ tools.MemoryAuthority, spec ThreadSpec) error {
+// thread-hierarchy seam), recording the declared thread specs. An empty
+// spec.ThreadID simulates a backend minting a canonical id; a supplied id echoes
+// back unchanged.
+func (m *fakeMemory) EnsureThread(_ context.Context, _ tools.MemoryAuthority, spec ThreadSpec) (string, error) {
 	m.ensured = append(m.ensured, spec)
-	return nil
+	if spec.ThreadID != "" {
+		return spec.ThreadID, nil
+	}
+	m.mintCount++
+	return fmt.Sprintf("mem-thread-%d", m.mintCount), nil
 }
 
 func userMessage(t *testing.T, text string) protocol.ChatMessage {

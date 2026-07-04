@@ -2,7 +2,6 @@ package runtime
 
 import (
 	"context"
-	"errors"
 	"testing"
 
 	"github.com/scitrera/agent-harness-go/pkg/channel"
@@ -91,9 +90,12 @@ func Test_Runner_RunOnce_uses_message_address_when_envelope_address_missing(t *t
 	}
 }
 
-func Test_Runner_RunOnce_returns_missing_thread_when_task_has_no_thread(t *testing.T) {
-	// Given
-	runner, err := NewRunner(fakeSource{envelope: channel.Inbound{}}, &fakeExecutor{})
+func Test_Runner_RunOnce_delegates_missing_thread_to_executor(t *testing.T) {
+	// Given: an inbound task with NO thread id. The runtime loop no longer rejects
+	// it — thread-id policy belongs to the executor (which mints one). Here the
+	// fakeExecutor just records the address it was handed.
+	executor := &fakeExecutor{}
+	runner, err := NewRunner(fakeSource{envelope: channel.Inbound{}}, executor)
 	if err != nil {
 		t.Fatalf("runner: %v", err)
 	}
@@ -101,8 +103,12 @@ func Test_Runner_RunOnce_returns_missing_thread_when_task_has_no_thread(t *testi
 	// When
 	_, err = runner.RunOnce(context.Background())
 
-	// Then
-	if !errors.Is(err, ErrMissingThreadID) {
-		t.Fatalf("expected ErrMissingThreadID, got %v", err)
+	// Then: no error, and the empty-thread address was delegated to the executor
+	// (which is where minting happens, out of the runtime loop's concern).
+	if err != nil {
+		t.Fatalf("expected delegation, got error: %v", err)
+	}
+	if executor.addr.ThreadID != "" {
+		t.Fatalf("expected the empty-thread addr passed through to the executor, got %q", executor.addr.ThreadID)
 	}
 }

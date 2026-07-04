@@ -119,7 +119,9 @@ func (r *Runner) RunSubagent(ctx context.Context, req subagent.Request) (_ subag
 	// declaring a thread we never populate).
 	if !resume && r.memAutoCommit {
 		if reg, ok := r.memory.(ThreadRegistrar); ok {
-			if err := reg.EnsureThread(ctx, auth, ThreadSpec{
+			// childThreadID is already minted (the "::sub::" convention keeps kernel
+			// keying stable), so we pass it and ignore the returned id (it echoes back).
+			if _, err := reg.EnsureThread(ctx, auth, ThreadSpec{
 				WorkspaceID:    addr.WorkspaceID,
 				ThreadID:       childThreadID,
 				ParentThreadID: parentThread,

@@ -2,11 +2,13 @@ package turn
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"time"
 
 	"github.com/scitrera/agent-harness-go/pkg/bootstrap"
+	"github.com/scitrera/agent-harness-go/pkg/compaction"
 	"github.com/scitrera/agent-harness-go/pkg/harness"
 	"github.com/scitrera/agent-harness-go/pkg/hooks"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
@@ -50,7 +52,16 @@ func (r *Runner) runProviderLoop(ctx context.Context, session *harness.Session, 
 	maxToolIterations := toolIterationLimit(ctx, r.maxToolIterations)
 	toolIterations := 0
 	for {
+		// Turn-lifecycle observers see each model-call boundary (and any compaction
+		// that ran while building this call's context). callWithRecovery may compact
+		// inside its Build; a counter delta detects it without threading the pointer.
+		beforeComp := compaction.CompactionCount(ctx)
+		r.notifyTurn(ctx, hooks.TurnEvent{Phase: hooks.PhaseModelCallStarted, Addr: addr, Iteration: toolIterations, Model: model})
 		response, usedModel, err := r.callWithRecovery(ctx, addr, user, required, session.History(), bootstrap, injected, model, streamer, tt)
+		r.notifyTurn(ctx, hooks.TurnEvent{Phase: hooks.PhaseModelCallFinished, Addr: addr, Iteration: toolIterations, Model: usedModel, Err: err})
+		if compaction.CompactionCount(ctx) > beforeComp {
+			r.notifyTurn(ctx, hooks.TurnEvent{Phase: hooks.PhaseCompacted, Addr: addr, Iteration: toolIterations, Model: usedModel})
+		}
 		if err != nil {
 			return protocol.ChatMessage{}, err
 		}
@@ -146,15 +157,8 @@ func (r *Runner) runProviderLoop(ctx context.Context, session *harness.Session, 
 				finished := applyHookDecision(toolEventFromCall(tools.ToolEventFinished, call), decision)
 				finished.Result.PayloadBytes = len(errorOutput)
 				r.publishToolEvent(ctx, finished)
-				part, err := protocol.NewToolResultPart(call.CallID, call.Name, errorOutput, true)
-				if err != nil {
-					return protocol.ChatMessage{}, fmt.Errorf("denied tool result part: %w", err)
-				}
-				if err := session.AppendToolResult(ctx, call.CallID, part); err != nil {
-					return protocol.ChatMessage{}, fmt.Errorf("record tool denial: %w", err)
-				}
-				if _, err := streamer.appendPart(ctx, part); err != nil {
-					return protocol.ChatMessage{}, fmt.Errorf("stream tool denial: %w", err)
+				if err := r.recordToolError(ctx, session, streamer, call.CallID, call.Name, errorOutput); err != nil {
+					return protocol.ChatMessage{}, err
 				}
 				continue
 			}
@@ -201,15 +205,8 @@ func (r *Runner) runProviderLoop(ctx context.Context, session *harness.Session, 
 				}
 				slog.WarnContext(ctx, "tool call failed; returning error to model",
 					slog.String("tool", call.Name), slog.Any("err", err))
-				errPart, perr := protocol.NewToolResultPart(call.CallID, call.Name, toolErrorOutput(err.Error()), true)
-				if perr != nil {
-					return protocol.ChatMessage{}, fmt.Errorf("tool error result part: %w", perr)
-				}
-				if perr := session.AppendToolResult(ctx, call.CallID, errPart); perr != nil {
-					return protocol.ChatMessage{}, fmt.Errorf("record tool error: %w", perr)
-				}
-				if _, perr := streamer.appendPart(ctx, errPart); perr != nil {
-					return protocol.ChatMessage{}, fmt.Errorf("stream tool error: %w", perr)
+				if perr := r.recordToolError(ctx, session, streamer, call.CallID, call.Name, toolErrorOutput(err.Error())); perr != nil {
+					return protocol.ChatMessage{}, perr
 				}
 				continue
 			}
@@ -270,6 +267,23 @@ func (r *Runner) runProviderLoop(ctx context.Context, session *harness.Session, 
 			}
 		}
 	}
+}
+
+// recordToolError builds an error tool_result part, persists it to history, and
+// streams it — the shared denied/errored path. Both hand the model an error
+// tool_result (rather than aborting the turn) so it can adapt and respond.
+func (r *Runner) recordToolError(ctx context.Context, session *harness.Session, streamer *turnStreamer, callID, name string, output json.RawMessage) error {
+	part, err := protocol.NewToolResultPart(callID, name, output, true)
+	if err != nil {
+		return fmt.Errorf("tool error result part: %w", err)
+	}
+	if err := session.AppendToolResult(ctx, callID, part); err != nil {
+		return fmt.Errorf("record tool error: %w", err)
+	}
+	if _, err := streamer.appendPart(ctx, part); err != nil {
+		return fmt.Errorf("stream tool error: %w", err)
+	}
+	return nil
 }
 
 // containsImage reports whether any part is an image content part.
