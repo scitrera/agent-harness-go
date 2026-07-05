@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -32,16 +33,16 @@ func TestInjectImage_injectsImageAsUserPart(t *testing.T) {
 	if res.IsError {
 		t.Fatalf("unexpected error result: %s", res.Payload)
 	}
-	// Ack payload names the injected file + byte count.
+	// Ack payload names the injected file(s) + byte count.
 	var ack struct {
-		Injected string `json:"injected"`
-		Bytes    int    `json:"bytes"`
+		Injected []string `json:"injected"`
+		Bytes    int      `json:"bytes"`
 	}
 	if err := json.Unmarshal(res.Payload, &ack); err != nil {
 		t.Fatalf("payload: %v", err)
 	}
-	if ack.Injected != "plot.png" || ack.Bytes != len("PNGBYTES") {
-		t.Fatalf("ack = %+v, want plot.png / 8 bytes", ack)
+	if len(ack.Injected) != 1 || ack.Injected[0] != "plot.png" || ack.Bytes != len("PNGBYTES") {
+		t.Fatalf("ack = %+v, want [plot.png] / 8 bytes", ack)
 	}
 	// The injected user parts are a text label followed by the image.
 	if len(res.InjectUserParts) != 2 {
@@ -64,6 +65,48 @@ func TestInjectImage_injectsImageAsUserPart(t *testing.T) {
 	// tool-role result which is text-only).
 	if len(res.Parts) != 0 {
 		t.Fatalf("expected no tool-result Parts, got %d", len(res.Parts))
+	}
+}
+
+func TestInjectImage_injectsMultipleImagesInOneCall(t *testing.T) {
+	ws := artifactWorkspace(t, map[string]string{"pg-01.png": "PNG1", "pg-02.png": "PNG2", "pg-03.png": "PNG3"})
+	res := invokeInjectImage(t, InjectImageConfig{Workspace: ws}, `{"paths":["pg-01.png","pg-02.png","pg-03.png"]}`)
+	if res.IsError {
+		t.Fatalf("unexpected error result: %s", res.Payload)
+	}
+	var ack struct {
+		Injected []string `json:"injected"`
+		Count    int      `json:"count"`
+	}
+	if err := json.Unmarshal(res.Payload, &ack); err != nil {
+		t.Fatalf("payload: %v", err)
+	}
+	if ack.Count != 3 || len(ack.Injected) != 3 {
+		t.Fatalf("ack = %+v, want 3 injected", ack)
+	}
+	// One text label followed by 3 image parts.
+	if len(res.InjectUserParts) != 4 {
+		t.Fatalf("expected [label, img, img, img] = 4 inject parts, got %d", len(res.InjectUserParts))
+	}
+	for i := 1; i < 4; i++ {
+		if _, ok := res.InjectUserParts[i].AsImage(); !ok {
+			t.Fatalf("inject part %d should be an image, got %s", i, res.InjectUserParts[i].Type())
+		}
+	}
+}
+
+func TestInjectImage_overMaxImagesErrors(t *testing.T) {
+	files := map[string]string{}
+	paths := make([]string, 0, maxInjectImages+1)
+	for i := 0; i <= maxInjectImages; i++ {
+		n := fmt.Sprintf("p%02d.png", i)
+		files[n] = "PNG"
+		paths = append(paths, `"`+n+`"`)
+	}
+	ws := artifactWorkspace(t, files)
+	res := invokeInjectImage(t, InjectImageConfig{Workspace: ws}, `{"paths":[`+strings.Join(paths, ",")+`]}`)
+	if !res.IsError {
+		t.Fatalf("expected an error injecting more than %d images", maxInjectImages)
 	}
 }
 
