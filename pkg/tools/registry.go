@@ -4,12 +4,14 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 )
 
 type Registry struct {
 	handlers    map[string]Handler
 	descriptors map[string]Descriptor
+	excluded    map[string]struct{}
 	policy      Policy
 	audit       AuditSink
 	events      ToolEventSink
@@ -32,9 +34,34 @@ func (r *Registry) SetEventSink(events ToolEventSink) {
 	r.events = events
 }
 
+// SetExcluded marks tool names that must NOT enter the registry: subsequent
+// Register/Override/Describe calls for an excluded name become silent no-ops, so
+// the tool is invisible to the model (absent from Descriptors) and uninvocable
+// (Invoke returns ErrUnknownTool). Call before registering tools; additive across
+// calls. This is the general "drop a built-in tool" seam (e.g. a distribution
+// that provides web_search as a skill instead of the built-in Exa tool).
+func (r *Registry) SetExcluded(names []string) {
+	for _, n := range names {
+		if n = strings.TrimSpace(n); n != "" {
+			if r.excluded == nil {
+				r.excluded = map[string]struct{}{}
+			}
+			r.excluded[n] = struct{}{}
+		}
+	}
+}
+
+func (r *Registry) isExcluded(name string) bool {
+	_, ok := r.excluded[name]
+	return ok
+}
+
 func (r *Registry) Register(name string, handler Handler) error {
 	if name == "" || handler == nil {
 		return fmt.Errorf("%w: name and handler required", ErrInvalidTool)
+	}
+	if r.isExcluded(name) {
+		return nil // excluded by config; silently skip so registration callers don't fail
 	}
 	if _, exists := r.handlers[name]; exists {
 		return fmt.Errorf("%w: %s", ErrToolExists, name)
@@ -51,6 +78,9 @@ func (r *Registry) Register(name string, handler Handler) error {
 func (r *Registry) Override(name string, handler Handler) error {
 	if name == "" || handler == nil {
 		return fmt.Errorf("%w: name and handler required", ErrInvalidTool)
+	}
+	if r.isExcluded(name) {
+		return nil
 	}
 	r.handlers[name] = handler
 	return nil

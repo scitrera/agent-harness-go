@@ -17,7 +17,7 @@ type Descriptor struct {
 // Describe attaches model-facing metadata for an already-registered tool.
 // Unknown names are ignored so callers can describe best-effort.
 func (r *Registry) Describe(d Descriptor) {
-	if d.Name == "" {
+	if d.Name == "" || r.isExcluded(d.Name) {
 		return
 	}
 	if r.descriptors == nil {

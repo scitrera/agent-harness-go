@@ -112,3 +112,47 @@ func Test_RegisterLocal_web_search_sends_placeholder_auth_when_exa_configured(t 
 		t.Fatalf("unexpected authorization header: %q", gotAuth)
 	}
 }
+
+// Test_Registry_SetExcluded_hides_and_blocks asserts an excluded tool never
+// enters the registry: Register/Describe no-op, it is absent from Names +
+// Descriptors (so the model never sees it), and Invoke returns ErrUnknownTool —
+// while non-excluded tools register normally.
+func Test_Registry_SetExcluded_hides_and_blocks(t *testing.T) {
+	reg := NewRegistry()
+	reg.SetExcluded([]string{"web_search", "  "}) // blank entries ignored
+	noop := HandlerFunc(func(_ context.Context, req Request) (Result, error) {
+		return NewJSONResult(req.CallID, req.Name, json.RawMessage(`{}`))
+	})
+
+	if err := reg.Register("web_search", noop); err != nil {
+		t.Fatalf("excluded Register should silently no-op, got %v", err)
+	}
+	reg.Describe(Descriptor{Name: "web_search", Description: "search"})
+	if err := reg.Register("read_file", noop); err != nil {
+		t.Fatalf("non-excluded Register: %v", err)
+	}
+
+	for _, n := range reg.Names() {
+		if n == "web_search" {
+			t.Fatalf("excluded tool present in Names(): %v", reg.Names())
+		}
+	}
+	for _, d := range reg.Descriptors() {
+		if d.Name == "web_search" {
+			t.Fatalf("excluded tool present in Descriptors()")
+		}
+	}
+	if _, err := reg.Invoke(context.Background(), Request{Name: "web_search"}); !errors.Is(err, ErrUnknownTool) {
+		t.Fatalf("excluded Invoke = %v, want ErrUnknownTool", err)
+	}
+	// The non-excluded tool registered normally.
+	var haveReadFile bool
+	for _, n := range reg.Names() {
+		if n == "read_file" {
+			haveReadFile = true
+		}
+	}
+	if !haveReadFile {
+		t.Fatalf("non-excluded tool missing from registry: %v", reg.Names())
+	}
+}
