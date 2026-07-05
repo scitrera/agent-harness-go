@@ -9,7 +9,10 @@ import (
 	"charm.land/bubbles/v2/viewport"
 
 	"github.com/scitrera/agent-harness-go/pkg/approval"
+	"github.com/scitrera/agent-harness-go/pkg/protocol"
+	"github.com/scitrera/agent-harness-go/pkg/store"
 	"github.com/scitrera/agent-harness-go/pkg/taskstate"
+	"github.com/scitrera/agent-harness-go/pkg/threadindex"
 )
 
 type fakeApprovalResolver struct {
@@ -65,6 +68,81 @@ func TestModelHandlePermissions_approveAliasResolvesRequest(t *testing.T) {
 	}
 	if resolver.taskID != "task-1" || resolver.requestID != "call-1" || !resolver.decision.Granted || resolver.decision.Scope != "always" {
 		t.Fatalf("decision mismatch: %+v", resolver)
+	}
+}
+
+func TestModelHandleSlash_clearClearsCurrentThreadText(t *testing.T) {
+	// Given
+	ctx := context.Background()
+	stateDir := t.TempDir()
+	history := store.NewFileStore("", stateDir)
+	index, err := threadindex.NewIndex(stateDir, nil)
+	if err != nil {
+		t.Fatalf("new index: %v", err)
+	}
+	if err := index.Touch("thread-1", "old transcript"); err != nil {
+		t.Fatalf("touch thread: %v", err)
+	}
+	part, err := protocol.NewTextPart("old visible line")
+	if err != nil {
+		t.Fatalf("text part: %v", err)
+	}
+	seed := []protocol.ChatMessage{{
+		ID:      "user-1",
+		Role:    protocol.RoleUser,
+		Addr:    protocol.MessageAddress{ThreadID: "thread-1", TaskID: "task-1"},
+		Content: []protocol.ContentPart{part},
+	}}
+	if err := history.SaveHistory(ctx, "thread-1", seed); err != nil {
+		t.Fatalf("save history: %v", err)
+	}
+	m := model{
+		ctx:      ctx,
+		channel:  NewChannel(),
+		store:    history,
+		index:    index,
+		threadID: "thread-1",
+		threads:  index.List(),
+		rows:     rowsFromHistory(seed),
+		viewport: viewport.New(),
+		tailing:  true,
+	}
+	m.viewport.SetWidth(80)
+	m.viewport.SetHeight(4)
+	m.refreshViewportToBottom()
+	if !strings.Contains(m.viewport.View(), "old visible line") {
+		t.Fatal("test setup should render old transcript text")
+	}
+
+	// When
+	next, cmd := m.handleSlash("/clear")
+	if cmd == nil {
+		t.Fatal("expected clear command")
+	}
+	msg := cmd()
+	clearMsg, ok := msg.(clearThreadMsg)
+	if !ok {
+		t.Fatalf("expected clear thread message, got %T", msg)
+	}
+	updated, ok := next.(model)
+	if !ok {
+		t.Fatalf("expected model, got %T", next)
+	}
+	updated.applyClearThread(clearMsg)
+
+	// Then
+	got, err := history.LoadHistory(ctx, "thread-1")
+	if err != nil {
+		t.Fatalf("load history: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("expected persisted history cleared, got %d messages", len(got))
+	}
+	if strings.Contains(updated.viewport.View(), "old visible line") {
+		t.Fatalf("viewport still contains cleared transcript: %q", updated.viewport.View())
+	}
+	if !strings.Contains(updated.viewport.View(), "cleared thread-1") {
+		t.Fatalf("viewport missing clear confirmation: %q", updated.viewport.View())
 	}
 }
 

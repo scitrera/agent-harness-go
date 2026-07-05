@@ -11,27 +11,6 @@ import (
 	"github.com/scitrera/agent-harness-go/pkg/tools"
 )
 
-func rowsFromHistory(messages []protocol.ChatMessage) []chatRow {
-	rows := make([]chatRow, 0, len(messages))
-	for _, message := range messages {
-		rows = append(rows, rowFromMessage(message))
-	}
-	return rows
-}
-
-func rowFromMessage(message protocol.ChatMessage) chatRow {
-	kind := rowAssistant
-	switch message.Role {
-	case protocol.RoleUser:
-		kind = rowUser
-	case protocol.RoleTool, protocol.RoleToolResult:
-		kind = rowTool
-	case protocol.RoleSystem:
-		kind = rowSystem
-	}
-	return chatRow{Kind: kind, ID: message.ID, TaskID: message.Addr.TaskID, Text: messageText(message)}
-}
-
 func (m *model) applyEvent(event channel.Event) {
 	if event.Addr.ThreadID != "" && event.Addr.ThreadID != m.threadID {
 		m.applyBackgroundEvent(event)
@@ -39,18 +18,16 @@ func (m *model) applyEvent(event channel.Event) {
 	}
 	switch event.Type {
 	case channel.EventMessageStarted:
-		if event.Message != nil {
-			m.upsertAssistant(event.Message.ID, "", true)
-		}
+		return
 	case channel.EventTokenDelta:
-		m.appendAssistantDelta(event.MessageID, event.Delta)
+		m.appendAssistantDelta(event.MessageID, event.Index, event.Delta)
 	case channel.EventPartAppended:
 		m.applyPartAppended(event)
 	case channel.EventPartUpdated:
 		m.applyPartUpdated(event)
 	case channel.EventMessageFinal:
 		if event.Message != nil {
-			m.upsertAssistant(event.Message.ID, messageText(*event.Message), false)
+			m.applyFinalMessage(*event.Message)
 		}
 	case channel.EventToolLifecycle:
 		m.applyToolLifecycle(event)
@@ -77,21 +54,15 @@ func (m *model) applyPartAppended(event channel.Event) {
 		return
 	}
 	if text, ok := part.AsText(); ok {
-		if text.Text != "" {
-			m.appendAssistantDelta(event.MessageID, text.Text)
-		}
+		m.upsertAssistantPart(event.MessageID, event.Index, text.Text, true)
 		return
 	}
 	if call, ok := part.AsToolCall(); ok {
-		m.upsertToolishRow(call.ID, "tool call "+call.Name)
+		m.upsertToolPartRow(call.ID, toolCallText(call), call.Name)
 		return
 	}
 	if result, ok := part.AsToolResult(); ok {
-		label := "tool result " + result.Name
-		if result.IsError {
-			label += " failed"
-		}
-		m.upsertToolishRow(result.CallID, label)
+		m.upsertToolPartRow(result.CallID, toolResultText(result), result.Name)
 	}
 }
 
@@ -163,12 +134,13 @@ func (m *model) recordApproval(taskID, requestID, tool, status, reason string) {
 	delete(m.pendingApprovals, requestID)
 }
 
-func (m *model) upsertAssistant(id, text string, streaming bool) {
-	if id == "" {
-		id = "assistant"
+func (m *model) upsertAssistantPart(id string, index int, text string, streaming bool) {
+	rowID := assistantPartRowID(id, index)
+	if text == "" && !streaming {
+		return
 	}
 	for i := range m.rows {
-		if m.rows[i].Kind == rowAssistant && m.rows[i].ID == id {
+		if m.rows[i].Kind == rowAssistant && m.rows[i].ID == rowID {
 			if text != "" || !streaming {
 				m.rows[i].Text = text
 			}
@@ -176,24 +148,22 @@ func (m *model) upsertAssistant(id, text string, streaming bool) {
 			return
 		}
 	}
-	m.rows = append(m.rows, chatRow{Kind: rowAssistant, ID: id, Text: text, Streaming: streaming})
+	m.rows = append(m.rows, chatRow{Kind: rowAssistant, ID: rowID, TaskID: "", Text: text, Streaming: streaming})
 }
 
-func (m *model) appendAssistantDelta(id, delta string) {
+func (m *model) appendAssistantDelta(id string, index int, delta string) {
 	if delta == "" {
 		return
 	}
-	if id == "" {
-		id = "assistant"
-	}
+	rowID := assistantPartRowID(id, index)
 	for i := range m.rows {
-		if m.rows[i].Kind == rowAssistant && m.rows[i].ID == id {
+		if m.rows[i].Kind == rowAssistant && m.rows[i].ID == rowID {
 			m.rows[i].Text += delta
 			m.rows[i].Streaming = true
 			return
 		}
 	}
-	m.rows = append(m.rows, chatRow{Kind: rowAssistant, ID: id, Text: delta, Streaming: true})
+	m.rows = append(m.rows, chatRow{Kind: rowAssistant, ID: rowID, Text: delta, Streaming: true})
 }
 
 func (m *model) upsertToolishRow(id, text string) {
@@ -207,6 +177,41 @@ func (m *model) upsertToolishRow(id, text string) {
 		}
 	}
 	m.rows = append(m.rows, chatRow{Kind: rowTool, ID: id, Text: text})
+}
+
+func (m *model) ensureToolishRow(id, text string) {
+	if id == "" {
+		id = text
+	}
+	for i := range m.rows {
+		if m.rows[i].Kind == rowTool && m.rows[i].ID == id {
+			if strings.TrimSpace(m.rows[i].Text) == "" {
+				m.rows[i].Text = text
+			}
+			return
+		}
+	}
+	m.rows = append(m.rows, chatRow{Kind: rowTool, ID: id, Text: text})
+}
+
+func (m *model) applyFinalMessage(message protocol.ChatMessage) {
+	for i, part := range message.Content {
+		if text, ok := part.AsText(); ok {
+			m.upsertAssistantPart(message.ID, i, text.Text, false)
+			continue
+		}
+		if call, ok := part.AsToolCall(); ok {
+			m.ensureToolishRow(call.ID, toolCallText(call))
+			continue
+		}
+		if result, ok := part.AsToolResult(); ok {
+			m.ensureToolishRow(result.CallID, toolResultText(result))
+			continue
+		}
+		if approval, ok := part.AsApprovalRequest(); ok {
+			m.ensureToolishRow(approval.ID, approvalText(approval.Tool, string(approval.Status)))
+		}
+	}
 }
 
 func renderToolEvent(event tools.ToolEvent) string {
@@ -227,21 +232,4 @@ func renderToolEvent(event tools.ToolEvent) string {
 		parts = append(parts, fmt.Sprintf("files=%d", len(event.Result.FileChanges)))
 	}
 	return strings.Join(parts, " ")
-}
-
-func messageText(message protocol.ChatMessage) string {
-	var out strings.Builder
-	for _, part := range message.Content {
-		if text, ok := part.AsText(); ok {
-			out.WriteString(text.Text)
-			continue
-		}
-		if approval, ok := part.AsApprovalRequest(); ok {
-			out.WriteString("\napproval ")
-			out.WriteString(approval.Tool)
-			out.WriteString(": ")
-			out.WriteString(string(approval.Status))
-		}
-	}
-	return strings.TrimSpace(out.String())
 }

@@ -27,6 +27,8 @@ func (m model) handleSlash(input string) (tea.Model, tea.Cmd) {
 	case "/status":
 		m.addSystem(m.statusSummary())
 		return m, nil
+	case "/clear":
+		return m.clearThread(append([]string{"/thread", "clear"}, fields[1:]...))
 	case "/thread", "/threads":
 		return m.handleThread(fields)
 	case "/approvals":

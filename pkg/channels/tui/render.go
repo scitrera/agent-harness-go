@@ -15,6 +15,8 @@ var (
 	styleTool      = lipgloss.NewStyle().Foreground(lipgloss.Color("151"))
 	styleStatus    = lipgloss.NewStyle().Foreground(lipgloss.Color("238")).Background(lipgloss.Color("252"))
 	styleDrawer    = lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Background(lipgloss.Color("236")).Padding(0, 1)
+	styleSuggest   = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
+	styleSuggestOn = lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Background(lipgloss.Color("238"))
 )
 
 func (m model) View() tea.View {
@@ -27,6 +29,9 @@ func (m model) View() tea.View {
 		if drawer := m.renderDrawer(); drawer != "" {
 			adjusted.Position.Y += lipgloss.Height(drawer)
 		}
+		if selection := m.renderSelection(); selection != "" {
+			adjusted.Position.Y += lipgloss.Height(selection)
+		}
 		view.Cursor = &adjusted
 	}
 	return view
@@ -37,9 +42,40 @@ func (m model) render() string {
 	if drawer := m.renderDrawer(); drawer != "" {
 		parts = append(parts, drawer)
 	}
+	if selection := m.renderSelection(); selection != "" {
+		parts = append(parts, selection)
+	}
 	parts = append(parts, m.composer.View())
 	parts = append(parts, m.renderStatus())
 	return strings.Join(parts, "\n")
+}
+
+func (m model) renderSelection() string {
+	if !m.selector.active() {
+		return ""
+	}
+	start, items := m.selector.visibleItems()
+	lines := make([]string, len(items))
+	for offset, item := range items {
+		index := start + offset
+		marker := "  "
+		style := styleSuggest
+		if index == m.selector.selected {
+			marker = "> "
+			style = styleSuggestOn
+		}
+		line := marker + item.Label
+		if item.Description != "" {
+			line += "  " + item.Description
+		}
+		if m.width > 0 {
+			line = fitCells(line, m.width)
+			lines[offset] = style.Width(m.width).Render(line)
+			continue
+		}
+		lines[offset] = style.Render(line)
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (m model) renderRows() string {

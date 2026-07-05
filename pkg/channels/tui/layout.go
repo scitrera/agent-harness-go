@@ -11,8 +11,10 @@ import (
 )
 
 const (
-	statusHeight = 1
-	tickInterval = time.Second
+	statusHeight          = 1
+	defaultTerminalWidth  = 80
+	defaultTerminalHeight = 24
+	tickInterval          = time.Second
 )
 
 func (m *model) resize(width, height int) {
@@ -30,15 +32,21 @@ func (m *model) reflowSurfaces() {
 		return
 	}
 	drawerHeight := m.drawerHeight()
-	viewHeight := m.height - composerHeight - statusHeight - drawerHeight
+	composerHeight := 0
+	if m.composer.Prompt == "" && m.composer.Placeholder == "" {
+		composerHeight = minComposerHeight
+	} else {
+		m.composer.SetWidth(m.width)
+		m.composer.SetHeight(m.desiredComposerHeight())
+		composerHeight = m.composer.Height()
+	}
+	viewHeight := m.height - composerHeight - statusHeight - drawerHeight - m.selector.height()
 	if viewHeight < 1 {
 		viewHeight = 1
 	}
 	m.viewport.SetWidth(m.width)
 	m.viewport.SetHeight(viewHeight)
 	m.viewport.MouseWheelEnabled = true
-	m.composer.SetWidth(m.width)
-	m.composer.SetHeight(composerHeight)
 }
 
 func (m *model) drawerHeight() int {
@@ -74,6 +82,15 @@ func (m *model) refreshViewportToBottom() {
 }
 
 func (m *model) refreshViewportWithTail(tail bool) {
+	if m.viewport.Height() <= 0 {
+		if m.width <= 0 {
+			m.width = defaultTerminalWidth
+		}
+		if m.height <= 0 {
+			m.height = defaultTerminalHeight
+		}
+		m.reflowSurfaces()
+	}
 	offset := m.viewport.YOffset()
 	m.viewport.SetContent(m.renderRows())
 	if tail {

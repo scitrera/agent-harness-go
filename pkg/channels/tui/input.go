@@ -10,6 +10,27 @@ import (
 )
 
 func (m model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	if m.selector.active() {
+		switch msg.String() {
+		case "tab":
+			return m.completeSelection()
+		case "up":
+			m.selector.move(-1)
+			return m, nil
+		case "down":
+			m.selector.move(1)
+			return m, nil
+		case "esc":
+			m.selector.clear()
+			m.reflowSurfaces()
+			m.refreshViewport()
+			return m, nil
+		case "enter":
+			if m.selector.kind == selectionThread {
+				return m.completeSelection()
+			}
+		}
+	}
 	switch msg.String() {
 	case "ctrl+c":
 		return m, tea.Quit
@@ -48,6 +69,7 @@ func (m model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	var cmd tea.Cmd
 	m.composer, cmd = m.composer.Update(msg)
+	m.refreshInputSurface()
 	return m, cmd
 }
 
@@ -57,6 +79,8 @@ func (m model) sendCurrent() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.composer.Reset()
+	m.selector.clear()
+	m.refreshInputSurface()
 	if strings.HasPrefix(text, "/") {
 		return m.handleSlash(text)
 	}
@@ -77,4 +101,28 @@ func (m model) sendCurrent() (tea.Model, tea.Cmd) {
 	m.status = "sent " + taskID
 	m.refreshViewportToBottom()
 	return m, sendMessageCmd(m.ctx, m.channel, m.index, addr, message, text)
+}
+
+func (m model) completeSelection() (tea.Model, tea.Cmd) {
+	item, ok := m.selector.selectedItem()
+	if !ok {
+		m.selector.clear()
+		m.reflowSurfaces()
+		m.refreshViewport()
+		return m, nil
+	}
+	switch m.selector.kind {
+	case selectionSlash:
+		m.composer.SetValue(item.Value + " ")
+		m.selector.clear()
+		m.refreshInputSurface()
+		return m, nil
+	case selectionThread:
+		return m.selectThread(item.Value)
+	default:
+		m.selector.clear()
+		m.reflowSurfaces()
+		m.refreshViewport()
+		return m, nil
+	}
 }

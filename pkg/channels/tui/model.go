@@ -14,7 +14,11 @@ import (
 	"github.com/scitrera/agent-harness-go/pkg/threadindex"
 )
 
-const composerHeight = 3
+const (
+	minComposerHeight        = 1
+	maxComposerHeight        = 3
+	maxComposerContentHeight = 1000
+)
 
 type model struct {
 	ctx          context.Context
@@ -40,6 +44,7 @@ type model struct {
 	drawer           drawerMode
 	drawerContent    string
 	tailing          bool
+	selector         selectionState
 
 	viewport viewport.Model
 	composer textarea.Model
@@ -123,7 +128,10 @@ func newComposer() textarea.Model {
 	composer.Prompt = "> "
 	composer.Placeholder = "Message or /command"
 	composer.ShowLineNumbers = false
-	composer.SetHeight(composerHeight)
+	composer.MinHeight = minComposerHeight
+	composer.MaxHeight = maxComposerHeight
+	composer.MaxContentHeight = maxComposerContentHeight
+	composer.SetHeight(minComposerHeight)
 	composer.SetWidth(80)
 	composer.SetVirtualCursor(false)
 	composer.Focus()

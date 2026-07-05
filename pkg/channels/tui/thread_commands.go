@@ -11,8 +11,8 @@ import (
 )
 
 func (m model) handleThread(fields []string) (tea.Model, tea.Cmd) {
-	if len(fields) < 2 || fields[1] == "list" || fields[1] == "ls" {
-		m.showDrawer(drawerThreads, m.threadSummary())
+	if shouldOpenThreadSelector(fields) {
+		m.openThreadSelector()
 		return m, nil
 	}
 	switch fields[1] {
@@ -34,6 +34,64 @@ func (m model) handleThread(fields []string) (tea.Model, tea.Cmd) {
 	}
 	m.addSystem("unknown /thread command")
 	return m, nil
+}
+
+func shouldOpenThreadSelector(fields []string) bool {
+	if len(fields) == 0 {
+		return false
+	}
+	if fields[0] != "/thread" && fields[0] != "/threads" {
+		return false
+	}
+	return len(fields) < 2 || fields[1] == "list" || fields[1] == "ls"
+}
+
+func (m *model) openThreadSelector() {
+	if len(m.threads) == 0 && m.index != nil {
+		m.threads = m.index.List()
+	}
+	items := threadSelectionItems(m.threads, m.threadID)
+	if len(items) == 0 {
+		m.addSystem("no threads")
+		return
+	}
+	m.drawer = drawerNone
+	m.drawerContent = ""
+	m.selector = newSelection(selectionThread, items, m.threadID, maxSelectionRows)
+	m.status = "select thread"
+	m.reflowSurfaces()
+	m.refreshViewport()
+}
+
+func threadSelectionItems(threads []threadindex.Session, currentID string) []selectionItem {
+	items := make([]selectionItem, 0, len(threads))
+	for _, session := range threads {
+		description := strings.TrimSpace(session.Title)
+		if session.ID == currentID {
+			if description == "" {
+				description = "current"
+			} else {
+				description = "current  " + description
+			}
+		}
+		items = append(items, selectionItem{Value: session.ID, Label: shortID(session.ID), Description: description})
+	}
+	return items
+}
+
+func (m model) selectThread(id string) (tea.Model, tea.Cmd) {
+	m.selector.clear()
+	m.reflowSurfaces()
+	if id == m.threadID {
+		m.status = "thread " + shortID(id)
+		m.refreshViewport()
+		return m, nil
+	}
+	m.threadID = id
+	m.status = "loading " + id
+	m.tailing = true
+	m.refreshViewport()
+	return m, loadHistoryCmd(m.ctx, m.store, id)
 }
 
 func (m model) switchThread(fields []string) (tea.Model, tea.Cmd) {
