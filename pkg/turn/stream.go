@@ -136,6 +136,16 @@ func (s *turnStreamer) appendUnstreamed(ctx context.Context, part protocol.Conte
 	if s == nil || s.publisher == nil {
 		return false, nil
 	}
+	// Flush buffered token deltas into the reconstruction FIRST, so the dedup
+	// check below sees the COMPLETE streamed text. With coalescing on
+	// (SAHARA_STREAM_FLUSH_MS>0) s.pending holds the un-flushed tail of a streamed
+	// text part, so s.state would otherwise carry only a partial prefix — the
+	// provider's returned full text part wouldn't match, and this method would
+	// re-append it, DOUBLING the inter-tool-call assistant text. finalize()
+	// already flushes-before-dedup for exactly this reason (see below).
+	if err := s.flushPending(ctx); err != nil {
+		return false, err
+	}
 	if containsEquivalentPart(s.state[s.msgID].Content, part) {
 		return false, nil
 	}

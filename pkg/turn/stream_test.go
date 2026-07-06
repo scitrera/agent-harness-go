@@ -96,6 +96,54 @@ func streamedDeltas(pub *fakePublisher) []string {
 	return out
 }
 
+// Regression: with coalescing on, appendUnstreamed must FLUSH the buffered token
+// deltas before its dedup check — otherwise the reconstruction is missing the
+// still-buffered tail, the provider's full text part fails to match, and it gets
+// re-appended, DOUBLING the inter-tool-call assistant text (the frontend then
+// rendered each narration line twice on tool-use turns).
+func TestTurnStreamer_AppendUnstreamed_NoDuplicateWithBufferedDeltas(t *testing.T) {
+	pub := &fakePublisher{}
+	addr := protocol.MessageAddress{TaskID: "t1"}
+	clock := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC) // never advances → only 1st token flushes
+	s := newTurnStreamer(pub, addr, streamMessageID(addr), func() time.Time { return clock }, 50*time.Millisecond)
+	ctx := context.Background()
+
+	idx, err := s.appendTextStream(ctx)
+	if err != nil {
+		t.Fatalf("appendTextStream: %v", err)
+	}
+	for _, tok := range []string{"I'll ", "update ", "the ", "file."} {
+		if err := s.tokenDelta(ctx, idx, tok); err != nil {
+			t.Fatalf("tokenDelta: %v", err)
+		}
+	}
+
+	// The provider surfaces the FULL text part (tool loop → appendUnstreamed).
+	full, err := protocol.NewTextPart("I'll update the file.")
+	if err != nil {
+		t.Fatalf("NewTextPart: %v", err)
+	}
+	appended, err := s.appendUnstreamed(ctx, full)
+	if err != nil {
+		t.Fatalf("appendUnstreamed: %v", err)
+	}
+	if appended {
+		t.Fatalf("appendUnstreamed re-appended an already-streamed text part (doubling bug)")
+	}
+	textParts := 0
+	for _, p := range s.state[s.msgID].Content {
+		if tp, ok := p.AsText(); ok {
+			textParts++
+			if tp.Text != "I'll update the file." {
+				t.Fatalf("reconstructed text = %q, want full text", tp.Text)
+			}
+		}
+	}
+	if textParts != 1 {
+		t.Fatalf("reconstruction has %d text parts, want exactly 1 (no duplicate)", textParts)
+	}
+}
+
 // With coalescing enabled, deltas within an interval are buffered into a single
 // token_delta (the first delta flushes immediately for low TTFT), and the
 // trailing buffer is flushed at finalize — before message_finalized — with the
