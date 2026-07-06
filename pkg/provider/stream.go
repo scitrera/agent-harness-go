@@ -52,6 +52,7 @@ func (c *SidecarClient) ChatStream(ctx context.Context, chat ChatRequest, onDelt
 	if c.authHeader != "" {
 		req.Header.Set("authorization", c.authHeader)
 	}
+	applyAttributionHeaders(ctx, req)
 	resp, err := c.streamClient.Do(req)
 	if err != nil {
 		return ChatResponse{}, classifyTransport(err)
@@ -113,7 +114,14 @@ func parseSSEStream(r io.Reader, onDelta DeltaFunc, reset func()) (ChatResponse,
 		var chunk struct {
 			ID      string `json:"id"`
 			Choices []struct {
-				Delta struct {
+				// finish_reason is the OpenAI terminal signal ("stop"/"length"/
+				// "tool_calls"/...). We honor it as end-of-stream so the turn
+				// finalizes the instant the model is done, WITHOUT waiting for a
+				// trailing `data: [DONE]` sentinel — which many OpenAI-compat
+				// proxies (e.g. the MLflow AI Gateway) omit, leaving the read
+				// blocked until a late EOF / the idle-liveness timer fires.
+				FinishReason string `json:"finish_reason"`
+				Delta        struct {
 					Role      protocol.Role `json:"role"`
 					Content   string        `json:"content"`
 					ToolCalls []struct {
@@ -160,6 +168,14 @@ func parseSSEStream(r io.Reader, onDelta DeltaFunc, reset func()) (ChatResponse,
 				acc.name = tc.Function.Name
 			}
 			acc.args.WriteString(tc.Function.Arguments)
+		}
+		// Terminate on the model's finish signal, AFTER draining this chunk's
+		// delta/tool-call fragments above (a finish chunk may still carry the
+		// final content or tool-call argument tail). This makes the stream end
+		// deterministically on finish_reason rather than blocking on the next
+		// scanner read waiting for `[DONE]`/EOF the upstream may never send.
+		if chunk.Choices[0].FinishReason != "" {
+			break
 		}
 	}
 	if err := scanner.Err(); err != nil {

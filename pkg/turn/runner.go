@@ -565,6 +565,15 @@ func (r *Runner) Run(ctx context.Context, addr protocol.MessageAddress, user pro
 	// Open the per-turn span with the resolved address.
 	ctx, span := telemetry.StartTurn(ctx, addr)
 	defer telemetry.Finish(span, &err)
+	// Stamp per-turn attribution onto outbound LLM requests. The sidecar
+	// injects the sandbox-static set (tenant/source/user) from its projection;
+	// these ids only exist on the live turn address, so the provider request
+	// builder reads them off the context. Empty ids are omitted downstream.
+	ctx = provider.WithAttribution(ctx, provider.Attribution{
+		Workspace: addr.WorkspaceID,
+		ThreadID:  addr.ThreadID,
+		TaskID:    addr.TaskID,
+	})
 	// Turn-lifecycle observers (checkpoint/sync, audit, external hooks). TurnStarted
 	// fires now that the address is resolved; TurnFinished fires on every exit path
 	// (the deferred closure reads the final addr + named return err).
@@ -756,7 +765,14 @@ func (r *Runner) notifyTurn(ctx context.Context, ev hooks.TurnEvent) {
 // through to the local id. Gated on memAutoCommit for the registrar path — with
 // auto-commit off the backend thread would never be populated, so mint locally.
 func (r *Runner) resolveNewThreadID(ctx context.Context, auth tools.MemoryAuthority, addr protocol.MessageAddress, _ protocol.ChatMessage) string {
-	if reg, ok := r.memory.(ThreadRegistrar); ok && r.memAutoCommit {
+	// Only mint a canonical registrar thread when the turn carries an OBO identity
+	// — a backend "chat"-origin thread is a per-user write, so with no GrantID/subject
+	// the EnsureThread call is a guaranteed 403 (and any later auto-commit to that id
+	// 403s too). Without identity, fall straight through to a local id — no doomed
+	// round-trip, no phantom remote thread. (Defense-in-depth: the SDK ingress already
+	// drops task-less/identity-less turns before they reach a turn at all.)
+	if reg, ok := r.memory.(ThreadRegistrar); ok && r.memAutoCommit &&
+		auth.GrantID != "" && auth.SubjectID != "" {
 		id, err := reg.EnsureThread(ctx, auth, ThreadSpec{WorkspaceID: addr.WorkspaceID, Origin: "chat"})
 		if err == nil && id != "" {
 			slog.InfoContext(ctx, "turn: minted new thread via registrar", slog.String("thread", id))
