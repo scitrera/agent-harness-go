@@ -117,4 +117,7 @@ func (c *Channel) Subscribe(threadID string) (<-chan channel.Event, func()) {
 	return s.ch, cancel
 }
 
-var _ channel.Channel = (*Channel)(nil)
+var (
+	_ channel.Channel  = (*Channel)(nil)
+	_ channel.Enqueuer = (*Channel)(nil)
+)

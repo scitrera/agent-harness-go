@@ -59,6 +59,17 @@ type Receiver interface {
 	FetchTask(ctx context.Context) (Inbound, error)
 }
 
+// Enqueuer injects an inbound turn into the transport's ingress so the runtime
+// loop drives a fresh turn for it. It is the ingress-write half that the web/tui
+// channels already expose as Enqueue; naming it as an interface lets the turn
+// layer push a turn (e.g. a background sub-agent's completion notice addressed to
+// its parent thread) without importing a concrete transport. The Aether transport
+// satisfies it by sending a MessageEnvelope to the target agent. cli (stdout-only)
+// does not implement it, so a background push simply degrades to unavailable.
+type Enqueuer interface {
+	Enqueue(ctx context.Context, in Inbound) error
+}
+
 // Publisher emits egress stream events for a turn.
 type Publisher interface {
 	PublishEvent(ctx context.Context, event Event) error

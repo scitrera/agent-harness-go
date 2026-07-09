@@ -60,4 +60,7 @@ func (c *Channel) DroppedEvents() int64 {
 	return c.dropped.Load()
 }
 
-var _ channel.Channel = (*Channel)(nil)
+var (
+	_ channel.Channel  = (*Channel)(nil)
+	_ channel.Enqueuer = (*Channel)(nil)
+)

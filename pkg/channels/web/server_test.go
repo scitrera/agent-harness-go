@@ -259,3 +259,53 @@ func TestStreamEmitsPublishedEvent(t *testing.T) {
 		t.Fatal("did not observe published event on the SSE stream")
 	}
 }
+
+func TestHandleRenameSession(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	sess, err := srv.sessions.Create()
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPatch, "/api/sessions/"+sess.ID, strings.NewReader(`{"title":"Q3 revenue analysis"}`))
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204; body=%s", rec.Code, rec.Body.String())
+	}
+	list := srv.sessions.List()
+	if len(list) != 1 || list[0].Title != "Q3 revenue analysis" {
+		t.Fatalf("title not updated: %+v", list)
+	}
+}
+
+func TestHandleRenameSessionRejectsEmptyTitle(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	sess, _ := srv.sessions.Create()
+
+	req := httptest.NewRequest(http.MethodPatch, "/api/sessions/"+sess.ID, strings.NewReader(`{"title":"   "}`))
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (title must be non-empty)", rec.Code)
+	}
+}
+
+func TestHandleRenameSessionRejectsCrossOrigin(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	sess, _ := srv.sessions.Create()
+
+	req := httptest.NewRequest(http.MethodPatch, "/api/sessions/"+sess.ID, strings.NewReader(`{"title":"evil"}`))
+	req.Header.Set("Origin", "http://evil.example")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code == http.StatusNoContent {
+		t.Fatal("cross-origin rename should be rejected by the CSRF guard")
+	}
+	if got := srv.sessions.List()[0].Title; got == "evil" {
+		t.Fatalf("cross-origin rename mutated state: title=%q", got)
+	}
+}

@@ -114,6 +114,36 @@ func (s *turnWorldStateSink) worldState() compaction.WorldState {
 	return out
 }
 
+// recordInboundSubagentStatus refreshes the world-state handle for any TERMINAL
+// sub-agent reference part on the inbound message. A background sub-agent's
+// completion notice (pushed to its parent thread when it finishes) carries a
+// SubagentPart with a completed/failed status; recording it flips the handle the
+// spawn left as "running", so the ledger — and thus the system prompt on this woken
+// turn — reflects the real state instead of a stale "running". Non-terminal parts
+// are ignored (the spawn already recorded "running").
+func recordInboundSubagentStatus(sink *turnWorldStateSink, user protocol.ChatMessage) {
+	if sink == nil {
+		return
+	}
+	for _, part := range user.Content {
+		sp, ok := part.AsSubagent()
+		if !ok {
+			continue
+		}
+		if sp.Status != protocol.SubagentCompleted && sp.Status != protocol.SubagentFailed {
+			continue
+		}
+		id := sp.ThreadID
+		if id == "" {
+			id = sp.ID
+		}
+		if id == "" {
+			continue
+		}
+		sink.RecordSubagent(id, sp.Name, string(sp.Status), sp.Summary)
+	}
+}
+
 // recordToolFiles records any files a tool wrote/edited (from result.Metadata.
 // FileChanges) onto the per-turn world-state sink, so RecentFiles ages + survives
 // compaction. No-op when no sink is wired.

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/scitrera/agent-harness-go/pkg/approval"
+	"github.com/scitrera/agent-harness-go/pkg/authhandoff"
 	"github.com/scitrera/agent-harness-go/pkg/bootstrap"
 	"github.com/scitrera/agent-harness-go/pkg/channel"
 	"github.com/scitrera/agent-harness-go/pkg/commands"
@@ -152,6 +153,23 @@ type Runner struct {
 	approvalTimeout time.Duration
 	approvalScopes  []string
 	grantStore      tools.GrantStore
+
+	// Background sub-agent execution. notifier is the ingress-write seam a detached
+	// child uses to push its completion notice back to the parent thread (nil →
+	// background spawn is unavailable and the tool falls back to synchronous).
+	// bgSem caps concurrent detached children (buffered to maxBackgroundSubagents).
+	// streamBackgroundSubagents, when set, streams a background child's activity via
+	// r.publisher keyed to the child thread id (off by default; sahara enables it).
+	// authHandoff hands the parent OBO authority to the woken completion turn via an
+	// opaque single-use token carried on the notice (never the credential itself).
+	notifier                  channel.Enqueuer
+	bgSem                     chan struct{}
+	streamBackgroundSubagents bool
+	authHandoff               *authhandoff.Store
+
+	// rubric, when set, runs the opt-in post-turn self-grading verifier at
+	// end-of-turn (nil → skipped; default behavior unchanged).
+	rubric *RubricVerifier
 }
 
 // ApprovalGranter records tool authorizations the user grants via the approval
@@ -331,6 +349,34 @@ type Config struct {
 	// nil → NoopAttachmentResolver (logs undeliverable attachments, resolves
 	// nothing). The sahara distribution wires a data-connectors-backed resolver.
 	Attachments AttachmentResolver
+
+	// Notifier is the ingress-write seam (channel.Enqueuer) a DETACHED background
+	// sub-agent uses to push its completion notice back to the parent thread, waking
+	// a fresh parent turn. Optional; nil → background sub-agents are unavailable and
+	// spawn_subagent(background:true) falls back to a synchronous run. The web/tui
+	// channels satisfy it directly; the Aether transport by messaging the parent.
+	Notifier channel.Enqueuer
+	// MaxBackgroundSubagents caps concurrent detached background children (excess
+	// spawns queue on the semaphore). <=0 → default 4.
+	MaxBackgroundSubagents int
+	// StreamBackgroundSubagents, when true, streams a background child's activity via
+	// the Publisher keyed to the child thread id (a client can subscribe to that
+	// thread to render it). Default false: background children run silently (like
+	// synchronous sub-agents). Independent of the child's durable commit either way.
+	StreamBackgroundSubagents bool
+	// AuthHandoff hands the parent turn's OBO authority to the woken completion turn
+	// via a single-use token carried on the notice (the credential never rides the
+	// message). Optional; nil → a Store is created. The distribution's Authority
+	// func resolves the token against it before falling back to gateway derivation.
+	AuthHandoff *authhandoff.Store
+
+	// Rubric, when set, runs an OPT-IN post-turn self-grading verifier: after a
+	// turn finishes, an independent grader checks the just-produced result against
+	// a declarative rubric and, if it needs revision, enqueues an actionable
+	// revision follow-up (bounded by its MaxAttempts). Optional; nil → no grading
+	// (default, behavior unchanged). The runner invokes AfterTurn at end-of-turn
+	// when it is set.
+	Rubric *RubricVerifier
 }
 
 func NewRunner(cfg Config) (*Runner, error) {
@@ -383,51 +429,64 @@ func NewRunner(cfg Config) (*Runner, error) {
 	if retryBackoff == nil {
 		retryBackoff = defaultRetryBackoff
 	}
+	maxBackground := cfg.MaxBackgroundSubagents
+	if maxBackground <= 0 {
+		maxBackground = 4
+	}
+	authHandoff := cfg.AuthHandoff
+	if authHandoff == nil {
+		authHandoff = authhandoff.New()
+	}
 	return &Runner{
-		store:                 cfg.Store,
-		loader:                cfg.Loader,
-		registry:              cfg.Registry,
-		provider:              cfg.Provider,
-		publisher:             cfg.Publisher,
-		ctxMgr:                ctxMgr,
-		model:                 cfg.Model,
-		modelRegistry:         cfg.ModelRegistry,
-		modelSelector:         modelSelector,
-		providerResolver:      cfg.ProviderResolver,
-		threadModels:          map[string]string{},
-		maxToolIterations:     cfg.MaxToolIterations,
-		streaming:             cfg.Streaming,
-		streamFlush:           cfg.StreamFlushInterval,
-		maxModelAttempts:      maxModelAttempts,
-		maxTransientRetries:   maxTransientRetries,
-		retryBackoff:          retryBackoff,
-		toolSpecs:             staticSpecs,
-		memory:                cfg.Memory,
-		memAutoCommit:         cfg.MemoryAutoCommit,
-		memAutoCommitAsstOnly: cfg.MemoryAutoCommitAssistantOnly,
-		memAutoCommitAsync:    cfg.MemoryAutoCommitAsync,
-		memAutoRecall:         cfg.MemoryAutoRecall,
-		memRecallLimit:        recallLimitOrDefault(cfg.MemoryRecallLimit),
-		memRecallWithInput:    cfg.MemoryRecallIncludeInput,
-		dailyNotes:            cfg.DailyNotes,
-		dailyNotesDir:         cfg.DailyNotesDir,
-		dailyNotesDays:        cfg.DailyNotesDays,
-		now:                   cfg.Now,
-		newThreadID:           cfg.NewThreadID,
-		commands:              cfg.Commands,
-		approvers:             cfg.Approvers,
-		observers:             cfg.Observers,
-		turnObservers:         cfg.TurnObservers,
-		authorityFn:           cfg.Authority,
-		dedupTrailingUser:     cfg.DedupTrailingUserTurn,
-		approvals:             cfg.Approvals,
-		approvalGranter:       cfg.ApprovalGranter,
-		approvalTimeout:       cfg.ApprovalTimeout,
-		approvalScopes:        cfg.ApprovalScopes,
-		grantStore:            cfg.GrantStore,
-		dynamicTools:          cfg.DynamicTools,
-		staticToolNames:       staticNames,
-		attachments:           attachments,
+		store:                     cfg.Store,
+		loader:                    cfg.Loader,
+		registry:                  cfg.Registry,
+		provider:                  cfg.Provider,
+		publisher:                 cfg.Publisher,
+		ctxMgr:                    ctxMgr,
+		model:                     cfg.Model,
+		modelRegistry:             cfg.ModelRegistry,
+		modelSelector:             modelSelector,
+		providerResolver:          cfg.ProviderResolver,
+		threadModels:              map[string]string{},
+		maxToolIterations:         cfg.MaxToolIterations,
+		streaming:                 cfg.Streaming,
+		streamFlush:               cfg.StreamFlushInterval,
+		maxModelAttempts:          maxModelAttempts,
+		maxTransientRetries:       maxTransientRetries,
+		retryBackoff:              retryBackoff,
+		toolSpecs:                 staticSpecs,
+		memory:                    cfg.Memory,
+		memAutoCommit:             cfg.MemoryAutoCommit,
+		memAutoCommitAsstOnly:     cfg.MemoryAutoCommitAssistantOnly,
+		memAutoCommitAsync:        cfg.MemoryAutoCommitAsync,
+		memAutoRecall:             cfg.MemoryAutoRecall,
+		memRecallLimit:            recallLimitOrDefault(cfg.MemoryRecallLimit),
+		memRecallWithInput:        cfg.MemoryRecallIncludeInput,
+		dailyNotes:                cfg.DailyNotes,
+		dailyNotesDir:             cfg.DailyNotesDir,
+		dailyNotesDays:            cfg.DailyNotesDays,
+		now:                       cfg.Now,
+		newThreadID:               cfg.NewThreadID,
+		commands:                  cfg.Commands,
+		approvers:                 cfg.Approvers,
+		observers:                 cfg.Observers,
+		turnObservers:             cfg.TurnObservers,
+		authorityFn:               cfg.Authority,
+		dedupTrailingUser:         cfg.DedupTrailingUserTurn,
+		approvals:                 cfg.Approvals,
+		approvalGranter:           cfg.ApprovalGranter,
+		approvalTimeout:           cfg.ApprovalTimeout,
+		approvalScopes:            cfg.ApprovalScopes,
+		grantStore:                cfg.GrantStore,
+		dynamicTools:              cfg.DynamicTools,
+		staticToolNames:           staticNames,
+		attachments:               attachments,
+		notifier:                  cfg.Notifier,
+		bgSem:                     make(chan struct{}, maxBackground),
+		streamBackgroundSubagents: cfg.StreamBackgroundSubagents,
+		authHandoff:               authHandoff,
+		rubric:                    cfg.Rubric,
 	}, nil
 }
 
@@ -676,6 +735,11 @@ func (r *Runner) Run(ctx context.Context, addr protocol.MessageAddress, user pro
 	ctx, compCounter := compaction.WithCompactionCounter(ctx)
 	wsSink := newTurnWorldStateSink(wsTurn, prior.Compactions, compCounter)
 	ctx = tools.WithWorldStateSink(ctx, wsSink)
+	// Refresh sub-agent handles from any terminal reference part on the inbound
+	// message: a background sub-agent's completion notice (pushed to this parent
+	// thread) carries a completed/failed SubagentPart, flipping the handle the spawn
+	// left "running" so the ledger + system prompt reflect the real state this turn.
+	recordInboundSubagentStatus(wsSink, user)
 	// Carry the current turn number so the assembler ages invoked skills against
 	// "now" (the in-flight turn), not the last turn already stamped in history.
 	ctx = compaction.WithTurnNumber(ctx, wsTurn)
@@ -745,6 +809,15 @@ func (r *Runner) Run(ctx context.Context, addr protocol.MessageAddress, user pro
 		go r.commitToMemory(context.WithoutCancel(ctx), auth, addr, user, assistant)
 	} else {
 		r.commitToMemory(ctx, auth, addr, user, assistant)
+	}
+	// Opt-in post-turn self-grading: an independent grader checks the just-produced
+	// result against the declarative rubric and (if it needs revision) enqueues an
+	// actionable revision follow-up. nil → skipped (default; behavior unchanged).
+	if r.rubric != nil {
+		transcript := append(append([]protocol.ChatMessage{}, session.History()...), assistant)
+		if _, rerr := r.rubric.AfterTurn(ctx, addr, transcript); rerr != nil {
+			slog.WarnContext(ctx, "rubric: post-turn verification failed", slog.Any("err", rerr))
+		}
 	}
 	return assistant, nil
 }

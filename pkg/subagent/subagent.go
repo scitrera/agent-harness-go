@@ -16,6 +16,12 @@ import (
 // ErrNoRunner is returned when a sub-agent is requested but no runner is wired.
 var ErrNoRunner = errors.New("subagent: no runner configured")
 
+// ErrBackgroundUnsupported is returned when a background spawn is requested but
+// the installed runner does not implement BackgroundRunner (e.g. a backend
+// without a detached-execution seam). The spawn tool treats it as a signal to
+// fall back to a synchronous run rather than failing the call.
+var ErrBackgroundUnsupported = errors.New("subagent: background execution not supported")
+
 // Request is a sub-task delegation. Authority fields carry the parent turn's OBO
 // grant (as primitives to avoid importing the tools package and creating a
 // cycle) so the sub-agent acts on behalf of the same principal.
@@ -73,6 +79,18 @@ type Runner interface {
 	RunSubagent(ctx context.Context, req Request) (Result, error)
 }
 
+// BackgroundRunner is a Runner that can additionally start a sub-agent DETACHED:
+// StartBackground mints (or resumes) the child thread, launches the run
+// asynchronously, and returns the child thread id — the re-addressable handle —
+// immediately, without waiting for the child to finish. The backend delivers the
+// child's completion out-of-band (the in-process backend pushes a notice back to
+// the parent thread that wakes a fresh parent turn). A backend that cannot detach
+// need not implement this; the spawn tool falls back to a synchronous RunSubagent.
+type BackgroundRunner interface {
+	Runner
+	StartBackground(ctx context.Context, req Request) (threadID string, err error)
+}
+
 type depthKey struct{}
 
 // WithDepth returns a context carrying the sub-agent nesting depth.
@@ -112,4 +130,23 @@ func (r *Ref) RunSubagent(ctx context.Context, req Request) (Result, error) {
 		return Result{}, ErrNoRunner
 	}
 	return runner.RunSubagent(ctx, req)
+}
+
+// StartBackground forwards to the installed runner when it is a BackgroundRunner.
+// It returns ErrNoRunner before Set is called and ErrBackgroundUnsupported when
+// the installed runner lacks the detached-execution seam — so *Ref satisfies
+// BackgroundRunner (a spawn tool holding the ref can attempt a background spawn)
+// while still degrading cleanly on a backend that doesn't support it.
+func (r *Ref) StartBackground(ctx context.Context, req Request) (string, error) {
+	r.mu.RLock()
+	runner := r.runner
+	r.mu.RUnlock()
+	if runner == nil {
+		return "", ErrNoRunner
+	}
+	bg, ok := runner.(BackgroundRunner)
+	if !ok {
+		return "", ErrBackgroundUnsupported
+	}
+	return bg.StartBackground(ctx, req)
 }

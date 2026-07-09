@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
@@ -15,6 +16,11 @@ type SubagentConfig struct {
 	Runner   subagent.Runner
 	MaxDepth int
 	Catalog  subagent.Catalog
+	// AllowBackground advertises + enables the `background` spawn argument. Set it
+	// only when the Runner supports detached execution (implements
+	// subagent.BackgroundRunner with a Notifier wired); off → the tool is
+	// synchronous-only and the schema omits `background`.
+	AllowBackground bool
 }
 
 type agentSelection struct {
@@ -41,12 +47,13 @@ func RegisterSubagentWithConfig(reg *Registry, cfg SubagentConfig) error {
 			return errorResult(req, fmt.Sprintf("sub-agent depth limit (%d) reached; handle this task directly", cfg.MaxDepth))
 		}
 		var args struct {
-			Task   string   `json:"task"`
-			Model  string   `json:"model"`
-			Agent  string   `json:"agent"`
-			Type   string   `json:"type"`
-			Tools  []string `json:"tools"`
-			Thread string   `json:"thread"`
+			Task       string   `json:"task"`
+			Model      string   `json:"model"`
+			Agent      string   `json:"agent"`
+			Type       string   `json:"type"`
+			Tools      []string `json:"tools"`
+			Thread     string   `json:"thread"`
+			Background bool     `json:"background"`
 		}
 		if err := decodeArgs(req, &args); err != nil {
 			return Result{}, err
@@ -88,11 +95,19 @@ func RegisterSubagentWithConfig(reg *Registry, cfg SubagentConfig) error {
 		if selected {
 			applyDefinition(&subReq, def)
 		}
+		name := subagentPartName(selected, def, args.Agent, args.Type)
+		// Background spawn: return a handle immediately and deliver the result later
+		// as a pushed follow-up turn. Falls through to the synchronous path when the
+		// runner has no background seam (so behavior degrades cleanly).
+		if cfg.AllowBackground && (args.Background || subReq.Background) {
+			if result, handled, err := startBackgroundSpawn(ctx, cfg, req, subReq, name, depth); handled {
+				return result, err
+			}
+		}
 		res, err := cfg.Runner.RunSubagent(subagent.WithDepth(ctx, depth+1), subReq)
 		if err != nil {
 			return errorResult(req, "sub-agent failed: "+err.Error())
 		}
-		name := subagentPartName(selected, def, args.Agent, args.Type)
 		// Record the sub-agent on the per-turn world-state sink (both new spawns and
 		// resumes) so its thread_id handle + name + summary age in WorldState and
 		// surface to the orchestrator, which can then route a follow-up back to it.
@@ -130,12 +145,63 @@ func RegisterSubagentWithConfig(reg *Registry, cfg SubagentConfig) error {
 	if err != nil {
 		return err
 	}
+	props := `"task":{"type":"string","description":"A self-contained instruction for the sub-agent"},"agent":{"type":"string","description":"Optional: filesystem agent type/name from the local catalog."},"type":{"type":"string","description":"Alias for agent."},"model":{"type":"string","description":"Optional: a specific model name to run the sub-agent on (e.g. a vision or stronger model). Omit to use the default or selected agent model."},"tools":{"type":"array","items":{"type":"string"},"description":"Optional requested tool names checked against the selected agent definition."},"thread":{"type":"string","description":"Optional: a thread_id returned by a previous spawn_subagent call. Provide it to CONTINUE that same sub-agent thread (route a follow-up to it) instead of creating a new sub-agent."}`
+	if cfg.AllowBackground {
+		props += `,"background":{"type":"boolean","description":"Optional: run the sub-agent in the BACKGROUND. Returns immediately with its thread_id and status 'running' instead of the result; the result is delivered later as a follow-up message on this thread, so you can keep working or spawn several in parallel and react to each as it finishes. Omit (default) to run synchronously and get the result inline."}`
+	}
 	reg.Describe(Descriptor{
 		Name:        subagentToolName,
 		Description: "Delegate a self-contained sub-task to a sub-agent that runs on its own durable, persisted thread (bounded; isolated from the main conversation). Returns the sub-agent's final answer plus a `thread_id` handle and a short `summary`. Use for focused research/analysis you want isolated from the main thread, or to consult a specific/specialist model via the optional 'model' argument. Pass the optional `thread` (a prior `thread_id`) to CONTINUE a previous sub-agent instead of spawning a new one; the returned `thread_id` is that handle. PREFER continuing an existing sub-agent when a follow-up builds on work it already did: it keeps its own context (e.g. a document or image it already inspected, or a model it was pinned to) that you do not otherwise hold — reuse its handle rather than re-delegating the task from scratch.",
-		Parameters:  json.RawMessage(`{"type":"object","properties":{"task":{"type":"string","description":"A self-contained instruction for the sub-agent"},"agent":{"type":"string","description":"Optional: filesystem agent type/name from the local catalog."},"type":{"type":"string","description":"Alias for agent."},"model":{"type":"string","description":"Optional: a specific model name to run the sub-agent on (e.g. a vision or stronger model). Omit to use the default or selected agent model."},"tools":{"type":"array","items":{"type":"string"},"description":"Optional requested tool names checked against the selected agent definition."},"thread":{"type":"string","description":"Optional: a thread_id returned by a previous spawn_subagent call. Provide it to CONTINUE that same sub-agent thread (route a follow-up to it) instead of creating a new sub-agent."}},"required":["task"]}`),
+		Parameters:  json.RawMessage(`{"type":"object","properties":{` + props + `},"required":["task"]}`),
 	})
 	return nil
+}
+
+// startBackgroundSpawn attempts to launch subReq as a DETACHED background
+// sub-agent. handled is false when the runner has no background seam (not a
+// BackgroundRunner, or it reports ErrBackgroundUnsupported) — the caller then
+// falls back to a synchronous run. On success it records the running handle on the
+// turn world-state (status "running", so the ledger surfaces it to later parent
+// turns) and returns a {thread_id,status:"running"} tool result plus a
+// SubagentPart(running) for the parent conversation/UI; the child's outcome arrives
+// later as a pushed follow-up turn.
+func startBackgroundSpawn(ctx context.Context, cfg SubagentConfig, req Request, subReq subagent.Request, name string, depth int) (Result, bool, error) {
+	bg, ok := cfg.Runner.(subagent.BackgroundRunner)
+	if !ok {
+		return Result{}, false, nil
+	}
+	threadID, err := bg.StartBackground(subagent.WithDepth(ctx, depth+1), subReq)
+	if errors.Is(err, subagent.ErrBackgroundUnsupported) {
+		return Result{}, false, nil
+	}
+	if err != nil {
+		res, rerr := errorResult(req, "sub-agent failed: "+err.Error())
+		return res, true, rerr
+	}
+	if sink, ok := WorldStateSinkFrom(ctx); ok {
+		sink.RecordSubagent(threadID, name, "running", "")
+	}
+	out, err := json.Marshal(map[string]string{
+		"thread_id": threadID,
+		"status":    "running",
+		"note":      "sub-agent started in the background; its result will arrive as a follow-up message on this thread",
+	})
+	if err != nil {
+		return Result{}, true, err
+	}
+	result, err := NewJSONResult(req.CallID, req.Name, out)
+	if err != nil {
+		return Result{}, true, err
+	}
+	if sp, perr := protocol.NewSubagentPart(protocol.SubagentPart{
+		ID:       req.CallID,
+		Name:     name,
+		ThreadID: threadID,
+		Status:   protocol.SubagentRunning,
+	}); perr == nil {
+		result.Parts = []protocol.ContentPart{sp}
+	}
+	return result, true, nil
 }
 
 // subagentPartName resolves a display name for the subagent reference part:

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/scitrera/agent-harness-go/pkg/channel"
@@ -50,6 +51,7 @@ func (s *Server) routes() {
 	// Reads (GET/SSE/assets) are not guarded — they are not CSRF write vectors.
 	s.mux.HandleFunc("POST /api/sessions", guardCSRF(s.handleCreateSession))
 	s.mux.HandleFunc("DELETE /api/sessions/{id}", guardCSRF(s.handleDeleteSession))
+	s.mux.HandleFunc("PATCH /api/sessions/{id}", guardCSRF(s.handleRenameSession))
 	s.mux.HandleFunc("GET /api/sessions/{id}/history", s.handleHistory)
 	s.mux.HandleFunc("POST /api/chat", guardCSRF(s.handleChat))
 	s.mux.HandleFunc("GET /api/stream", s.handleStream)
@@ -106,6 +108,32 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.store.DeleteHistory(r.Context(), id); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+type renameSessionRequest struct {
+	Title string `json:"title"`
+}
+
+// handleRenameSession sets a thread's display title (the web transport's
+// equivalent of the messaging-spec "rename" control kind; the Aether transport
+// handles the control part itself). The title MUST be non-empty per the spec.
+func (s *Server) handleRenameSession(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var req renameSessionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	title := strings.TrimSpace(req.Title)
+	if title == "" {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("title must be non-empty"))
+		return
+	}
+	if err := s.sessions.Rename(id, title); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
