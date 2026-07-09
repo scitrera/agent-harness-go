@@ -113,7 +113,21 @@ func (m model) renderRow(row chatRow) string {
 	if text == "" && row.Streaming {
 		text = "..."
 	}
+	if row.Kind == rowAssistant {
+		text = renderAssistantMarkdown(text, m.markdownWidth(prefix))
+	}
 	return style.Render(prefix+"> ") + text
+}
+
+func (m model) markdownWidth(prefix string) int {
+	if m.width <= 0 {
+		return defaultMarkdownWidth
+	}
+	available := m.width - lipgloss.Width(prefix+"> ")
+	if available < minMarkdownWidth {
+		return minMarkdownWidth
+	}
+	return available
 }
 
 func (m model) renderStatus() string {
