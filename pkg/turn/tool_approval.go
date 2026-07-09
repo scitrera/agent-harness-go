@@ -85,14 +85,15 @@ func (r *Runner) invokeTool(ctx context.Context, session *harness.Session, addr 
 // forwarding the per-turn OBO authority + enclosing message id (on ctx and on
 // the request) so the remote side can resolve the acting user. The call is
 // wrapped in a StartTool span for uniform provider telemetry. It first runs the
-// uniform authorization pipeline (grant + safety, plus the interactive prompt
-// only when the outcome is a Prompt): with the default no-op safety and a
-// TrustDefault tool this resolves to Allow and the provider is invoked directly
-// (today's non-prompting bypass), while a stronger Trust or a non-trivial safety
-// authorizer can Deny or force a prompt.
+// provider authorization pipeline (grant → policy → safety, plus the interactive
+// prompt only when the outcome is a Prompt): with no ToolPolicy, the default
+// no-op safety, and a TrustDefault tool this resolves to Allow and the provider
+// is invoked directly (today's non-prompting bypass), while a stronger Trust, a
+// configured ToolPolicy, or a non-trivial safety authorizer can Deny or force a
+// prompt. A grant short-circuit (pre-authorized/durable) skips the policy.
 func (r *Runner) invokeToolProvider(ctx context.Context, p ToolProvider, addr protocol.MessageAddress, call protocol.ToolInvokeEnvelope, trust tools.TrustLevel) (result tools.Result, err error) {
 	in := AuthzInput{Call: call, Addr: addr, Trust: trust, ProviderID: p.ID()}
-	if d := r.authorizeTool(ctx, in, trustBase(trust)); d.Outcome != Allow {
+	if d := r.authorizeToolProvider(ctx, in, trustBase(trust)); d.Outcome != Allow {
 		if ctx.Err() != nil {
 			return tools.Result{}, ctx.Err() // turn cancelled during a prompt
 		}
@@ -110,23 +111,49 @@ func (r *Runner) invokeToolProvider(ctx context.Context, p ToolProvider, addr pr
 	return p.Invoke(ctx, req)
 }
 
-// invokeWithApproval invokes a local (static-registry) tool; the registry policy
-// runs inside session.InvokeTool and returns ErrToolRequiresApproval BEFORE the
-// tool body executes when the tool is gated. On that trigger — and with an
-// approval channel wired — it runs the uniform authorization pipeline seeded with
-// a Prompt: the grant authorizer may short-circuit to Allow (a durable/always
-// grant, recording a session grant), the safety authorizer may Deny or escalate,
-// and the interactive authorizer resolves the remaining Prompt (emitting the
-// approval_request, blocking under ApprovalTimeout, recording session/always
-// grants). On Allow it re-invokes bypassing the gate; on Deny/expire it returns
-// the original requires-approval error so the caller feeds it back to the model.
-// With no approval channel wired it behaves exactly as a plain invoke.
+// invokeWithApproval invokes a local (static-registry) tool. It has two gates:
+//
+// (1) PRE-EXECUTION safety: the safety authorizer runs BEFORE the tool body so an
+// outright-allowed local tool still passes through it. A Deny returns a
+// policy-style error WITHOUT executing; an escalation to Prompt runs the
+// interactive flow and, on grant, invokes via the approved path (the grant also
+// clears the registry gate) — on deny it returns denied. With the default no-op
+// safety this abstains and the call proceeds to (2) unchanged.
+//
+// (2) The registry's requires-approval flow (unchanged): the registry policy runs
+// inside session.InvokeTool and returns ErrToolRequiresApproval BEFORE the tool
+// body executes when the tool is gated. On that trigger — and with an approval
+// channel wired — it runs the local authorization pipeline seeded with a Prompt:
+// the grant authorizer may short-circuit to Allow (a durable/always grant,
+// recording a session grant), the safety authorizer may Deny or escalate, and the
+// interactive authorizer resolves the remaining Prompt. On Allow it re-invokes
+// bypassing the gate; on Deny/expire it returns the original requires-approval
+// error so the caller feeds it back to the model. With no approval channel wired
+// it behaves exactly as a plain invoke.
 func (r *Runner) invokeWithApproval(ctx context.Context, session *harness.Session, addr protocol.MessageAddress, call protocol.ToolInvokeEnvelope, trust tools.TrustLevel) (tools.Result, error) {
+	in := AuthzInput{Call: call, Addr: addr, Trust: trust}
+	// (1) Pre-execution safety, before the tool body runs.
+	switch d := r.safety().Authorize(ctx, in); d.Outcome {
+	case Deny:
+		return tools.Result{}, policyErrorFor(call.Name) // blocked; not executed
+	case Prompt:
+		if r.approvals == nil {
+			return tools.Result{}, policyErrorFor(call.Name)
+		}
+		if g := (interactiveAuthorizer{r: r}).Authorize(ctx, in); g.Outcome != Allow {
+			if ctx.Err() != nil {
+				return tools.Result{}, ctx.Err() // turn cancelled during the prompt
+			}
+			return tools.Result{}, policyErrorFor(call.Name) // denied/expired
+		}
+		return session.InvokeToolApproved(ctx, call) // granted → also clears the registry gate
+	}
+	// (2) Abstain/Allow → normal invoke; the registry requires-approval gate below
+	// is unchanged (with the default no-op safety this is the only active gate).
 	result, err := session.InvokeTool(ctx, call)
 	if err == nil || r.approvals == nil || !errors.Is(err, tools.ErrToolRequiresApproval) {
 		return result, err
 	}
-	in := AuthzInput{Call: call, Addr: addr, Trust: trust}
 	if d := r.authorizeTool(ctx, in, Prompt); d.Outcome != Allow {
 		if ctx.Err() != nil {
 			return tools.Result{}, ctx.Err() // turn cancelled during the prompt

@@ -2,12 +2,23 @@ package turn
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
-	"github.com/scitrera/agent-harness-go/pkg/approval"
+	"github.com/scitrera/agent-harness-go/pkg/contextpack"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
+	"github.com/scitrera/agent-harness-go/pkg/provider"
 	"github.com/scitrera/agent-harness-go/pkg/tools"
+
+	"github.com/scitrera/agent-harness-go/pkg/approval"
 )
+
+// fixedPolicy returns a preset decision regardless of the request.
+type fixedPolicy struct{ code tools.DecisionCode }
+
+func (p fixedPolicy) Decide(tools.Request) tools.Decision {
+	return tools.Decision{Code: p.code, Reason: "test policy"}
+}
 
 // fixedAuthorizer returns a preset decision regardless of input.
 type fixedAuthorizer struct{ out AuthzOutcome }
@@ -108,5 +119,141 @@ func Test_authorizeTool_provider_safety_escalation_prompts(t *testing.T) {
 	}
 	if len(granter.session) != 1 || granter.session[0] != "ws1/remote_x" {
 		t.Fatalf("expected session grant ws1/remote_x, got %#v", granter.session)
+	}
+}
+
+// (d) a default-trust provider tool is gated by ToolPolicy: a Deny blocks it
+// (provider not invoked, requires-approval error fed back), a RequiresApproval
+// drives the interactive prompt (provider runs on grant).
+func Test_authorizeToolProvider_policy_gates_default_trust(t *testing.T) {
+	ctx := context.Background()
+	addr := protocol.MessageAddress{WorkspaceID: "ws1", TaskID: "task1"}
+	call := protocol.ToolInvokeEnvelope{CallID: "c1", Name: "remote_x"}
+
+	t.Run("deny blocks before invoke", func(t *testing.T) {
+		p := &fakeToolProvider{id: "p1"}
+		r := &Runner{toolPolicy: fixedPolicy{tools.DecisionDeny}}
+		if _, err := r.invokeToolProvider(ctx, p, addr, call, tools.TrustDefault); err == nil {
+			t.Fatal("policy deny should error")
+		}
+		if len(p.invoked) != 0 {
+			t.Fatalf("provider must not run when policy denies, got %+v", p.invoked)
+		}
+	})
+
+	t.Run("requires_approval prompts then runs on grant", func(t *testing.T) {
+		p := &fakeToolProvider{id: "p1"}
+		awaiter := &recordingAwaiter{}
+		r := &Runner{
+			toolPolicy:      fixedPolicy{tools.DecisionRequiresApproval},
+			approvals:       awaiter,
+			approvalGranter: &fakeGranter{},
+		}
+		if _, err := r.invokeToolProvider(ctx, p, addr, call, tools.TrustDefault); err != nil {
+			t.Fatalf("invokeToolProvider: %v", err)
+		}
+		if !awaiter.consulted {
+			t.Fatal("policy requires_approval should have driven the interactive prompt")
+		}
+		if len(p.invoked) != 1 {
+			t.Fatalf("provider should run after approval, got %+v", p.invoked)
+		}
+	})
+}
+
+// (e) a pre-authorized provider tool SKIPS the policy (grant short-circuit ahead
+// of policy), so a Deny-ing policy still lets it run — but a Deny-ing safety,
+// which runs after the grant for every tool, still blocks it.
+func Test_authorizeToolProvider_grant_skips_policy(t *testing.T) {
+	ctx := context.Background()
+	addr := protocol.MessageAddress{WorkspaceID: "ws1", TaskID: "task1"}
+	call := protocol.ToolInvokeEnvelope{CallID: "c1", Name: "remote_x"}
+
+	t.Run("grant beats denying policy", func(t *testing.T) {
+		p := &fakeToolProvider{id: "p1"}
+		r := &Runner{toolPolicy: fixedPolicy{tools.DecisionDeny}}
+		if _, err := r.invokeToolProvider(ctx, p, addr, call, tools.TrustPreAuthorized); err != nil {
+			t.Fatalf("pre-authorized should skip policy: %v", err)
+		}
+		if len(p.invoked) != 1 {
+			t.Fatalf("pre-authorized provider should run, got %+v", p.invoked)
+		}
+	})
+
+	t.Run("denying safety still blocks a granted tool", func(t *testing.T) {
+		p := &fakeToolProvider{id: "p1"}
+		r := &Runner{
+			toolPolicy:       fixedPolicy{tools.DecisionDeny},
+			safetyAuthorizer: fixedAuthorizer{Deny},
+		}
+		if _, err := r.invokeToolProvider(ctx, p, addr, call, tools.TrustPreAuthorized); err == nil {
+			t.Fatal("denying safety should block even a granted tool")
+		}
+		if len(p.invoked) != 0 {
+			t.Fatalf("provider must not run when safety denies, got %+v", p.invoked)
+		}
+	})
+}
+
+// (f) with a nil ToolPolicy and the default no-op safety, a default-trust
+// provider tool resolves to Allow and runs directly (behavior unchanged).
+func Test_authorizeToolProvider_nil_policy_allows(t *testing.T) {
+	ctx := context.Background()
+	addr := protocol.MessageAddress{WorkspaceID: "ws1", TaskID: "task1"}
+	call := protocol.ToolInvokeEnvelope{CallID: "c1", Name: "remote_x"}
+	p := &fakeToolProvider{id: "p1"}
+	r := &Runner{}
+	if _, err := r.invokeToolProvider(ctx, p, addr, call, tools.TrustDefault); err != nil {
+		t.Fatalf("nil policy + noop safety should allow: %v", err)
+	}
+	if len(p.invoked) != 1 {
+		t.Fatalf("provider should run, got %+v", p.invoked)
+	}
+}
+
+// (g) a local, outright-allowed tool with a Deny-ing safety authorizer is blocked
+// BEFORE its body executes (pre-execution safety), and the turn still completes
+// (the requires-approval-style error is fed back to the model).
+func Test_invokeWithApproval_preexec_safety_blocks_local(t *testing.T) {
+	ran := false
+	// StaticPolicy allows "record" outright — without pre-exec safety it would run.
+	policy := tools.NewDynamicPolicy(tools.StaticPolicy{Allowed: map[string]string{"record": "ok"}}, nil)
+	registry := tools.NewAuditedRegistry(policy, nil)
+	if err := registry.Register("record", tools.HandlerFunc(func(_ context.Context, req tools.Request) (tools.Result, error) {
+		ran = true
+		return tools.NewJSONResult(req.CallID, req.Name, json.RawMessage(`{"ok":true}`))
+	})); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	callPart, err := protocol.NewToolCallPart(protocol.ToolInvokeEnvelope{CallID: "call-1", Name: "record", Args: protocol.RawToArgs(json.RawMessage(`{}`))})
+	if err != nil {
+		t.Fatalf("tool call part: %v", err)
+	}
+	finalPart, err := protocol.NewTextPart("done")
+	if err != nil {
+		t.Fatalf("final text: %v", err)
+	}
+	prov := &scriptedProvider{responses: []provider.ChatResponse{
+		{Message: protocol.ChatMessage{ID: "a-tool", Role: protocol.RoleAssistant, Content: []protocol.ContentPart{callPart}}},
+		{Message: protocol.ChatMessage{ID: "a-final", Role: protocol.RoleAssistant, Content: []protocol.ContentPart{finalPart}}},
+	}}
+	runner, err := NewRunner(Config{
+		Store:            &fakeStore{},
+		Loader:           fakeLoader{},
+		Registry:         registry,
+		Provider:         prov,
+		Publisher:        &fakePublisher{},
+		Assembler:        contextpack.NewAssembler(contextpack.Config{}),
+		SafetyAuthorizer: fixedAuthorizer{Deny},
+	})
+	if err != nil {
+		t.Fatalf("runner: %v", err)
+	}
+	addr := protocol.MessageAddress{ThreadID: "th1", TaskID: "task1", WorkspaceID: "ws1"}
+	if _, err := runner.Run(context.Background(), addr, userTurn(t)); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if ran {
+		t.Fatal("local tool must NOT execute when pre-exec safety denies")
 	}
 }

@@ -102,15 +102,17 @@ func (r *Runner) safety() ToolAuthorizer {
 	return noopAuthorizer{}
 }
 
-// authorizeTool composes the uniform authorization pipeline for a single call.
-// base is the tool's intrinsic requirement (Prompt for a policy-gated local
-// tool / a requires-approval provider tool; Allow otherwise). The grant
-// authorizer may authorize a base Prompt away (a pre-authorized trust, or a
-// durable/always grant — recording a session grant); the safety authorizer runs
-// for EVERY tool (including pre-authorized) and may Deny or escalate an Allow to
-// a Prompt; the interactive authorizer resolves a remaining Prompt. The returned
-// decision is Allow (run the tool), Deny (refuse), or — on turn cancellation
-// during a prompt — Deny with ctx.Err() set (the caller aborts the turn).
+// authorizeTool composes the LOCAL authorization pipeline for a single call:
+// grant → safety → interactive. base is the tool's intrinsic requirement (Prompt
+// for a policy-gated local tool via the registry's requires-approval trigger;
+// Allow otherwise). The grant authorizer may authorize a base Prompt away (a
+// pre-authorized trust, or a durable/always grant — recording a session grant);
+// finishAuthz then runs the safety authorizer (for EVERY tool, incl.
+// pre-authorized) and resolves a remaining Prompt interactively. The provider
+// path uses authorizeToolProvider, which inserts the PolicyAuthorizer between the
+// grant short-circuit and safety. The returned decision is Allow (run the tool),
+// Deny (refuse), or — on turn cancellation during a prompt — Deny with ctx.Err()
+// set (the caller aborts the turn).
 func (r *Runner) authorizeTool(ctx context.Context, in AuthzInput, base AuthzOutcome) AuthzDecision {
 	// grant short-circuit: pre-authorized trust or a durable grant → Allow,
 	// clearing a base Prompt. Deny is defensive (grant never denies today).
@@ -121,6 +123,49 @@ func (r *Runner) authorizeTool(ctx context.Context, in AuthzInput, base AuthzOut
 	case Allow:
 		base = Allow
 	}
+	return r.finishAuthz(ctx, in, base)
+}
+
+// authorizeToolProvider is the PROVIDER authorization pipeline: grant → [policy]
+// → safety → interactive. It mirrors authorizeTool but inserts the configured
+// ToolPolicy (via policyAuthorizer) AFTER the grant short-circuit and BEFORE
+// safety, so a PreAuthorized/durably-granted provider tool (grant → Allow) SKIPS
+// the policy, while a default-trust provider tool (e.g. an MCP tool) is
+// policy-gated. With no ToolPolicy set this is identical to authorizeTool
+// (behavior-preserving). The policy does not downgrade a base Prompt (Prompt
+// outranks Allow), matching the resolver's precedence.
+func (r *Runner) authorizeToolProvider(ctx context.Context, in AuthzInput, base AuthzOutcome) AuthzDecision {
+	grant := (grantAuthorizer{r: r}).Authorize(ctx, in)
+	granted := false
+	switch grant.Outcome {
+	case Deny:
+		return grant
+	case Allow:
+		base = Allow
+		granted = true
+	}
+	// policy gates a default-trust provider tool; a grant short-circuit skips it.
+	if !granted && r.toolPolicy != nil {
+		switch d := (policyAuthorizer{policy: r.toolPolicy}).Authorize(ctx, in); d.Outcome {
+		case Deny:
+			return d
+		case Prompt:
+			base = Prompt
+		case Allow:
+			if base != Prompt {
+				base = Allow
+			}
+		}
+	}
+	return r.finishAuthz(ctx, in, base)
+}
+
+// finishAuthz runs the safety authorizer (for EVERY tool, incl. pre-authorized)
+// then resolves a remaining Prompt via the interactive flow. base is the running
+// requirement after the grant (and, on the provider path, policy) stages. Shared
+// by authorizeTool and authorizeToolProvider so their safety/interactive tail
+// can't drift.
+func (r *Runner) finishAuthz(ctx context.Context, in AuthzInput, base AuthzOutcome) AuthzDecision {
 	// safety runs for every tool; it may deny or escalate Allow→Prompt.
 	switch safety := r.safety().Authorize(ctx, in); safety.Outcome {
 	case Deny:
@@ -142,6 +187,32 @@ func (r *Runner) authorizeTool(ctx context.Context, in AuthzInput, base AuthzOut
 		return (interactiveAuthorizer{r: r}).Authorize(ctx, in)
 	}
 	return AuthzDecision{Outcome: base}
+}
+
+// policyAuthorizer maps a tools.Policy verdict into the authorization pipeline:
+// DecisionAllow→Allow, DecisionDeny→Deny, DecisionRequiresApproval→Prompt; a nil
+// policy abstains. It gates PROVIDER tools only (local tools keep the static
+// registry's own policy via session.InvokeTool — routing it here too would
+// double-gate). The request is built from the AuthzInput's call + address so the
+// policy sees the tool name, raw args, and workspace.
+type policyAuthorizer struct{ policy tools.Policy }
+
+func (pa policyAuthorizer) Authorize(_ context.Context, in AuthzInput) AuthzDecision {
+	if pa.policy == nil {
+		return AuthzDecision{Outcome: Abstain}
+	}
+	req := tools.RequestFromEnvelope(in.Call)
+	req.Addr = in.Addr // the model's tool_call carries no addr; use the turn's
+	d := pa.policy.Decide(req)
+	switch d.Code {
+	case tools.DecisionAllow:
+		return AuthzDecision{Outcome: Allow, Reason: d.Reason}
+	case tools.DecisionDeny:
+		return AuthzDecision{Outcome: Deny, Reason: d.Reason}
+	case tools.DecisionRequiresApproval:
+		return AuthzDecision{Outcome: Prompt, Reason: d.Reason}
+	}
+	return AuthzDecision{Outcome: Abstain}
 }
 
 // grantAuthorizer authorizes a call ahead of any prompt: a pre-authorized Trust,

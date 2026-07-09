@@ -153,6 +153,11 @@ type Runner struct {
 	approvalTimeout time.Duration
 	approvalScopes  []string
 	grantStore      tools.GrantStore
+	// toolPolicy gates PROVIDER tools in the authorization pipeline (inserted
+	// after the grant short-circuit, before safety). nil → provider tools are
+	// ungated by policy (today's behavior). Local tools keep the registry's own
+	// policy via session.InvokeTool and are not routed through this.
+	toolPolicy tools.Policy
 	// safetyAuthorizer is the pluggable safety slot in the authorization pipeline;
 	// it runs for every tool (local + provider, incl. pre-authorized). nil → a
 	// no-op that abstains (today's behavior). A future safety classifier may Deny
@@ -372,6 +377,15 @@ type Config struct {
 	ApprovalTimeout time.Duration
 	ApprovalScopes  []string
 
+	// ToolPolicy gates PROVIDER-surfaced tools (e.g. discovered MCP tools) in the
+	// authorization pipeline: a default-trust provider tool is decided by the
+	// policy (Allow / Deny / RequiresApproval → prompt), positioned after the
+	// grant short-circuit (a pre-authorized/durably-granted tool skips it) and
+	// before the safety authorizer. Optional; nil → provider tools are ungated by
+	// policy (behavior unchanged). Local (static-registry) tools are NOT gated
+	// here — they keep the registry's own policy via session.InvokeTool.
+	ToolPolicy tools.Policy
+
 	// GrantStore lets the approval slow-path consult durable "always" grants
 	// before prompting: when a tool is already durably authorized for the
 	// workspace, the runner records a session grant and runs it without
@@ -553,6 +567,7 @@ func NewRunner(cfg Config) (*Runner, error) {
 		approvalTimeout:           cfg.ApprovalTimeout,
 		approvalScopes:            cfg.ApprovalScopes,
 		grantStore:                cfg.GrantStore,
+		toolPolicy:                cfg.ToolPolicy,
 		safetyAuthorizer:          cfg.SafetyAuthorizer,
 		toolProviders:             toolProviders,
 		staticToolNames:           staticNames,
