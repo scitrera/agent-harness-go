@@ -16,6 +16,7 @@ func main() {
 	seed := flag.Bool("seed", true, "seed default workspace files when missing")
 	cliMode := flag.Bool("cli", false, "run the stdin REPL instead of the web UI")
 	tuiMode := flag.Bool("tui", false, "run the terminal UI instead of the web UI")
+	acpMode := flag.Bool("acp", false, "run as an Agent Client Protocol (ACP) agent over stdio")
 	addr := flag.String("addr", env("SAHARA_WEB_ADDR", "127.0.0.1:8787"), "web UI listen address (NO auth - localhost only)")
 	noBrowser := flag.Bool("no-browser", false, "do not open a browser (web mode)")
 	flag.Usage = func() {
@@ -34,8 +35,8 @@ func main() {
 		fmt.Fprintln(os.Stderr, "error: set --base-url or SAHARA_LLM_BASE_URL (an OpenAI-compatible endpoint)")
 		os.Exit(2)
 	}
-	if *cliMode && *tuiMode {
-		fmt.Fprintln(os.Stderr, "error: choose only one of --cli or --tui")
+	if nTrue(*cliMode, *tuiMode, *acpMode) > 1 {
+		fmt.Fprintln(os.Stderr, "error: choose only one of --cli, --tui, or --acp")
 		os.Exit(2)
 	}
 	if err := setupAppLogging(*workspace, *tuiMode); err != nil {
@@ -58,6 +59,8 @@ func main() {
 		err = runCLI(cfg)
 	case *tuiMode:
 		err = runTUI(cfg)
+	case *acpMode:
+		err = runACP(cfg)
 	default:
 		err = runWeb(cfg, *addr, !*noBrowser)
 	}
@@ -65,4 +68,15 @@ func main() {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
+}
+
+// nTrue counts the set flags among the given booleans (mode mutual-exclusion).
+func nTrue(flags ...bool) int {
+	n := 0
+	for _, f := range flags {
+		if f {
+			n++
+		}
+	}
+	return n
 }

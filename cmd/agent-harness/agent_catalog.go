@@ -39,10 +39,11 @@ func agentCatalogForWorkspace(workspaceRoot string) (subagent.Catalog, error) {
 	return nil, nil
 }
 
-func registerReferenceSubagent(reg *tools.Registry, runner subagent.Runner, catalog subagent.Catalog) error {
+func registerReferenceSubagent(reg *tools.Registry, runner subagent.Runner, catalog subagent.Catalog, allowBackground bool) error {
 	return tools.RegisterSubagentWithConfig(reg, tools.SubagentConfig{
-		Runner:   runner,
-		MaxDepth: referenceSubagentMaxDepth,
-		Catalog:  catalog,
+		Runner:          runner,
+		MaxDepth:        referenceSubagentMaxDepth,
+		Catalog:         catalog,
+		AllowBackground: allowBackground,
 	})
 }

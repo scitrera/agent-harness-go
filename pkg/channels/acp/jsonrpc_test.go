@@ -1,0 +1,115 @@
+package acp
+
+import (
+	"bytes"
+	"encoding/json"
+	"strings"
+	"testing"
+)
+
+// TestCodecRoundTrip exercises request read plus response/notification/error
+// writes over an in-memory buffer, asserting the newline-delimited JSON framing
+// and field wiring.
+func TestCodecRoundTrip(t *testing.T) {
+	// read: a request line parses into method/id/params.
+	in := `{"jsonrpc":"2.0","id":7,"method":"session/prompt","params":{"sessionId":"s1"}}` + "\n"
+	rc := newConn(strings.NewReader(in), &bytes.Buffer{})
+	req, err := rc.read()
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if req.Method != "session/prompt" {
+		t.Fatalf("method = %q, want session/prompt", req.Method)
+	}
+	if string(req.ID) != "7" {
+		t.Fatalf("id = %q, want 7", req.ID)
+	}
+	if req.isNotification() {
+		t.Fatal("request with id must not be a notification")
+	}
+	var pp promptParams
+	if err := json.Unmarshal(req.Params, &pp); err != nil {
+		t.Fatalf("params: %v", err)
+	}
+	if pp.SessionID != "s1" {
+		t.Fatalf("sessionId = %q, want s1", pp.SessionID)
+	}
+
+	// read: a message without id is a notification.
+	notifIn := `{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"s1"}}` + "\n"
+	nc := newConn(strings.NewReader(notifIn), &bytes.Buffer{})
+	nreq, err := nc.read()
+	if err != nil {
+		t.Fatalf("read notif: %v", err)
+	}
+	if !nreq.isNotification() {
+		t.Fatal("message without id must be a notification")
+	}
+
+	// write: response, notification, error each emit exactly one JSON line.
+	var buf bytes.Buffer
+	wc := newConn(strings.NewReader(""), &buf)
+	if err := wc.writeResponse(json.RawMessage("7"), promptResult{StopReason: stopEndTurn}); err != nil {
+		t.Fatalf("writeResponse: %v", err)
+	}
+	if err := wc.notify(methodSessionUpdate, sessionNotification{SessionID: "s1", Update: json.RawMessage(`{"sessionUpdate":"agent_message_chunk"}`)}); err != nil {
+		t.Fatalf("notify: %v", err)
+	}
+	if err := wc.writeError(json.RawMessage("8"), codeMethodNotFound, "nope"); err != nil {
+		t.Fatalf("writeError: %v", err)
+	}
+
+	lines := splitLines(t, buf.Bytes())
+	if len(lines) != 3 {
+		t.Fatalf("got %d lines, want 3: %q", len(lines), buf.String())
+	}
+
+	var resp rpcResponse
+	if err := json.Unmarshal(lines[0], &resp); err != nil {
+		t.Fatalf("resp decode: %v", err)
+	}
+	if resp.JSONRPC != jsonRPCVersion || string(resp.ID) != "7" {
+		t.Fatalf("resp id/version wrong: %+v", resp)
+	}
+	var pr promptResult
+	if err := json.Unmarshal(resp.Result, &pr); err != nil || pr.StopReason != stopEndTurn {
+		t.Fatalf("resp result = %+v (%v)", pr, err)
+	}
+
+	var notif rpcNotification
+	if err := json.Unmarshal(lines[1], &notif); err != nil {
+		t.Fatalf("notif decode: %v", err)
+	}
+	if notif.Method != methodSessionUpdate {
+		t.Fatalf("notification method = %q, want %q", notif.Method, methodSessionUpdate)
+	}
+	// A notification MUST NOT carry an id member on the wire.
+	var idProbe map[string]json.RawMessage
+	if err := json.Unmarshal(lines[1], &idProbe); err != nil {
+		t.Fatalf("notif probe: %v", err)
+	}
+	if _, hasID := idProbe["id"]; hasID {
+		t.Fatalf("notification carried an id: %s", lines[1])
+	}
+
+	var eresp rpcResponse
+	if err := json.Unmarshal(lines[2], &eresp); err != nil {
+		t.Fatalf("err decode: %v", err)
+	}
+	if eresp.Error == nil || eresp.Error.Code != codeMethodNotFound {
+		t.Fatalf("error response wrong: %s", lines[2])
+	}
+}
+
+func splitLines(t *testing.T, b []byte) [][]byte {
+	t.Helper()
+	raw := bytes.Split(bytes.TrimRight(b, "\n"), []byte("\n"))
+	out := make([][]byte, 0, len(raw))
+	for _, l := range raw {
+		if len(bytes.TrimSpace(l)) == 0 {
+			continue
+		}
+		out = append(out, l)
+	}
+	return out
+}

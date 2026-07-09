@@ -95,7 +95,7 @@ func TestRegisterReferenceSubagentUsesCatalog(t *testing.T) {
 	}
 	reg := tools.NewRegistry()
 	runner := &recordingSubagentRunner{}
-	if err := registerReferenceSubagent(reg, runner, catalog); err != nil {
+	if err := registerReferenceSubagent(reg, runner, catalog, false); err != nil {
 		t.Fatalf("register subagent: %v", err)
 	}
 
@@ -131,7 +131,7 @@ func TestRegisterReferenceSubagentKeepsDepthLimit(t *testing.T) {
 	// Given: production registration with the default max depth.
 	reg := tools.NewRegistry()
 	runner := &recordingSubagentRunner{}
-	if err := registerReferenceSubagent(reg, runner, nil); err != nil {
+	if err := registerReferenceSubagent(reg, runner, nil, false); err != nil {
 		t.Fatalf("register subagent: %v", err)
 	}
 

@@ -8,6 +8,7 @@ import (
 	"github.com/scitrera/agent-harness-go/pkg/approval"
 	"github.com/scitrera/agent-harness-go/pkg/channel"
 	"github.com/scitrera/agent-harness-go/pkg/commands"
+	"github.com/scitrera/agent-harness-go/pkg/compaction"
 	"github.com/scitrera/agent-harness-go/pkg/contextpack"
 	"github.com/scitrera/agent-harness-go/pkg/localtools"
 	"github.com/scitrera/agent-harness-go/pkg/provider"
@@ -43,7 +44,11 @@ func buildRunner(cfg appConfig, pub channel.Publisher, approvals approval.Awaite
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := registerReferenceSubagent(reg, subagentRef, agentCatalog); err != nil {
+	// A publisher that can also enqueue inbound turns (web/tui channels) lets a
+	// detached background sub-agent push its completion back to the parent thread;
+	// cli (stdout-only) cannot, so background stays disabled there.
+	notifier, allowBackground := pub.(channel.Enqueuer)
+	if err := registerReferenceSubagent(reg, subagentRef, agentCatalog, allowBackground); err != nil {
 		return nil, nil, fmt.Errorf("register subagent: %w", err)
 	}
 
@@ -57,8 +62,15 @@ func buildRunner(cfg appConfig, pub channel.Publisher, approvals approval.Awaite
 	}
 
 	fsStore := store.NewFileStore(cfg.workspaceRoot, cfg.stateDir)
-	skillSpecs, _ := skills.Discover(cfg.workspaceRoot, []string{"skills", ".agent-harness-skills"})
+	skillSpecs, skillWarnings, _ := skills.DiscoverWithWarnings(cfg.workspaceRoot, []string{"skills", ".agent-harness-skills"})
 	cmdSpecs, _ := commands.Discover(cfg.workspaceRoot, []string{"commands", ".agent-harness-commands"})
+
+	// Pluggable compaction: default to the evict→classic composite (evicts oversized
+	// tool results/text to a workspace file the model can read_file, then classic
+	// drop-oldest if still over budget). AGENT_HARNESS_COMPACTION overrides the mode
+	// ("classic" keeps the historical behavior; "summarize" is opt-in but needs no
+	// Summarizer wired here yet, so it degrades to classic).
+	compactor := compaction.CompactorFor(os.Getenv("AGENT_HARNESS_COMPACTION"), localtools.NewEvictionSink(ws, ""), nil)
 
 	runner, err := turn.NewRunner(turn.Config{
 		Store:     fsStore,
@@ -70,7 +82,9 @@ func buildRunner(cfg appConfig, pub channel.Publisher, approvals approval.Awaite
 			MaxHistoryMessages: 24,
 			MaxTextPartBytes:   64 << 10,
 			MaxFileBytes:       16 << 10,
+			Compactor:          compactor,
 			Skills:             skillSummaries(skillSpecs),
+			SkillLoadWarnings:  skillWarnings,
 			WorkspaceDir:       cfg.workspaceRoot,
 			Model:              cfg.model,
 			Now:                time.Now,
@@ -80,6 +94,9 @@ func buildRunner(cfg appConfig, pub channel.Publisher, approvals approval.Awaite
 		Commands:  commands.New(cmdSpecs),
 		Now:       time.Now,
 		Approvals: approvals,
+		// Notifier wakes a fresh parent turn with a background sub-agent's completion
+		// notice; nil (cli) → background spawns fall back to synchronous.
+		Notifier: notifier,
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("runner: %w", err)
