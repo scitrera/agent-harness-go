@@ -65,6 +65,48 @@ func TestOpenAIEncodingDropsMetaCacheHint(t *testing.T) {
 	}
 }
 
+func TestPromptCachingStampsNativeBreakpoint(t *testing.T) {
+	sys := spec.NewChatMessage("sys", spec.RoleSystem)
+	sys.Content = []spec.ContentPart{spec.NewTextPart("base instructions")} // 17 chars
+	usr := spec.NewChatMessage("u", spec.RoleUser)
+	usr.Content = []spec.ContentPart{spec.NewTextPart("hello")}
+	req := ChatRequest{Messages: []protocol.ChatMessage{sys, usr}}
+
+	// native + PromptCaching=true → breakpoint emitted at end of system prefix.
+	on := &SidecarClient{format: FormatNative, promptCaching: true}
+	body, err := on.encodeRequest(req)
+	if err != nil {
+		t.Fatalf("encode (caching on): %v", err)
+	}
+	if !bytes.Contains(body, []byte(`"stable_prefix_chars":17`)) {
+		t.Fatalf("expected cache breakpoint at end of system prefix: %s", body)
+	}
+	// The caller's message must not be mutated in place.
+	if _, ok := sys.Meta["scitrera"]; ok {
+		t.Fatalf("stamping leaked into caller's message meta: %v", sys.Meta)
+	}
+
+	// native + PromptCaching=false → no breakpoint.
+	off := &SidecarClient{format: FormatNative, promptCaching: false}
+	body, err = off.encodeRequest(req)
+	if err != nil {
+		t.Fatalf("encode (caching off): %v", err)
+	}
+	if bytes.Contains(body, []byte("stable_prefix_chars")) {
+		t.Fatalf("cache breakpoint emitted with caching disabled: %s", body)
+	}
+
+	// openai + PromptCaching=true → no-op (openai path drops the hint).
+	oai := &SidecarClient{format: FormatOpenAI, promptCaching: true}
+	body, err = oai.encodeRequest(req)
+	if err != nil {
+		t.Fatalf("encode (openai): %v", err)
+	}
+	if bytes.Contains(body, []byte("stable_prefix_chars")) || bytes.Contains(body, []byte("scitrera")) {
+		t.Fatalf("openai path leaked cache breakpoint: %s", body)
+	}
+}
+
 func TestDecodeOpenAIToolCalls(t *testing.T) {
 	data := []byte(`{"id":"a1","choices":[{"message":{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"SOUL.md\"}"}}]}}]}`)
 	resp, err := decodeChatResponse(data)

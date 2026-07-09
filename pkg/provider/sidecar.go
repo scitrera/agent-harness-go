@@ -54,6 +54,12 @@ type SidecarConfig struct {
 	StreamIdle       time.Duration
 	// Guard, when set, validates BaseURL + AuthHeader (e.g. SandboxGuard).
 	Guard Guard
+	// PromptCaching, when true, marks the end of the stable system-prompt prefix
+	// with a provider prompt-cache breakpoint on the native wire path (the sidecar
+	// lowers it to an Anthropic cache_control:{type:"ephemeral"} block). Opt-in and
+	// default false so it cannot regress existing behavior; a no-op on the openai
+	// wire format (which drops the hint).
+	PromptCaching bool
 }
 
 type SidecarClient struct {
@@ -67,6 +73,7 @@ type SidecarClient struct {
 	streamClient     *http.Client
 	streamFirstChunk time.Duration
 	streamIdle       time.Duration
+	promptCaching    bool
 }
 
 type ChatRequest struct {
@@ -142,7 +149,7 @@ func NewSidecarClient(cfg SidecarConfig) (*SidecarClient, error) {
 	if format == "" {
 		format = FormatNative
 	}
-	return &SidecarClient{baseURL: parsed, chatPath: chatPath, authHeader: cfg.AuthHeader, format: format, client: client, streamClient: streamClient, streamFirstChunk: streamFirstChunk, streamIdle: streamIdle}, nil
+	return &SidecarClient{baseURL: parsed, chatPath: chatPath, authHeader: cfg.AuthHeader, format: format, client: client, streamClient: streamClient, streamFirstChunk: streamFirstChunk, streamIdle: streamIdle, promptCaching: cfg.PromptCaching}, nil
 }
 
 func (c *SidecarClient) BaseURL() string {
@@ -163,6 +170,7 @@ func (c *SidecarClient) Chat(ctx context.Context, chat ChatRequest) (ChatRespons
 	if c.authHeader != "" {
 		req.Header.Set("authorization", c.authHeader)
 	}
+	applyAttributionHeaders(ctx, req)
 	resp, err := c.client.Do(req)
 	if err != nil {
 		return ChatResponse{}, classifyTransport(err)
@@ -180,9 +188,58 @@ func (c *SidecarClient) Chat(ctx context.Context, chat ChatRequest) (ChatRespons
 
 func (c *SidecarClient) encodeRequest(chat ChatRequest) ([]byte, error) {
 	if c.format == FormatOpenAI {
+		// The openai wire path has no provider prompt-cache breakpoint concept and
+		// drops the meta hint (see lowerMessage); prompt caching is a native-path
+		// concern the sidecar lowers to Anthropic cache_control.
 		return json.Marshal(toOpenAIRequest(chat))
 	}
+	if c.promptCaching {
+		chat.Messages = stampPromptCacheBreakpoint(chat.Messages)
+	}
 	return json.Marshal(chat)
+}
+
+// stampPromptCacheBreakpoint marks the end of the stable system-prompt prefix
+// with a cache breakpoint the sidecar lowers to an Anthropic
+// cache_control:{type:"ephemeral"} block. It rides the existing spec Meta
+// `scitrera.cache.stable_prefix_chars` convention (no new cross-package fields):
+// stable_prefix_chars is the length of the stable prefix, so setting it to the
+// full system-prompt length places the breakpoint at the prompt's end. The last
+// system message is stamped (the boundary of the stable system prefix). Returns
+// a copy with that one message cloned+stamped; the caller's messages are never
+// mutated in place.
+func stampPromptCacheBreakpoint(msgs []protocol.ChatMessage) []protocol.ChatMessage {
+	idx := -1
+	for i, m := range msgs {
+		if m.Role == protocol.RoleSystem {
+			idx = i
+		}
+	}
+	if idx < 0 {
+		return msgs
+	}
+	prefix := len([]rune(messageText(msgs[idx])))
+	if prefix == 0 {
+		return msgs
+	}
+	sc := map[string]json.RawMessage{}
+	if raw, ok := msgs[idx].Meta["scitrera"]; ok && len(raw) > 0 {
+		// Preserve any other keys already in the scitrera namespace.
+		_ = json.Unmarshal(raw, &sc)
+	}
+	sc["cache"] = json.RawMessage(fmt.Sprintf(`{"stable_prefix_chars":%d}`, prefix))
+	blob, err := json.Marshal(sc)
+	if err != nil {
+		return msgs
+	}
+	out := append([]protocol.ChatMessage(nil), msgs...)
+	stamped := out[idx].Clone()
+	if stamped.Meta == nil {
+		stamped.Meta = map[string]json.RawMessage{}
+	}
+	stamped.Meta["scitrera"] = blob
+	out[idx] = stamped
+	return out
 }
 
 type openAIChatRequest struct {
