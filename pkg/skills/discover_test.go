@@ -3,6 +3,7 @@ package skills
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -74,6 +75,77 @@ func TestDiscoverMissingDirs(t *testing.T) {
 	}
 	if len(specs) != 0 {
 		t.Fatalf("expected no skills, got %#v", specs)
+	}
+}
+
+func TestDiscoverWithWarningsBadNameAndDuplicate(t *testing.T) {
+	root := t.TempDir()
+	// Frontmatter name doesn't match the naming convention (uppercase, spaces)
+	// and doesn't equal the folder name -> warning, but the skill still loads
+	// (name/description validation is advisory, not a rejection).
+	writeSkill(t, root, "skills", "bad-name-skill",
+		"---\nname: Bad Name!\ndescription: has a bad name\n---\n")
+	// Duplicate name across dirs -> second occurrence dropped with a warning.
+	writeSkill(t, root, ".memorylayer-skills", "shared", "---\nname: shared\ndescription: primary\n---\n")
+	writeSkill(t, root, "skills", "shared-dup", "---\nname: shared\ndescription: secondary\n---\n")
+
+	specs, warnings, err := DiscoverWithWarnings(root, []string{".memorylayer-skills", "skills"})
+	if err != nil {
+		t.Fatalf("discover: %v", err)
+	}
+	if len(specs) != 2 { // bad-name-skill (kept) + shared (primary; dup dropped)
+		t.Fatalf("expected 2 specs, got %d: %#v", len(specs), specs)
+	}
+	var sawBadName, sawDup bool
+	for _, w := range warnings {
+		if strings.Contains(w, "bad-name-skill") && strings.Contains(w, "Bad Name!") {
+			sawBadName = true
+		}
+		if strings.Contains(w, "shared") && strings.Contains(w, "duplicate") {
+			sawDup = true
+		}
+	}
+	if !sawBadName {
+		t.Fatalf("expected a bad-name warning, got %#v", warnings)
+	}
+	if !sawDup {
+		t.Fatalf("expected a duplicate-name warning, got %#v", warnings)
+	}
+}
+
+func TestDiscoverWithWarningsAllowedTools(t *testing.T) {
+	root := t.TempDir()
+	writeSkill(t, root, "skills", "yaml-list-tools",
+		"---\nname: yaml-list-tools\ndescription: yaml list form\nallowed-tools:\n  - read_file\n  - write_file\n---\n")
+	writeSkill(t, root, "skills", "csv-tools",
+		"---\nname: csv-tools\ndescription: csv form\nallowed-tools: read_file, bash\n---\n")
+
+	specs, _, err := DiscoverWithWarnings(root, []string{"skills"})
+	if err != nil {
+		t.Fatalf("discover: %v", err)
+	}
+	byName := map[string][]string{}
+	for _, s := range specs {
+		byName[s.Name] = s.AllowedTools
+	}
+	if got := byName["yaml-list-tools"]; len(got) != 2 || got[0] != "read_file" || got[1] != "write_file" {
+		t.Fatalf("yaml-list allowed-tools wrong: %#v", got)
+	}
+	if got := byName["csv-tools"]; len(got) != 2 || got[0] != "read_file" || got[1] != "bash" {
+		t.Fatalf("csv allowed-tools wrong: %#v", got)
+	}
+}
+
+func TestDiscoverUnchangedByWarnings(t *testing.T) {
+	root := t.TempDir()
+	writeSkill(t, root, "skills", "data-analysis",
+		"# Data Analysis\nAnalyze CSVs and produce charts.")
+	specs, err := Discover(root, []string{"skills"})
+	if err != nil {
+		t.Fatalf("discover: %v", err)
+	}
+	if len(specs) != 1 || specs[0].Name != "data-analysis" {
+		t.Fatalf("Discover should still work unchanged: %#v", specs)
 	}
 }
 

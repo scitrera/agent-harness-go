@@ -39,6 +39,11 @@ type LoadableSkill struct {
 	Path        string
 	Body        string
 	Prereqs     []string
+	// AllowedTools is the skill's declared tool scope (parsed from the SKILL.md
+	// `allowed-tools` frontmatter key). Surfaced to the model in the load_skill
+	// result only — NOT enforced; tool-call restriction against this list is a
+	// turn-loop follow-up.
+	AllowedTools []string
 }
 
 // Registry indexes resolved skills by name for the load_skill handler.
@@ -76,11 +81,12 @@ func BuildRegistry(specs []catalog.SkillSpec, workspaceRoot string) *Registry {
 			continue
 		}
 		r.byName[s.Name] = &LoadableSkill{
-			Name:        s.Name,
-			Description: s.Description,
-			Path:        s.Path,
-			Body:        body,
-			Prereqs:     parsePrereqs(body),
+			Name:         s.Name,
+			Description:  s.Description,
+			Path:         s.Path,
+			Body:         body,
+			Prereqs:      parsePrereqs(body),
+			AllowedTools: s.AllowedTools,
 		}
 		r.order = append(r.order, s.Name)
 	}
@@ -216,6 +222,9 @@ type loadedSkillOut struct {
 	Path        string `json:"path"`
 	Body        string `json:"body"`
 	Role        string `json:"role"` // "target" or "prerequisite"
+	// AllowedTools surfaces the skill's declared tool scope (see LoadableSkill).
+	// Advisory only — not enforced here.
+	AllowedTools []string `json:"allowed_tools,omitempty"`
 }
 
 // LoadTool returns the load_skill handler bound to the registry. It records each
@@ -259,6 +268,7 @@ func LoadTool(reg *Registry) tools.HandlerFunc {
 			}
 			out = append(out, loadedSkillOut{
 				Name: sk.Name, Description: sk.Description, Path: sk.Path, Body: sk.Body, Role: role,
+				AllowedTools: sk.AllowedTools,
 			})
 			if hasSink {
 				// Record every emitted skill (target + prereqs) as invoked — they were

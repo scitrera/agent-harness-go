@@ -30,6 +30,10 @@ type SkillSpec struct {
 	Path        string `json:"path,omitempty"`
 	Content     string `json:"content,omitempty"`
 	Enabled     bool   `json:"enabled"`
+	// AllowedTools is the skill's declared tool scope, parsed from an optional
+	// `allowed-tools` SKILL.md frontmatter key (YAML list or comma-separated
+	// string). Surfaced to the model only — enforcement is a turn-loop follow-up.
+	AllowedTools []string `json:"allowed_tools,omitempty"`
 }
 
 type MCPServerSpec struct {
