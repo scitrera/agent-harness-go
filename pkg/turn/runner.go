@@ -199,18 +199,6 @@ type ApprovalGranter interface {
 // distribution wires one that reads the inbound grant.
 type AuthorityFunc func(addr protocol.MessageAddress, user protocol.ChatMessage) tools.MemoryAuthority
 
-// DynamicToolProvider supplies tools discovered per-turn from an external source
-// (e.g. the platform-bridge tool registry) rather than the static registry. The
-// runner calls Discover once per turn to assemble the model-visible tool list,
-// then routes invocations of any discovered tool (one not in the static
-// registry) to Invoke. Discover is best-effort: an error degrades the turn to
-// the static tool set. The per-turn OBO authority is on ctx
-// (tools.MemoryAuthorityFrom) and on req.Authority.
-type DynamicToolProvider interface {
-	Discover(ctx context.Context, addr protocol.MessageAddress, user protocol.ChatMessage) ([]tools.Descriptor, error)
-	Invoke(ctx context.Context, req tools.Request) (tools.Result, error)
-}
-
 // ToolProvider is the generalized per-turn tool source: it discovers tools for a
 // turn (Tools) and services their invocations (Invoke). The runner queries every
 // configured provider each turn to assemble the model-visible tool list, then
@@ -218,27 +206,13 @@ type DynamicToolProvider interface {
 // to the provider that surfaced it. ID names the provider for logs/telemetry.
 // Static-registry specs win a name collision; among providers, earlier-in-list
 // wins. Tools is best-effort — a provider error is logged and skipped (static-only
-// continues). The DynamicToolProvider seam is a special case wrapped into this via
-// dynamicToolAdapter, so Config.DynamicTools stays supported.
+// continues). Discovery is best-effort: an error degrades the turn to the static
+// tool set. The per-turn OBO authority is on ctx (tools.MemoryAuthorityFrom) and
+// on req.Authority.
 type ToolProvider interface {
 	ID() string
 	Tools(ctx context.Context, addr protocol.MessageAddress, user protocol.ChatMessage) ([]tools.Descriptor, error)
 	Invoke(ctx context.Context, req tools.Request) (tools.Result, error)
-}
-
-// dynamicToolAdapter wraps a DynamicToolProvider as a ToolProvider so the legacy
-// Config.DynamicTools slot rides the unified provider list unchanged (Tools →
-// Discover, Invoke → Invoke). ID is "dynamic".
-type dynamicToolAdapter struct{ p DynamicToolProvider }
-
-func (a dynamicToolAdapter) ID() string { return "dynamic" }
-
-func (a dynamicToolAdapter) Tools(ctx context.Context, addr protocol.MessageAddress, user protocol.ChatMessage) ([]tools.Descriptor, error) {
-	return a.p.Discover(ctx, addr, user)
-}
-
-func (a dynamicToolAdapter) Invoke(ctx context.Context, req tools.Request) (tools.Result, error) {
-	return a.p.Invoke(ctx, req)
 }
 
 // turnTools is the per-turn model-visible tool set: the static specs plus any
@@ -401,21 +375,11 @@ type Config struct {
 	// future safety-classifier seam).
 	SafetyAuthorizer ToolAuthorizer
 
-	// DynamicTools, when set, supplies per-turn tools discovered from an external
-	// source (e.g. the platform-bridge registry, queried with the user's message
-	// for the top-N relevant tools). The runner merges them into the turn's
-	// model-visible tool set and routes their invocations to the provider.
-	// Optional; nil → static tools only. Independent of any always-on meta-tools
-	// the distribution may register statically (e.g. search_tools/call_tool), so
-	// auto-discovery can be disabled while leaving explicit discovery in place.
-	DynamicTools DynamicToolProvider
-
 	// ToolProviders are the generalized per-turn tool sources (unified discovery +
 	// routing). Each is queried every turn; provided tools merge into the turn's
 	// model-visible set and their invocations route back to the provider. Earlier
 	// entries win a name collision among providers; the static registry always
-	// wins over any provider. DynamicTools, when set, is appended to this list
-	// (wrapped) so existing callers keep working. Optional; nil → providers-less.
+	// wins over any provider. Optional; nil → providers-less.
 	ToolProviders []ToolProvider
 
 	// Attachments, when set, resolves multimodal parts the provider cannot fetch
@@ -519,12 +483,8 @@ func NewRunner(cfg Config) (*Runner, error) {
 	if authHandoff == nil {
 		authHandoff = authhandoff.New()
 	}
-	// Unified provider list: explicit ToolProviders first (earlier wins), then the
-	// legacy DynamicTools slot appended (wrapped) so existing callers are unchanged.
+	// Per-turn tool sources: copied so a later caller mutation can't reach the runner.
 	toolProviders := append([]ToolProvider(nil), cfg.ToolProviders...)
-	if cfg.DynamicTools != nil {
-		toolProviders = append(toolProviders, dynamicToolAdapter{p: cfg.DynamicTools})
-	}
 	return &Runner{
 		store:                     cfg.Store,
 		loader:                    cfg.Loader,
@@ -863,8 +823,8 @@ func (r *Runner) Run(ctx context.Context, addr protocol.MessageAddress, user pro
 	// Carry the current turn number so the assembler ages invoked skills against
 	// "now" (the in-flight turn), not the last turn already stamped in history.
 	ctx = compaction.WithTurnNumber(ctx, wsTurn)
-	// Per-turn tool set: static tools plus any dynamically-discovered ones (the
-	// DynamicToolProvider is queried with the user's message for relevant tools).
+	// Per-turn tool set: static tools plus any provider-discovered ones (each
+	// ToolProvider is queried with the user's message for relevant tools).
 	tt := r.assembleTurnTools(ctx, addr, user)
 	assistant, err := r.runProviderLoop(ctx, session, addr, user, bootstrap, streamer, injected, model, perTurnApprovers, tt)
 	if err != nil {

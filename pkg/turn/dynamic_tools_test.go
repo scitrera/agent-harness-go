@@ -12,13 +12,17 @@ import (
 	"github.com/scitrera/agent-harness-go/pkg/tools"
 )
 
+// fakeDynamicProvider implements the ToolProvider seam with a fixed id, standing
+// in for a single external tool source (e.g. the platform-bridge registry).
 type fakeDynamicProvider struct {
 	descs   []tools.Descriptor
 	err     error
 	invoked []tools.Request
 }
 
-func (f *fakeDynamicProvider) Discover(_ context.Context, _ protocol.MessageAddress, _ protocol.ChatMessage) ([]tools.Descriptor, error) {
+func (f *fakeDynamicProvider) ID() string { return "dynamic" }
+
+func (f *fakeDynamicProvider) Tools(_ context.Context, _ protocol.MessageAddress, _ protocol.ChatMessage) ([]tools.Descriptor, error) {
 	return f.descs, f.err
 }
 
@@ -27,8 +31,8 @@ func (f *fakeDynamicProvider) Invoke(_ context.Context, req tools.Request) (tool
 	return tools.Result{CallID: req.CallID, Name: req.Name, Payload: []byte(`{"ok":true}`)}, nil
 }
 
-// fakeToolProvider implements the generalized ToolProvider seam directly (not the
-// legacy DynamicToolProvider), so multi-provider routing can be exercised.
+// fakeToolProvider implements the ToolProvider seam with a configurable id, so
+// multi-provider routing can be exercised.
 type fakeToolProvider struct {
 	id      string
 	descs   []tools.Descriptor
@@ -47,17 +51,16 @@ func (f *fakeToolProvider) Invoke(_ context.Context, req tools.Request) (tools.R
 	return tools.Result{CallID: req.CallID, Name: req.Name, Payload: []byte(`{"ok":true}`)}, nil
 }
 
-// newToolsRunner builds a bare runner over the static specs plus, when set, the
-// legacy DynamicToolProvider wrapped into the unified provider list (so the
-// back-compat adapter path stays under test).
-func newToolsRunner(static []provider.ToolSpec, dyn DynamicToolProvider) *Runner {
+// newToolsRunner builds a bare runner over the static specs plus, when set, a
+// single ToolProvider on the unified provider list.
+func newToolsRunner(static []provider.ToolSpec, p ToolProvider) *Runner {
 	names := make(map[string]struct{}, len(static))
 	for _, s := range static {
 		names[s.Name] = struct{}{}
 	}
 	r := &Runner{toolSpecs: static, staticToolNames: names}
-	if dyn != nil {
-		r.toolProviders = []ToolProvider{dynamicToolAdapter{p: dyn}}
+	if p != nil {
+		r.toolProviders = []ToolProvider{p}
 	}
 	return r
 }
@@ -144,11 +147,10 @@ func TestAssembleTurnTools_MultipleProviders(t *testing.T) {
 
 func TestInvokeTool_RoutesDynamicWithAuthority(t *testing.T) {
 	fake := &fakeDynamicProvider{}
-	adapter := dynamicToolAdapter{p: fake}
 	r := &Runner{}
 	ctx := tools.WithMemoryAuthority(context.Background(), tools.MemoryAuthority{SubjectType: "user", SubjectID: "alice", GrantID: "g1"})
 	call := protocol.ToolInvokeEnvelope{CallID: "c1", Name: "remote_x"}
-	tt := turnTools{providerByTool: map[string]ToolProvider{"remote_x": adapter}}
+	tt := turnTools{providerByTool: map[string]ToolProvider{"remote_x": fake}}
 
 	res, err := r.invokeTool(ctx, nil, protocol.MessageAddress{}, call, tt)
 	if err != nil {
@@ -193,7 +195,7 @@ func Test_Runner_Run_dynamic_tool_result_appended_to_history(t *testing.T) {
 		Registry:          tools.NewRegistry(),
 		Provider:          prov,
 		Assembler:         contextpack.NewAssembler(contextpack.Config{MaxHistoryMessages: 10}),
-		DynamicTools:      dyn,
+		ToolProviders:     []ToolProvider{dyn},
 		MaxToolIterations: 2,
 	})
 	if err != nil {
