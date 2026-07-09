@@ -26,6 +26,15 @@ const (
 	methodSessionCancel     = "session/cancel"
 	methodSessionUpdate     = "session/update"
 	methodRequestPermission = "session/request_permission"
+	// Client-delegation methods (agent-side outbound requests): the harness routes
+	// its file/shell tools out to the client's fs/terminal capabilities.
+	methodReadTextFile     = "fs/read_text_file"
+	methodWriteTextFile    = "fs/write_text_file"
+	methodTerminalCreate   = "terminal/create"
+	methodTerminalOutput   = "terminal/output"
+	methodTerminalWaitExit = "terminal/wait_for_exit"
+	methodTerminalKill     = "terminal/kill"
+	methodTerminalRelease  = "terminal/release"
 )
 
 // PermissionOptionKind values (schema.json PermissionOptionKind): the semantic
@@ -106,8 +115,8 @@ type promptCapabilities struct {
 }
 
 // clientCapabilities is the client's advertised fs/terminal support from
-// initialize. It is CAPTURED for future fs/* and terminal/* client-delegation
-// (see TODO(acp) in channel.go); nothing consumes it yet.
+// initialize. TurnContext reads it to decide whether to attach fs/terminal
+// client delegates for a session's turns.
 type clientCapabilities struct {
 	Fs       fsCapabilities `json:"fs"`
 	Terminal bool           `json:"terminal"`
@@ -182,6 +191,82 @@ type requestPermissionResult struct {
 type permissionOutcome struct {
 	Outcome  string `json:"outcome"`
 	OptionID string `json:"optionId,omitempty"`
+}
+
+// ─── fs/* client delegation (agent-side outbound requests) ───────────────
+
+// readTextFileParams is fs/read_text_file: ask the client to read an ABSOLUTE
+// path (optionally from line, up to limit lines).
+type readTextFileParams struct {
+	SessionID string `json:"sessionId"`
+	Path      string `json:"path"`
+	Line      int    `json:"line,omitempty"`
+	Limit     int    `json:"limit,omitempty"`
+}
+
+type readTextFileResult struct {
+	Content string `json:"content"`
+}
+
+// writeTextFileParams is fs/write_text_file: ask the client to write content to
+// an ABSOLUTE path (result is null).
+type writeTextFileParams struct {
+	SessionID string `json:"sessionId"`
+	Path      string `json:"path"`
+	Content   string `json:"content"`
+}
+
+// ─── terminal/* client delegation (agent-side outbound requests) ─────────
+
+// terminalCreateParams is terminal/create: run command+args in the client's
+// terminal (ABSOLUTE cwd), bounding captured output to outputByteLimit.
+type terminalCreateParams struct {
+	SessionID       string   `json:"sessionId"`
+	Command         string   `json:"command"`
+	Args            []string `json:"args,omitempty"`
+	Cwd             string   `json:"cwd,omitempty"`
+	Env             []envVar `json:"env,omitempty"`
+	OutputByteLimit int      `json:"outputByteLimit,omitempty"`
+}
+
+// envVar is one name/value pair for a terminal/create environment.
+type envVar struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
+type terminalCreateResult struct {
+	TerminalID string `json:"terminalId"`
+}
+
+// terminalRefParams addresses an existing terminal (output/wait_for_exit/kill/
+// release all share this shape).
+type terminalRefParams struct {
+	SessionID  string `json:"sessionId"`
+	TerminalID string `json:"terminalId"`
+}
+
+// terminalExitStatus is the exit status of a terminal command (exitCode xor
+// signal; both optional until the process ends).
+type terminalExitStatus struct {
+	ExitCode *int   `json:"exitCode,omitempty"`
+	Signal   string `json:"signal,omitempty"`
+}
+
+// terminalOutputResult is terminal/output: the captured output so far, whether it
+// was truncated at the byte limit, and the exit status when the process has ended.
+type terminalOutputResult struct {
+	Output     string              `json:"output"`
+	Truncated  bool                `json:"truncated"`
+	ExitStatus *terminalExitStatus `json:"exitStatus,omitempty"`
+}
+
+// terminalWaitForExitResult is terminal/wait_for_exit: blocks until the process
+// exits, returning its exit code (or terminating signal). Both are optional and
+// flat on the response.
+type terminalWaitForExitResult struct {
+	ExitCode *int   `json:"exitCode,omitempty"`
+	Signal   string `json:"signal,omitempty"`
 }
 
 // ─── session/update (client-side notification we emit) ───────────────────

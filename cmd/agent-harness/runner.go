@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/scitrera/agent-harness-go/pkg/compaction"
 	"github.com/scitrera/agent-harness-go/pkg/contextpack"
 	"github.com/scitrera/agent-harness-go/pkg/localtools"
+	"github.com/scitrera/agent-harness-go/pkg/protocol"
 	"github.com/scitrera/agent-harness-go/pkg/provider"
 	"github.com/scitrera/agent-harness-go/pkg/skills"
 	"github.com/scitrera/agent-harness-go/pkg/store"
@@ -19,7 +21,7 @@ import (
 	"github.com/scitrera/agent-harness-go/pkg/turn"
 )
 
-func buildRunner(cfg appConfig, pub channel.Publisher, approvals approval.Awaiter) (*turn.Runner, *store.FileStore, error) {
+func buildRunner(cfg appConfig, pub channel.Publisher, approvals approval.Awaiter, decorator func(context.Context, protocol.MessageAddress) context.Context) (*turn.Runner, *store.FileStore, error) {
 	if err := os.MkdirAll(cfg.workspaceRoot, 0o755); err != nil {
 		return nil, nil, err
 	}
@@ -97,6 +99,9 @@ func buildRunner(cfg appConfig, pub channel.Publisher, approvals approval.Awaite
 		// Notifier wakes a fresh parent turn with a background sub-agent's completion
 		// notice; nil (cli) → background spawns fall back to synchronous.
 		Notifier: notifier,
+		// ContextDecorator wraps each turn's ctx (ACP passes ac.TurnContext to route
+		// file/shell tools through the client; other channels pass nil → unchanged).
+		ContextDecorator: decorator,
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("runner: %w", err)

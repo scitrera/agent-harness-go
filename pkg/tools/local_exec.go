@@ -30,7 +30,7 @@ func shell(ctx context.Context, cfg LocalConfig, req Request) (Result, error) {
 	if err := enforceCommandPolicy(cfg, req, spec); err != nil {
 		return Result{}, err
 	}
-	result, err := cfg.Workspace.RunCommand(ctx, spec)
+	result, err := runCommand(ctx, cfg, spec)
 	if err != nil && result.PID == 0 {
 		return Result{}, err
 	}
@@ -68,7 +68,7 @@ func python(ctx context.Context, cfg LocalConfig, req Request) (Result, error) {
 	if err := enforceCommandPolicy(cfg, req, spec); err != nil {
 		return Result{}, err
 	}
-	result, err := cfg.Workspace.RunCommand(ctx, spec)
+	result, err := runCommand(ctx, cfg, spec)
 	if err != nil && result.PID == 0 {
 		return Result{}, err
 	}
@@ -80,6 +80,16 @@ func python(ctx context.Context, cfg LocalConfig, req Request) (Result, error) {
 		return out, err
 	}
 	return out, nil
+}
+
+// runCommand executes spec via a ctx-carried CommandDelegate (ACP terminal/*)
+// when present, else the local workspace. The command policy is already enforced
+// by the caller — the delegate never sees an un-gated command.
+func runCommand(ctx context.Context, cfg LocalConfig, spec localtools.CommandSpec) (localtools.CommandResult, error) {
+	if d := CommandDelegateFrom(ctx); d != nil {
+		return d.RunCommand(ctx, spec)
+	}
+	return cfg.Workspace.RunCommand(ctx, spec)
 }
 
 func webSearch(ctx context.Context, cfg LocalConfig, req Request) (Result, error) {

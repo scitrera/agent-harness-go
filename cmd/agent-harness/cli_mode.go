@@ -13,7 +13,7 @@ import (
 
 func runCLI(cfg appConfig) error {
 	ctx := context.Background()
-	runner, _, err := buildRunner(cfg, cli.NewPublisher(os.Stdout), nil)
+	runner, _, err := buildRunner(cfg, cli.NewPublisher(os.Stdout), nil, nil)
 	if err != nil {
 		return err
 	}

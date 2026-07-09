@@ -9,8 +9,9 @@
 //
 // Scope of this slice: text + tool-call streaming + session lifecycle + the
 // permission round-trip (session/request_permission bridged to the harness
-// approval broker). Client delegation (fs/* and terminal/*) is NOT implemented —
-// see the TODO(acp) seams.
+// approval broker) + client delegation (fs/* and terminal/*): when the client
+// advertised fs/terminal capabilities, TurnContext routes the harness file/shell
+// tools out to the editor (see delegate.go).
 package acp
 
 import (
@@ -45,6 +46,10 @@ const (
 type session struct {
 	id       string // ACP sessionId
 	threadID string // harness Addr.ThreadID
+	// cwd is the session's absolute working directory (from session/new). ACP fs
+	// paths are ABSOLUTE, so the fileDelegate resolves a workspace-relative tool
+	// path against it before calling the client.
+	cwd string
 
 	mu         sync.Mutex
 	promptID   json.RawMessage     // in-flight session/prompt request id (nil = none)
@@ -64,8 +69,8 @@ type Channel struct {
 	mu       sync.Mutex
 	byID     map[string]*session // sessionId  -> session
 	byThread map[string]*session // threadID   -> session
-	// caps is the client's advertised fs/terminal support (from initialize),
-	// captured for future fs/* + terminal/* delegation; not consumed yet.
+	// caps is the client's advertised fs/terminal support (from initialize);
+	// TurnContext reads it to decide which client delegates to attach per turn.
 	caps clientCapabilities
 	// resolver bridges a client permission decision back to the harness approval
 	// broker; nil disables the round-trip (*approval.Broker satisfies it).
@@ -134,10 +139,8 @@ func (c *Channel) dispatch(ctx context.Context, req rpcRequest) error {
 		if req.isNotification() {
 			return nil // ignore unknown notifications
 		}
-		// TODO(acp): authenticate, session/load, session/set_mode. The remaining
-		// (invasive) delegation piece is routing the harness read_file/write_file/
-		// shell tools out to the client via fs/read_text_file, fs/write_text_file,
-		// and terminal/* — gated on the captured clientCapabilities (c.caps).
+		// TODO(acp): authenticate, session/load, session/set_mode. (fs/* + terminal/*
+		// client-delegation is implemented via TurnContext — see delegate.go.)
 		return c.conn.writeError(req.ID, codeMethodNotFound, "method not found: "+req.Method)
 	}
 }
@@ -172,8 +175,8 @@ func (c *Channel) Enqueue(ctx context.Context, in channel.Inbound) error {
 func (c *Channel) handleInitialize(req rpcRequest) error {
 	var p initializeParams
 	_ = json.Unmarshal(req.Params, &p) // tolerate absent/partial params
-	// Capture client fs/terminal capabilities for future delegation (not yet
-	// consumed — see TODO(acp) on fs/* + terminal/* routing).
+	// Capture client fs/terminal capabilities so TurnContext can attach the
+	// matching client delegates for this session's turns (see delegate.go).
 	var caps clientCapabilities
 	if len(p.ClientCapabilities) > 0 {
 		_ = json.Unmarshal(p.ClientCapabilities, &caps)
@@ -206,9 +209,10 @@ func (c *Channel) handleNewSession(req rpcRequest) error {
 			return c.conn.writeError(req.ID, codeInvalidParams, err.Error())
 		}
 	}
-	// TODO(acp): honor p.Cwd / p.MCPServers / p.AdditionalDirectories once
-	// fs+terminal client-delegation is implemented.
-	sess := c.newSession()
+	// p.Cwd is stored on the session so the fs/terminal delegates can resolve
+	// workspace-relative tool paths to the client's absolute paths.
+	// TODO(acp): honor p.MCPServers / p.AdditionalDirectories.
+	sess := c.newSession(p.Cwd)
 	return c.conn.writeResponse(req.ID, newSessionResult{SessionID: sess.id})
 }
 
@@ -553,12 +557,12 @@ func (c *Channel) resolvePrompt(sess *session, reason string) {
 
 // ─── helpers ─────────────────────────────────────────────────────────────
 
-func (c *Channel) newSession() *session {
+func (c *Channel) newSession(cwd string) *session {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	id := c.nextID("acp-sess-")
 	thread := c.nextID("acp-thread-")
-	s := &session{id: id, threadID: thread, prompted: map[string]struct{}{}}
+	s := &session{id: id, threadID: thread, cwd: cwd, prompted: map[string]struct{}{}}
 	c.byID[id] = s
 	c.byThread[thread] = s
 	return s

@@ -170,6 +170,11 @@ type Runner struct {
 	// rubric, when set, runs the opt-in post-turn self-grading verifier at
 	// end-of-turn (nil → skipped; default behavior unchanged).
 	rubric *RubricVerifier
+
+	// ctxDecorator, when set, wraps the incoming turn ctx once at Run entry (e.g.
+	// the ACP channel attaches per-session fs/terminal client delegates). nil →
+	// ctx is untouched (behavior byte-for-byte unchanged).
+	ctxDecorator func(ctx context.Context, addr protocol.MessageAddress) context.Context
 }
 
 // ApprovalGranter records tool authorizations the user grants via the approval
@@ -377,6 +382,13 @@ type Config struct {
 	// (default, behavior unchanged). The runner invokes AfterTurn at end-of-turn
 	// when it is set.
 	Rubric *RubricVerifier
+
+	// ContextDecorator, when set, wraps the incoming turn ctx once at the start of
+	// Run (before the tool loop), keyed off the resolved address. The ACP channel
+	// uses it to attach per-session fs/terminal client delegates (tools.With*
+	// Delegate) so the harness file/shell tools route through the editor. Optional;
+	// nil → the ctx is untouched and turn behavior is byte-for-byte unchanged.
+	ContextDecorator func(ctx context.Context, addr protocol.MessageAddress) context.Context
 }
 
 func NewRunner(cfg Config) (*Runner, error) {
@@ -487,6 +499,7 @@ func NewRunner(cfg Config) (*Runner, error) {
 		streamBackgroundSubagents: cfg.StreamBackgroundSubagents,
 		authHandoff:               authHandoff,
 		rubric:                    cfg.Rubric,
+		ctxDecorator:              cfg.ContextDecorator,
 	}, nil
 }
 
@@ -602,6 +615,12 @@ const metaCancelledKey = "cancelled"
 const metaErrorKey = "error"
 
 func (r *Runner) Run(ctx context.Context, addr protocol.MessageAddress, user protocol.ChatMessage) (_ protocol.ChatMessage, err error) {
+	// Optional ctx decorator (e.g. the ACP channel attaches per-session fs/terminal
+	// client delegates keyed by addr.ThreadID). Applied once at entry so it covers
+	// the whole turn; nil → ctx untouched (behavior unchanged).
+	if r.ctxDecorator != nil {
+		ctx = r.ctxDecorator(ctx, addr)
+	}
 	// Link to the upstream trace (if the inbound address carries one).
 	ctx = telemetry.LinkUpstream(ctx, addr)
 	// The turn's OBO authority is derived by the configured Authority hook (the

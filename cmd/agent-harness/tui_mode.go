@@ -25,7 +25,7 @@ func runTUI(cfg appConfig) error {
 
 	broker := approval.New()
 	tc := tui.NewChannel()
-	runner, fsStore, err := buildRunner(cfg, tc, broker)
+	runner, fsStore, err := buildRunner(cfg, tc, broker, nil)
 	if err != nil {
 		return err
 	}

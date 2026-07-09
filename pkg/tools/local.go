@@ -79,7 +79,15 @@ func readFile(ctx context.Context, cfg LocalConfig, req Request) (Result, error)
 	if err := decodeArgs(req, &args); err != nil {
 		return Result{}, err
 	}
-	text, err := cfg.Workspace.ReadFile(ctx, args.Path, args.MaxBytes)
+	// A ctx-carried FileDelegate (e.g. the ACP client's fs/read_text_file) wins
+	// over the local workspace when present.
+	var text string
+	var err error
+	if d := FileDelegateFrom(ctx); d != nil {
+		text, err = d.ReadFile(ctx, args.Path, args.MaxBytes)
+	} else {
+		text, err = cfg.Workspace.ReadFile(ctx, args.Path, args.MaxBytes)
+	}
 	if err != nil {
 		return Result{}, err
 	}
@@ -96,7 +104,14 @@ func writeFile(ctx context.Context, cfg LocalConfig, req Request) (Result, error
 	if err := decodeArgs(req, &args); err != nil {
 		return Result{}, err
 	}
-	if err := cfg.Workspace.WriteFile(ctx, args.Path, args.Content); err != nil {
+	// Delegate the write to a ctx-carried FileDelegate (ACP fs/write_text_file)
+	// when present, else the local workspace. FileChanges metadata is preserved
+	// either way.
+	if d := FileDelegateFrom(ctx); d != nil {
+		if err := d.WriteFile(ctx, args.Path, args.Content); err != nil {
+			return Result{}, err
+		}
+	} else if err := cfg.Workspace.WriteFile(ctx, args.Path, args.Content); err != nil {
 		return Result{}, err
 	}
 	result, err := okResult(req)
@@ -116,7 +131,13 @@ func editFile(ctx context.Context, cfg LocalConfig, req Request) (Result, error)
 	if err := decodeArgs(req, &args); err != nil {
 		return Result{}, err
 	}
-	if err := cfg.Workspace.EditFile(ctx, args.Path, args.OldText, args.NewText); err != nil {
+	// Delegate the edit to a ctx-carried FileDelegate (ACP read+replace+write via
+	// the client) when present, else the local workspace.
+	if d := FileDelegateFrom(ctx); d != nil {
+		if err := d.EditFile(ctx, args.Path, args.OldText, args.NewText); err != nil {
+			return Result{}, err
+		}
+	} else if err := cfg.Workspace.EditFile(ctx, args.Path, args.OldText, args.NewText); err != nil {
 		return Result{}, err
 	}
 	result, err := okResult(req)
@@ -127,6 +148,8 @@ func editFile(ctx context.Context, cfg LocalConfig, req Request) (Result, error)
 	return result, nil
 }
 
+// list_dir + inspect_file stay local always: ACP v1 has no directory-listing or
+// file-inspection client delegation, so there is nothing to route them through.
 func listDir(ctx context.Context, cfg LocalConfig, req Request) (Result, error) {
 	var args struct {
 		Path string `json:"path"`

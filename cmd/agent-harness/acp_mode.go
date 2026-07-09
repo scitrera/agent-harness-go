@@ -26,7 +26,9 @@ func runACP(cfg appConfig) error {
 	// Await while the channel drives a session/request_permission round-trip and
 	// calls Resolve with the outcome.
 	broker := approval.New()
-	runner, _, err := buildRunner(cfg, ac, broker)
+	// ac.TurnContext routes the harness file/shell tools through the ACP client's
+	// fs/terminal capabilities when the client advertised them.
+	runner, _, err := buildRunner(cfg, ac, broker, ac.TurnContext)
 	if err != nil {
 		return err
 	}
