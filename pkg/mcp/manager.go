@@ -46,6 +46,8 @@ type serverState struct {
 	generation  int64
 	rpcMu       sync.Mutex
 	pendingMu   sync.Mutex
+	schemaMu    sync.Mutex
+	toolSchemas map[string]toolArgSchema
 }
 
 func NewManager(clock Clock) *Manager {
@@ -209,6 +211,18 @@ func (m *Manager) stopLocked(ctx context.Context, state *serverState) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// restartServer stops (if still alive) and restarts the given server state in
+// place. Used to recover from a dead session (broken pipe, closed stdout, or
+// process exit) detected mid-request; state is reused so callers holding the
+// pointer see the refreshed process without re-resolving it by name.
+func (m *Manager) restartServer(ctx context.Context, state *serverState) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_ = m.stopLocked(ctx, state)
+	_, err := m.startLocked(ctx, state)
+	return err
 }
 
 func (m *Manager) refreshLocked(state *serverState) {
