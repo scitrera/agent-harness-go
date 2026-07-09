@@ -20,11 +20,21 @@ const protocolVersionV1 = 1
 // ACP method names (agent-side handlers + the client-side session/update we
 // emit). See schema/v1/meta.json.
 const (
-	methodInitialize    = "initialize"
-	methodSessionNew    = "session/new"
-	methodSessionPrompt = "session/prompt"
-	methodSessionCancel = "session/cancel"
-	methodSessionUpdate = "session/update"
+	methodInitialize        = "initialize"
+	methodSessionNew        = "session/new"
+	methodSessionPrompt     = "session/prompt"
+	methodSessionCancel     = "session/cancel"
+	methodSessionUpdate     = "session/update"
+	methodRequestPermission = "session/request_permission"
+)
+
+// PermissionOptionKind values (schema.json PermissionOptionKind): the semantic
+// class of a permission choice offered to the client.
+const (
+	optAllowOnce    = "allow_once"
+	optAllowAlways  = "allow_always"
+	optRejectOnce   = "reject_once"
+	optRejectAlways = "reject_always"
 )
 
 // sessionUpdate discriminator values emitted by this channel.
@@ -95,6 +105,19 @@ type promptCapabilities struct {
 	EmbeddedContext bool `json:"embeddedContext"`
 }
 
+// clientCapabilities is the client's advertised fs/terminal support from
+// initialize. It is CAPTURED for future fs/* and terminal/* client-delegation
+// (see TODO(acp) in channel.go); nothing consumes it yet.
+type clientCapabilities struct {
+	Fs       fsCapabilities `json:"fs"`
+	Terminal bool           `json:"terminal"`
+}
+
+type fsCapabilities struct {
+	ReadTextFile  bool `json:"readTextFile"`
+	WriteTextFile bool `json:"writeTextFile"`
+}
+
 // ─── session/new ─────────────────────────────────────────────────────────
 
 type newSessionParams struct {
@@ -122,6 +145,43 @@ type promptResult struct {
 
 type cancelParams struct {
 	SessionID string `json:"sessionId"`
+}
+
+// ─── session/request_permission (agent-side outbound request) ────────────
+
+// requestPermissionParams is the session/request_permission request: the agent
+// asks the client to authorize a gated tool call, offering a set of options.
+type requestPermissionParams struct {
+	SessionID string             `json:"sessionId"`
+	ToolCall  permToolCall       `json:"toolCall"`
+	Options   []permissionOption `json:"options"`
+}
+
+// permToolCall identifies the tool call the permission is being requested for.
+type permToolCall struct {
+	ToolCallID string `json:"toolCallId"`
+	Title      string `json:"title,omitempty"`
+	Kind       string `json:"kind,omitempty"`
+}
+
+// permissionOption is one choice offered to the client (Kind is a
+// PermissionOptionKind; OptionID echoes back in the outcome).
+type permissionOption struct {
+	OptionID string `json:"optionId"`
+	Name     string `json:"name"`
+	Kind     string `json:"kind"`
+}
+
+// requestPermissionResult is the client's reply to session/request_permission.
+type requestPermissionResult struct {
+	Outcome permissionOutcome `json:"outcome"`
+}
+
+// permissionOutcome carries the client's decision: outcome ∈ selected|cancelled;
+// OptionID is the chosen option's id (only when selected).
+type permissionOutcome struct {
+	Outcome  string `json:"outcome"`
+	OptionID string `json:"optionId,omitempty"`
 }
 
 // ─── session/update (client-side notification we emit) ───────────────────

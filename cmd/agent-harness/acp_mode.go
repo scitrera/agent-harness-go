@@ -7,6 +7,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/scitrera/agent-harness-go/pkg/approval"
 	"github.com/scitrera/agent-harness-go/pkg/channels/acp"
 	"github.com/scitrera/agent-harness-go/pkg/runtime"
 	"github.com/scitrera/agent-harness-go/pkg/turncancel"
@@ -21,10 +22,15 @@ func runACP(cfg appConfig) error {
 	defer stop()
 
 	ac := acp.NewChannel(os.Stdin, os.Stdout)
-	runner, _, err := buildRunner(cfg, ac, nil)
+	// The broker bridges tool-approval prompts to the client: the runner blocks on
+	// Await while the channel drives a session/request_permission round-trip and
+	// calls Resolve with the outcome.
+	broker := approval.New()
+	runner, _, err := buildRunner(cfg, ac, broker)
 	if err != nil {
 		return err
 	}
+	ac.SetApprovalResolver(broker)
 	canceller := turncancel.New()
 	rt, err := runtime.NewRunner(ac, runner)
 	if err != nil {

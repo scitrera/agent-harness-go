@@ -1,10 +1,14 @@
 package acp
 
 import (
+	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
+	"io"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestCodecRoundTrip exercises request read plus response/notification/error
@@ -98,6 +102,73 @@ func TestCodecRoundTrip(t *testing.T) {
 	}
 	if eresp.Error == nil || eresp.Error.Code != codeMethodNotFound {
 		t.Fatalf("error response wrong: %s", lines[2])
+	}
+}
+
+// TestCallRoutesResponse asserts an outbound call() blocks until the read loop
+// routes a matching inbound response to it (and does not surface that response
+// to dispatch).
+func TestCallRoutesResponse(t *testing.T) {
+	respR, respW := io.Pipe() // client -> agent (responses)
+	reqR, reqW := io.Pipe()   // agent -> client (requests)
+	c := newConn(respR, reqW)
+
+	// Run the read loop: it must consume the response internally (deliver -> true)
+	// and never return it as a request.
+	go func() {
+		for {
+			if _, err := c.read(); err != nil {
+				return
+			}
+		}
+	}()
+
+	type callResult struct {
+		res json.RawMessage
+		err error
+	}
+	done := make(chan callResult, 1)
+	go func() {
+		res, err := c.call(context.Background(), methodRequestPermission, requestPermissionParams{SessionID: "s1"})
+		done <- callResult{res, err}
+	}()
+
+	// Read the outbound request off the wire — this also guarantees call() has
+	// registered its pending entry before we feed the response back.
+	br := bufio.NewReader(reqR)
+	line, err := br.ReadBytes('\n')
+	if err != nil {
+		t.Fatalf("read outbound request: %v", err)
+	}
+	var env rpcEnvelope
+	if err := json.Unmarshal(line, &env); err != nil {
+		t.Fatalf("decode outbound request: %v", err)
+	}
+	if env.Method != methodRequestPermission {
+		t.Fatalf("outbound method = %q, want %q", env.Method, methodRequestPermission)
+	}
+
+	// Echo the id back on a response carrying a result.
+	resp := rpcResponse{JSONRPC: jsonRPCVersion, ID: env.ID, Result: json.RawMessage(`{"outcome":{"outcome":"selected","optionId":"session"}}`)}
+	rl, _ := json.Marshal(resp)
+	if _, err := respW.Write(append(rl, '\n')); err != nil {
+		t.Fatalf("write response: %v", err)
+	}
+
+	select {
+	case cr := <-done:
+		if cr.err != nil {
+			t.Fatalf("call: %v", cr.err)
+		}
+		var got requestPermissionResult
+		if err := json.Unmarshal(cr.res, &got); err != nil {
+			t.Fatalf("decode call result: %v", err)
+		}
+		if got.Outcome.Outcome != "selected" || got.Outcome.OptionID != "session" {
+			t.Fatalf("unexpected outcome: %+v", got.Outcome)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("call did not return after response routed")
 	}
 }
 

@@ -7,9 +7,10 @@
 // whose Publisher is this Channel and drive it with runtime.RunLoop, running
 // Serve in a goroutine.
 //
-// Scope of this slice: text + tool-call streaming + session lifecycle. Client
-// delegation (fs/* and terminal/*) and the permission round-trip
-// (session/request_permission) are NOT implemented — see the TODO(acp) seams.
+// Scope of this slice: text + tool-call streaming + session lifecycle + the
+// permission round-trip (session/request_permission bridged to the harness
+// approval broker). Client delegation (fs/* and terminal/*) is NOT implemented —
+// see the TODO(acp) seams.
 package acp
 
 import (
@@ -24,6 +25,7 @@ import (
 
 	spec "github.com/scitrera/ecosystem-messaging-spec/go"
 
+	"github.com/scitrera/agent-harness-go/pkg/approval"
 	"github.com/scitrera/agent-harness-go/pkg/channel"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 )
@@ -45,9 +47,10 @@ type session struct {
 	threadID string // harness Addr.ThreadID
 
 	mu         sync.Mutex
-	promptID   json.RawMessage // in-flight session/prompt request id (nil = none)
-	resolved   bool            // whether the current prompt has been answered
-	cancelHook func()          // orchestrator-supplied cancellation callback
+	promptID   json.RawMessage     // in-flight session/prompt request id (nil = none)
+	resolved   bool                // whether the current prompt has been answered
+	cancelHook func()              // orchestrator-supplied cancellation callback
+	prompted   map[string]struct{} // approval request ids already sent to the client (dedupe)
 }
 
 // Channel is an ACP v1 transport. session/prompt requests arrive over stdio and
@@ -61,8 +64,28 @@ type Channel struct {
 	mu       sync.Mutex
 	byID     map[string]*session // sessionId  -> session
 	byThread map[string]*session // threadID   -> session
+	// caps is the client's advertised fs/terminal support (from initialize),
+	// captured for future fs/* + terminal/* delegation; not consumed yet.
+	caps clientCapabilities
+	// resolver bridges a client permission decision back to the harness approval
+	// broker; nil disables the round-trip (*approval.Broker satisfies it).
+	resolver ApprovalResolver
 
 	seq atomic.Uint64
+}
+
+// ApprovalResolver delivers a client permission decision to the harness approval
+// broker, unblocking the turn awaiting it. *approval.Broker satisfies it.
+type ApprovalResolver interface {
+	Resolve(taskID, requestID string, d approval.Decision) bool
+}
+
+// SetApprovalResolver wires the broker that turns awaiting approval; once set,
+// pending approval_request parts drive a session/request_permission round-trip.
+func (c *Channel) SetApprovalResolver(r ApprovalResolver) {
+	c.mu.Lock()
+	c.resolver = r
+	c.mu.Unlock()
 }
 
 // NewChannel returns a ready Channel reading JSON-RPC from r and writing to w
@@ -111,7 +134,10 @@ func (c *Channel) dispatch(ctx context.Context, req rpcRequest) error {
 		if req.isNotification() {
 			return nil // ignore unknown notifications
 		}
-		// TODO(acp): authenticate, session/load, session/set_mode, fs/*, terminal/*.
+		// TODO(acp): authenticate, session/load, session/set_mode. The remaining
+		// (invasive) delegation piece is routing the harness read_file/write_file/
+		// shell tools out to the client via fs/read_text_file, fs/write_text_file,
+		// and terminal/* — gated on the captured clientCapabilities (c.caps).
 		return c.conn.writeError(req.ID, codeMethodNotFound, "method not found: "+req.Method)
 	}
 }
@@ -146,6 +172,15 @@ func (c *Channel) Enqueue(ctx context.Context, in channel.Inbound) error {
 func (c *Channel) handleInitialize(req rpcRequest) error {
 	var p initializeParams
 	_ = json.Unmarshal(req.Params, &p) // tolerate absent/partial params
+	// Capture client fs/terminal capabilities for future delegation (not yet
+	// consumed — see TODO(acp) on fs/* + terminal/* routing).
+	var caps clientCapabilities
+	if len(p.ClientCapabilities) > 0 {
+		_ = json.Unmarshal(p.ClientCapabilities, &caps)
+	}
+	c.mu.Lock()
+	c.caps = caps
+	c.mu.Unlock()
 	version := p.ProtocolVersion
 	if version == 0 {
 		version = protocolVersionV1
@@ -304,6 +339,8 @@ func (c *Channel) publishPart(sess *session, e channel.Event) error {
 		if body, ok := p.AsTodo(); ok {
 			return c.sendUpdate(sess, planFromTodo(body))
 		}
+	case protocol.ContentPartType(spec.PartApprovalRequest):
+		return c.handleApprovalRequest(sess, e)
 	}
 	return nil
 }
@@ -373,6 +410,111 @@ func (c *Channel) publishError(sess *session, e channel.Event) error {
 	return c.sendUpdate(sess, agentTextChunk(e.MessageID, "[error] "+msg))
 }
 
+// ─── approval bridge (session/request_permission) ────────────────────────
+
+// rejectOptionID is the sentinel option id for the synthesized "Reject" choice;
+// it maps a "selected" outcome to a deny decision.
+const rejectOptionID = "__reject__"
+
+// handleApprovalRequest bridges a pending approval_request part to an ACP
+// session/request_permission round-trip. The client's reply is mapped to an
+// approval.Decision and delivered to the broker (unblocking the turn). It runs
+// on the turn streaming path, so the blocking round-trip is spawned on its own
+// goroutine and never stalls PublishEvent. Non-pending upserts (resolved status)
+// and repeats for an already-prompted id are ignored.
+func (c *Channel) handleApprovalRequest(sess *session, e channel.Event) error {
+	if e.Part == nil {
+		return nil
+	}
+	c.mu.Lock()
+	resolver := c.resolver
+	c.mu.Unlock()
+	body, ok := e.Part.AsApprovalRequest()
+	if !ok || body.Status != spec.ApprovalPending || resolver == nil {
+		return nil
+	}
+	sess.mu.Lock()
+	if _, seen := sess.prompted[body.ID]; seen {
+		sess.mu.Unlock()
+		return nil
+	}
+	sess.prompted[body.ID] = struct{}{}
+	sess.mu.Unlock()
+
+	go c.requestPermission(sess, resolver, e.Addr.TaskID, body)
+	return nil
+}
+
+// requestPermission performs the outbound session/request_permission call and
+// resolves the broker with the mapped decision. A transport/call error maps to a
+// deny so the awaiting turn never hangs on a dead client.
+func (c *Channel) requestPermission(sess *session, resolver ApprovalResolver, taskID string, body spec.ApprovalRequestPart) {
+	params := requestPermissionParams{
+		SessionID: sess.id,
+		ToolCall: permToolCall{
+			ToolCallID: body.ID,
+			Title:      summaryOr(body),
+			Kind:       toolKindFor(body.Tool),
+		},
+		Options: buildPermissionOptions(body.Options),
+	}
+	decision := approval.Decision{Granted: false}
+	if raw, err := c.conn.call(context.Background(), methodRequestPermission, params); err == nil {
+		var res requestPermissionResult
+		if json.Unmarshal(raw, &res) == nil {
+			decision = permissionDecision(res.Outcome)
+		}
+	}
+	resolver.Resolve(taskID, body.ID, decision)
+}
+
+// summaryOr returns the approval summary, falling back to a tool-named prompt.
+func summaryOr(body spec.ApprovalRequestPart) string {
+	if body.Summary != "" {
+		return body.Summary
+	}
+	return "Use the " + body.Tool + " tool"
+}
+
+// buildPermissionOptions maps grant scopes to ACP permission options and appends
+// a synthesized reject option. Each scope's OptionID echoes back as the granted
+// scope; "once" is allow_once, every other grant is allow_always.
+func buildPermissionOptions(scopes []string) []permissionOption {
+	opts := make([]permissionOption, 0, len(scopes)+1)
+	for _, s := range scopes {
+		kind := optAllowAlways
+		if s == "once" {
+			kind = optAllowOnce
+		}
+		opts = append(opts, permissionOption{OptionID: s, Name: humanScope(s), Kind: kind})
+	}
+	return append(opts, permissionOption{OptionID: rejectOptionID, Name: "Reject", Kind: optRejectOnce})
+}
+
+// humanScope renders a grant scope as a client-facing option label.
+func humanScope(scope string) string {
+	switch scope {
+	case "once":
+		return "Allow once"
+	case "session":
+		return "Allow for session"
+	case "always":
+		return "Always allow"
+	default:
+		return scope
+	}
+}
+
+// permissionDecision maps a client permission outcome to an approval decision:
+// a selected non-reject option grants with that scope; the reject sentinel and
+// any non-selected outcome (e.g. "cancelled") deny.
+func permissionDecision(o permissionOutcome) approval.Decision {
+	if o.Outcome != "selected" || o.OptionID == rejectOptionID {
+		return approval.Decision{Granted: false}
+	}
+	return approval.Decision{Granted: true, Scope: o.OptionID}
+}
+
 // sendUpdate marshals a sessionUpdate variant and writes it as a session/update
 // notification for the session.
 func (c *Channel) sendUpdate(sess *session, update any) error {
@@ -416,7 +558,7 @@ func (c *Channel) newSession() *session {
 	defer c.mu.Unlock()
 	id := c.nextID("acp-sess-")
 	thread := c.nextID("acp-thread-")
-	s := &session{id: id, threadID: thread}
+	s := &session{id: id, threadID: thread, prompted: map[string]struct{}{}}
 	c.byID[id] = s
 	c.byThread[thread] = s
 	return s

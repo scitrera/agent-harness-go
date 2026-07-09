@@ -5,9 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"sync"
 	"testing"
 	"time"
 
+	spec "github.com/scitrera/ecosystem-messaging-spec/go"
+
+	"github.com/scitrera/agent-harness-go/pkg/approval"
 	"github.com/scitrera/agent-harness-go/pkg/channel"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 )
@@ -60,6 +64,20 @@ func (tc *testClient) send(t *testing.T, id json.RawMessage, method string, para
 	}
 	if _, err := tc.w.Write(append(line, '\n')); err != nil {
 		t.Fatalf("client write: %v", err)
+	}
+}
+
+// reply writes a JSON-RPC response line echoing id (used to answer an outbound
+// agent request such as session/request_permission).
+func (tc *testClient) reply(t *testing.T, id json.RawMessage, result any) {
+	t.Helper()
+	raw, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("marshal reply: %v", err)
+	}
+	line, _ := json.Marshal(rpcResponse{JSONRPC: jsonRPCVersion, ID: id, Result: raw})
+	if _, err := tc.w.Write(append(line, '\n')); err != nil {
+		t.Fatalf("client reply: %v", err)
 	}
 }
 
@@ -267,6 +285,143 @@ func TestToolLifecycleMapping(t *testing.T) {
 	}
 	if tcUpd.SessionUpdate != updateToolCallUpdate || tcUpd.ToolCallID != "call-1" || tcUpd.Status != toolStatusCompleted {
 		t.Fatalf("unexpected tool_call_update: %+v", tcUpd)
+	}
+}
+
+// fakeResolver records Resolve calls and signals each on a channel.
+type fakeResolver struct {
+	mu   sync.Mutex
+	got  []resolveCall
+	done chan struct{}
+}
+
+type resolveCall struct {
+	taskID, reqID string
+	decision      approval.Decision
+}
+
+func (f *fakeResolver) Resolve(taskID, reqID string, d approval.Decision) bool {
+	f.mu.Lock()
+	f.got = append(f.got, resolveCall{taskID, reqID, d})
+	f.mu.Unlock()
+	select {
+	case f.done <- struct{}{}:
+	default:
+	}
+	return true
+}
+
+func (f *fakeResolver) last(t *testing.T) resolveCall {
+	t.Helper()
+	select {
+	case <-f.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("resolver.Resolve not called")
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.got[len(f.got)-1]
+}
+
+// approvalTestSetup drives initialize -> session/new and returns the registered
+// session plus the fake resolver wired onto the channel.
+func approvalTestSetup(t *testing.T) (*Channel, *testClient, *session, *fakeResolver, func()) {
+	t.Helper()
+	ch, tc, cleanup := newTestPair(t)
+	fake := &fakeResolver{done: make(chan struct{}, 4)}
+	ch.SetApprovalResolver(fake)
+
+	tc.send(t, json.RawMessage("1"), methodInitialize, initializeParams{ProtocolVersion: 1})
+	tc.next(t)
+	tc.send(t, json.RawMessage("2"), methodSessionNew, newSessionParams{Cwd: "/tmp"})
+	var ns newSessionResult
+	if err := json.Unmarshal(tc.next(t).Result, &ns); err != nil {
+		t.Fatalf("new session: %v", err)
+	}
+	return ch, tc, ch.sessionByID(ns.SessionID), fake, cleanup
+}
+
+// pendingApprovalPart builds a pending approval_request content part.
+func pendingApprovalPart(reqID, tool string, options []string) protocol.ContentPart {
+	return spec.NewApprovalRequestPart(spec.ApprovalRequestPart{
+		ID:      reqID,
+		Tool:    tool,
+		Summary: "Use the " + tool + " tool",
+		Options: options,
+		Status:  spec.ApprovalPending,
+	})
+}
+
+// feedPendingApproval publishes a pending approval part and reads the resulting
+// outbound session/request_permission request off the client side.
+func feedPendingApproval(t *testing.T, ch *Channel, tc *testClient, sess *session, taskID, reqID, tool string, options []string) clientMsg {
+	t.Helper()
+	part := pendingApprovalPart(reqID, tool, options)
+	if err := ch.PublishEvent(context.Background(), channel.Event{
+		Type: channel.EventPartAppended,
+		Addr: protocol.MessageAddress{ThreadID: sess.threadID, TaskID: taskID},
+		Part: &part,
+	}); err != nil {
+		t.Fatalf("PublishEvent approval: %v", err)
+	}
+	req := tc.next(t)
+	if req.Method != methodRequestPermission {
+		t.Fatalf("expected %q, got %q", methodRequestPermission, req.Method)
+	}
+	return req
+}
+
+// TestRequestPermissionGranted asserts a pending approval_request drives a
+// session/request_permission round-trip and a selected option resolves the
+// broker with a matching grant.
+func TestRequestPermissionGranted(t *testing.T) {
+	ch, tc, sess, fake, cleanup := approvalTestSetup(t)
+	defer cleanup()
+
+	req := feedPendingApproval(t, ch, tc, sess, "task-1", "appr-1", "write_file", []string{"once", "session", "always"})
+
+	var params requestPermissionParams
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		t.Fatalf("permission params: %v", err)
+	}
+	if params.SessionID != sess.id || params.ToolCall.ToolCallID != "appr-1" {
+		t.Fatalf("unexpected params: %+v", params)
+	}
+	// once/session/always scopes + a synthesized reject option.
+	if len(params.Options) != 4 || params.Options[3].OptionID != rejectOptionID {
+		t.Fatalf("unexpected options: %+v", params.Options)
+	}
+
+	tc.reply(t, req.ID, requestPermissionResult{Outcome: permissionOutcome{Outcome: "selected", OptionID: "session"}})
+
+	got := fake.last(t)
+	if got.taskID != "task-1" || got.reqID != "appr-1" {
+		t.Fatalf("resolve keys = (%q,%q), want (task-1,appr-1)", got.taskID, got.reqID)
+	}
+	if !got.decision.Granted || got.decision.Scope != "session" {
+		t.Fatalf("decision = %+v, want granted session", got.decision)
+	}
+}
+
+// TestRequestPermissionRejected asserts the reject option and a cancelled
+// outcome both resolve the broker with a deny decision.
+func TestRequestPermissionRejected(t *testing.T) {
+	ch, tc, sess, fake, cleanup := approvalTestSetup(t)
+	defer cleanup()
+
+	// Reject option selected -> deny.
+	req := feedPendingApproval(t, ch, tc, sess, "task-1", "appr-1", "shell", []string{"once", "session"})
+	tc.reply(t, req.ID, requestPermissionResult{Outcome: permissionOutcome{Outcome: "selected", OptionID: rejectOptionID}})
+	if got := fake.last(t); got.decision.Granted {
+		t.Fatalf("reject option: decision = %+v, want denied", got.decision)
+	}
+
+	// Cancelled outcome -> deny.
+	req = feedPendingApproval(t, ch, tc, sess, "task-2", "appr-2", "shell", []string{"once", "session"})
+	tc.reply(t, req.ID, requestPermissionResult{Outcome: permissionOutcome{Outcome: "cancelled"}})
+	got := fake.last(t)
+	if got.reqID != "appr-2" || got.decision.Granted {
+		t.Fatalf("cancelled: %+v, want denied for appr-2", got)
 	}
 }
 
