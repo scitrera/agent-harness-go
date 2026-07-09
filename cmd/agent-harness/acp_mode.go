@@ -34,6 +34,9 @@ func runACP(cfg appConfig) error {
 	}
 	ac.SetApprovalResolver(broker)
 	canceller := turncancel.New()
+	// Bridge ACP session/cancel to the runtime canceller: it keys in-flight turns
+	// by task id, so an out-of-band cancel aborts the running turn's context.
+	ac.SetCanceller(func(id string) { canceller.Cancel(id) })
 	rt, err := runtime.NewRunner(ac, runner)
 	if err != nil {
 		return fmt.Errorf("runtime: %w", err)

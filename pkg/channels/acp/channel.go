@@ -54,6 +54,7 @@ type session struct {
 	mu         sync.Mutex
 	promptID   json.RawMessage     // in-flight session/prompt request id (nil = none)
 	resolved   bool                // whether the current prompt has been answered
+	taskID     string              // in-flight turn's task id (minted by promptToMessage); the runtime keys turncancel by it
 	cancelHook func()              // orchestrator-supplied cancellation callback
 	prompted   map[string]struct{} // approval request ids already sent to the client (dedupe)
 }
@@ -75,6 +76,9 @@ type Channel struct {
 	// resolver bridges a client permission decision back to the harness approval
 	// broker; nil disables the round-trip (*approval.Broker satisfies it).
 	resolver ApprovalResolver
+	// canceller aborts the in-flight turn's context via the runtime turncancel,
+	// keyed by task id; nil leaves session/cancel as prompt-resolution only.
+	canceller func(id string)
 
 	seq atomic.Uint64
 }
@@ -90,6 +94,16 @@ type ApprovalResolver interface {
 func (c *Channel) SetApprovalResolver(r ApprovalResolver) {
 	c.mu.Lock()
 	c.resolver = r
+	c.mu.Unlock()
+}
+
+// SetCanceller wires a channel-level cancel func invoked on session/cancel with
+// the in-flight turn's task id, so the runtime turncancel.Canceller aborts the
+// running turn's context (the runtime keys turns by task id). It is the seam the
+// orchestrator uses to bridge ACP cancellation to the harness canceller.
+func (c *Channel) SetCanceller(cancel func(id string)) {
+	c.mu.Lock()
+	c.canceller = cancel
 	c.mu.Unlock()
 }
 
@@ -231,12 +245,15 @@ func (c *Channel) handlePrompt(ctx context.Context, req rpcRequest) error {
 		return c.conn.writeError(req.ID, codeInvalidParams, "unknown session: "+p.SessionID)
 	}
 
+	msg := c.promptToMessage(sess.threadID, p.Prompt)
+
 	sess.mu.Lock()
 	sess.promptID = req.ID
 	sess.resolved = false
+	// Record the turn's task id so session/cancel can key the runtime canceller.
+	sess.taskID = msg.Addr.TaskID
 	sess.mu.Unlock()
 
-	msg := c.promptToMessage(sess.threadID, p.Prompt)
 	if err := c.Enqueue(ctx, channel.Inbound{Addr: msg.Addr, Message: msg}); err != nil {
 		// Could not hand off the turn — answer the prompt so the client is not
 		// left waiting on a response that will never come.
@@ -260,12 +277,20 @@ func (c *Channel) handleCancel(req rpcRequest) {
 	}
 	sess.mu.Lock()
 	hook := sess.cancelHook
+	taskID := sess.taskID
 	sess.mu.Unlock()
-	// TODO(acp): the orchestrator wires this hook to turncancel so the in-flight
-	// turn is actually interrupted; for now we only resolve the prompt.
+	c.mu.Lock()
+	cancel := c.canceller
+	c.mu.Unlock()
+	// Interrupt the in-flight turn: the per-session hook (if any) plus the runtime
+	// canceller keyed by the turn's task id, which cancels the turn's context.
 	if hook != nil {
 		hook()
 	}
+	if cancel != nil && taskID != "" {
+		cancel(taskID)
+	}
+	// Resolve the pending prompt so the client still gets its terminal response.
 	c.resolvePrompt(sess, stopCancelled)
 }
 

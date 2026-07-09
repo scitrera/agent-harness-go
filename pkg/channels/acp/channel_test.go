@@ -466,3 +466,51 @@ func TestCancelResolvesPrompt(t *testing.T) {
 		t.Fatal("cancel hook did not fire")
 	}
 }
+
+// TestCancelInvokesCanceller asserts session/cancel invokes the wired channel
+// canceller with the in-flight turn's task id AND resolves the prompt with
+// stopReason "cancelled".
+func TestCancelInvokesCanceller(t *testing.T) {
+	ch, tc, cleanup := newTestPair(t)
+	defer cleanup()
+
+	tc.send(t, json.RawMessage("1"), methodSessionNew, newSessionParams{Cwd: "/tmp"})
+	var ns newSessionResult
+	if err := json.Unmarshal(tc.next(t).Result, &ns); err != nil {
+		t.Fatalf("new session: %v", err)
+	}
+	gotID := make(chan string, 1)
+	ch.SetCanceller(func(id string) { gotID <- id })
+
+	tc.send(t, json.RawMessage("2"), methodSessionPrompt, promptParams{
+		SessionID: ns.SessionID,
+		Prompt:    []contentBlock{{Type: "text", Text: "hi"}},
+	})
+	in, err := ch.FetchTask(context.Background())
+	if err != nil {
+		t.Fatalf("FetchTask: %v", err)
+	}
+	wantID := in.Message.Addr.TaskID
+	if wantID == "" {
+		t.Fatal("inbound task id is empty")
+	}
+
+	tc.send(t, nil, methodSessionCancel, cancelParams{SessionID: ns.SessionID})
+
+	resp := tc.next(t)
+	var pr promptResult
+	if err := json.Unmarshal(resp.Result, &pr); err != nil {
+		t.Fatalf("cancel result: %v", err)
+	}
+	if pr.StopReason != stopCancelled {
+		t.Fatalf("stopReason = %q, want %q", pr.StopReason, stopCancelled)
+	}
+	select {
+	case id := <-gotID:
+		if id != wantID {
+			t.Fatalf("canceller got id %q, want %q", id, wantID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceller was not invoked")
+	}
+}
