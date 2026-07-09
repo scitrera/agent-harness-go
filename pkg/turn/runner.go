@@ -153,6 +153,11 @@ type Runner struct {
 	approvalTimeout time.Duration
 	approvalScopes  []string
 	grantStore      tools.GrantStore
+	// safetyAuthorizer is the pluggable safety slot in the authorization pipeline;
+	// it runs for every tool (local + provider, incl. pre-authorized). nil → a
+	// no-op that abstains (today's behavior). A future safety classifier may Deny
+	// or escalate an Allow to a prompt.
+	safetyAuthorizer ToolAuthorizer
 
 	// Background sub-agent execution. notifier is the ingress-write seam a detached
 	// child uses to push its completion notice back to the parent thread (nil →
@@ -238,6 +243,11 @@ func (a dynamicToolAdapter) Invoke(ctx context.Context, req tools.Request) (tool
 type turnTools struct {
 	specs          []provider.ToolSpec
 	providerByTool map[string]ToolProvider
+	// trustByTool carries each tool's authorization Trust hint into dispatch,
+	// keyed by tool name (static + provider descriptors). A missing entry (e.g.
+	// local tools, which stay TrustDefault this stage) reads as the zero value,
+	// TrustDefault — so today's flow is unchanged.
+	trustByTool map[string]tools.TrustLevel
 }
 
 type Config struct {
@@ -369,6 +379,13 @@ type Config struct {
 	// behavior). Typically the same store backing ApprovalGranter's
 	// GrantAlways persistence.
 	GrantStore tools.GrantStore
+
+	// SafetyAuthorizer is the pluggable safety slot in the tool authorization
+	// pipeline. It runs for EVERY tool (local + provider, including
+	// pre-authorized) and may Deny a call or escalate an Allow to a prompt.
+	// Optional; nil → a no-op that abstains (behavior unchanged — this is the
+	// future safety-classifier seam).
+	SafetyAuthorizer ToolAuthorizer
 
 	// DynamicTools, when set, supplies per-turn tools discovered from an external
 	// source (e.g. the platform-bridge registry, queried with the user's message
@@ -536,6 +553,7 @@ func NewRunner(cfg Config) (*Runner, error) {
 		approvalTimeout:           cfg.ApprovalTimeout,
 		approvalScopes:            cfg.ApprovalScopes,
 		grantStore:                cfg.GrantStore,
+		safetyAuthorizer:          cfg.SafetyAuthorizer,
 		toolProviders:             toolProviders,
 		staticToolNames:           staticNames,
 		attachments:               attachments,
@@ -563,6 +581,18 @@ func (r *Runner) assembleTurnTools(ctx context.Context, addr protocol.MessageAdd
 	}
 	specs := append([]provider.ToolSpec(nil), r.toolSpecs...)
 	route := map[string]ToolProvider{}
+	// Carry each tool's Trust hint into dispatch. Seed with the static registry's
+	// descriptors (built-ins default TrustDefault this stage); provider tools add
+	// theirs below. Local tools may be omitted (missing → TrustDefault), but the
+	// static seed keeps the map faithful to the descriptors.
+	trust := map[string]tools.TrustLevel{}
+	if r.registry != nil {
+		for _, d := range r.registry.Descriptors() {
+			if d.Trust != tools.TrustDefault {
+				trust[d.Name] = d.Trust
+			}
+		}
+	}
 	for _, p := range r.toolProviders {
 		descs, err := p.Tools(ctx, addr, user)
 		if err != nil {
@@ -578,6 +608,9 @@ func (r *Runner) assembleTurnTools(ctx context.Context, addr protocol.MessageAdd
 				continue // an earlier provider (or intra-batch dup) already owns it
 			}
 			route[d.Name] = p
+			if d.Trust != tools.TrustDefault {
+				trust[d.Name] = d.Trust
+			}
 			specs = append(specs, provider.ToolSpec{Name: d.Name, Description: d.Description, Parameters: d.Parameters})
 		}
 	}
@@ -586,6 +619,9 @@ func (r *Runner) assembleTurnTools(ctx context.Context, addr protocol.MessageAdd
 	}
 	tt.specs = specs
 	tt.providerByTool = route
+	if len(trust) > 0 {
+		tt.trustByTool = trust
+	}
 	return tt
 }
 

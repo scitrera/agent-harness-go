@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 
 	spec "github.com/scitrera/ecosystem-messaging-spec/go"
@@ -73,18 +74,30 @@ func toolCallsFromMessage(msg protocol.ChatMessage) ([]protocol.ToolInvokeEnvelo
 // hooks approval gate (approveToolCall) has already run for both in the loop; the
 // registry's requires-approval flow applies only to static tools.
 func (r *Runner) invokeTool(ctx context.Context, session *harness.Session, addr protocol.MessageAddress, call protocol.ToolInvokeEnvelope, tt turnTools) (tools.Result, error) {
+	trust := tt.trustByTool[call.Name]
 	if p, ok := tt.providerByTool[call.Name]; ok {
-		return r.invokeToolProvider(ctx, p, call)
+		return r.invokeToolProvider(ctx, p, addr, call, trust)
 	}
-	return r.invokeWithApproval(ctx, session, addr, call)
+	return r.invokeWithApproval(ctx, session, addr, call, trust)
 }
 
-// invokeProvider invokes a provider-surfaced tool via its ToolProvider, forwarding
-// the per-turn OBO authority + enclosing message id (on ctx and on the request) so
-// the remote side can resolve the acting user. The call is wrapped in a StartTool
-// span for uniform provider telemetry (no approval gate — provider tools keep the
-// no-approval OBO-forwarding dispatch).
-func (r *Runner) invokeToolProvider(ctx context.Context, p ToolProvider, call protocol.ToolInvokeEnvelope) (result tools.Result, err error) {
+// invokeToolProvider invokes a provider-surfaced tool via its ToolProvider,
+// forwarding the per-turn OBO authority + enclosing message id (on ctx and on
+// the request) so the remote side can resolve the acting user. The call is
+// wrapped in a StartTool span for uniform provider telemetry. It first runs the
+// uniform authorization pipeline (grant + safety, plus the interactive prompt
+// only when the outcome is a Prompt): with the default no-op safety and a
+// TrustDefault tool this resolves to Allow and the provider is invoked directly
+// (today's non-prompting bypass), while a stronger Trust or a non-trivial safety
+// authorizer can Deny or force a prompt.
+func (r *Runner) invokeToolProvider(ctx context.Context, p ToolProvider, addr protocol.MessageAddress, call protocol.ToolInvokeEnvelope, trust tools.TrustLevel) (result tools.Result, err error) {
+	in := AuthzInput{Call: call, Addr: addr, Trust: trust, ProviderID: p.ID()}
+	if d := r.authorizeTool(ctx, in, trustBase(trust)); d.Outcome != Allow {
+		if ctx.Err() != nil {
+			return tools.Result{}, ctx.Err() // turn cancelled during a prompt
+		}
+		return tools.Result{}, policyErrorFor(call.Name) // denied/expired → fed back to the model
+	}
 	req := tools.RequestFromEnvelope(call)
 	if auth, ok := tools.MemoryAuthorityFrom(ctx); ok {
 		req.Authority = auth
@@ -97,93 +110,38 @@ func (r *Runner) invokeToolProvider(ctx context.Context, p ToolProvider, call pr
 	return p.Invoke(ctx, req)
 }
 
-// invokeWithApproval invokes a tool; if the policy gates it as "requires
-// approval" and an approval channel is wired, it emits an approval_request part,
-// blocks for the user's approve/deny control (bounded by ApprovalTimeout), and
-// on approval re-invokes (bypassing the gate) plus records any session/always
-// grant. On deny/expire it returns the original requires-approval error so the
-// caller's error-feedback path records it for the model. With no approval
-// channel wired it behaves exactly as a plain invoke.
-func (r *Runner) invokeWithApproval(ctx context.Context, session *harness.Session, addr protocol.MessageAddress, call protocol.ToolInvokeEnvelope) (tools.Result, error) {
+// invokeWithApproval invokes a local (static-registry) tool; the registry policy
+// runs inside session.InvokeTool and returns ErrToolRequiresApproval BEFORE the
+// tool body executes when the tool is gated. On that trigger — and with an
+// approval channel wired — it runs the uniform authorization pipeline seeded with
+// a Prompt: the grant authorizer may short-circuit to Allow (a durable/always
+// grant, recording a session grant), the safety authorizer may Deny or escalate,
+// and the interactive authorizer resolves the remaining Prompt (emitting the
+// approval_request, blocking under ApprovalTimeout, recording session/always
+// grants). On Allow it re-invokes bypassing the gate; on Deny/expire it returns
+// the original requires-approval error so the caller feeds it back to the model.
+// With no approval channel wired it behaves exactly as a plain invoke.
+func (r *Runner) invokeWithApproval(ctx context.Context, session *harness.Session, addr protocol.MessageAddress, call protocol.ToolInvokeEnvelope, trust tools.TrustLevel) (tools.Result, error) {
 	result, err := session.InvokeTool(ctx, call)
 	if err == nil || r.approvals == nil || !errors.Is(err, tools.ErrToolRequiresApproval) {
 		return result, err
 	}
-
-	// Durable "always" grants: before prompting, consult the durable grant store
-	// (when wired). A prior "always" grant — persisted under the user's OBO —
-	// short-circuits the prompt: record a session grant so subsequent calls in
-	// this turn skip the gate too, then run the tool approved. A store error is
-	// non-fatal: log and fall through to the normal prompt flow.
-	if r.grantStore != nil {
-		granted, gerr := r.grantStore.IsGranted(ctx, addr.WorkspaceID, call.Name)
-		if gerr != nil {
-			slog.WarnContext(ctx, "durable grant lookup failed", slog.String("tool", call.Name), slog.Any("err", gerr))
-		} else if granted {
-			if r.approvalGranter != nil {
-				r.approvalGranter.GrantSession(addr.WorkspaceID, call.Name)
-			}
-			return session.InvokeToolApproved(ctx, call)
+	in := AuthzInput{Call: call, Addr: addr, Trust: trust}
+	if d := r.authorizeTool(ctx, in, Prompt); d.Outcome != Allow {
+		if ctx.Err() != nil {
+			return tools.Result{}, ctx.Err() // turn cancelled during the prompt
 		}
+		return tools.Result{}, err // denied/expired → original requires-approval error, fed back to the model
 	}
-
-	reqID := call.CallID
-	emitter, _ := tools.PartEmitterFrom(ctx)
-	scopes := r.approvalScopes
-	if len(scopes) == 0 {
-		scopes = []string{"once", "session", "always"}
-	}
-	r.emitApproval(ctx, emitter, reqID, call, scopes, spec.ApprovalPending, "tool is not pre-authorized")
-	slog.InfoContext(ctx, "tool approval requested; awaiting user decision",
-		slog.String("tool", call.Name),
-		slog.String("call_id", reqID),
-		slog.String("task", addr.TaskID),
-		slog.String("workspace", addr.WorkspaceID),
-	)
-
-	awaitCtx := ctx
-	if r.approvalTimeout > 0 {
-		var cancel context.CancelFunc
-		awaitCtx, cancel = context.WithTimeout(ctx, r.approvalTimeout)
-		defer cancel()
-	}
-	decision, awaitErr := r.approvals.Await(awaitCtx, addr.TaskID, reqID)
-	if ctx.Err() != nil {
-		// The turn itself was cancelled (not just the approval timeout) — abort.
-		return tools.Result{}, ctx.Err()
-	}
-	if awaitErr != nil || !decision.Granted {
-		status := spec.ApprovalDenied
-		if awaitErr != nil {
-			status = spec.ApprovalExpired // timed out waiting for a response
-		}
-		r.emitApproval(ctx, emitter, reqID, call, scopes, status, "")
-		slog.InfoContext(ctx, "tool approval not granted",
-			slog.String("tool", call.Name),
-			slog.String("call_id", reqID),
-			slog.String("status", string(status)),
-		)
-		return tools.Result{}, err // original requires-approval error → fed back to the model
-	}
-
-	// Granted: record a grant so future calls in scope don't re-prompt.
-	if r.approvalGranter != nil {
-		switch decision.Scope {
-		case "session":
-			r.approvalGranter.GrantSession(addr.WorkspaceID, call.Name)
-		case "always":
-			if gerr := r.approvalGranter.GrantAlways(ctx, addr.WorkspaceID, call.Name); gerr != nil {
-				slog.WarnContext(ctx, "persist always-grant failed", slog.String("tool", call.Name), slog.Any("err", gerr))
-			}
-		}
-	}
-	r.emitApproval(ctx, emitter, reqID, call, scopes, spec.ApprovalApproved, "")
-	slog.InfoContext(ctx, "tool approval granted",
-		slog.String("tool", call.Name),
-		slog.String("call_id", reqID),
-		slog.String("scope", decision.Scope),
-	)
 	return session.InvokeToolApproved(ctx, call)
+}
+
+// policyErrorFor is the requires-approval error surfaced when the authorization
+// pipeline refuses a provider tool (a local tool reuses the policy's original
+// error instead). Wrapping tools.ErrToolRequiresApproval keeps the caller's
+// error-feedback path uniform.
+func policyErrorFor(name string) error {
+	return fmt.Errorf("%w: %s", tools.ErrToolRequiresApproval, name)
 }
 
 // emitApproval upserts an approval_request part (pending first, then the
