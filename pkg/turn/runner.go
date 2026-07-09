@@ -144,7 +144,7 @@ type Runner struct {
 	authorityFn       AuthorityFunc
 	dedupTrailingUser bool
 
-	dynamicTools    DynamicToolProvider
+	toolProviders   []ToolProvider
 	staticToolNames map[string]struct{}
 	attachments     AttachmentResolver
 
@@ -201,12 +201,43 @@ type DynamicToolProvider interface {
 	Invoke(ctx context.Context, req tools.Request) (tools.Result, error)
 }
 
+// ToolProvider is the generalized per-turn tool source: it discovers tools for a
+// turn (Tools) and services their invocations (Invoke). The runner queries every
+// configured provider each turn to assemble the model-visible tool list, then
+// routes an invocation of any provided tool (one not in the static registry) back
+// to the provider that surfaced it. ID names the provider for logs/telemetry.
+// Static-registry specs win a name collision; among providers, earlier-in-list
+// wins. Tools is best-effort — a provider error is logged and skipped (static-only
+// continues). The DynamicToolProvider seam is a special case wrapped into this via
+// dynamicToolAdapter, so Config.DynamicTools stays supported.
+type ToolProvider interface {
+	ID() string
+	Tools(ctx context.Context, addr protocol.MessageAddress, user protocol.ChatMessage) ([]tools.Descriptor, error)
+	Invoke(ctx context.Context, req tools.Request) (tools.Result, error)
+}
+
+// dynamicToolAdapter wraps a DynamicToolProvider as a ToolProvider so the legacy
+// Config.DynamicTools slot rides the unified provider list unchanged (Tools →
+// Discover, Invoke → Invoke). ID is "dynamic".
+type dynamicToolAdapter struct{ p DynamicToolProvider }
+
+func (a dynamicToolAdapter) ID() string { return "dynamic" }
+
+func (a dynamicToolAdapter) Tools(ctx context.Context, addr protocol.MessageAddress, user protocol.ChatMessage) ([]tools.Descriptor, error) {
+	return a.p.Discover(ctx, addr, user)
+}
+
+func (a dynamicToolAdapter) Invoke(ctx context.Context, req tools.Request) (tools.Result, error) {
+	return a.p.Invoke(ctx, req)
+}
+
 // turnTools is the per-turn model-visible tool set: the static specs plus any
-// dynamically-discovered specs, and the set of dynamic tool names so the invoke
-// path can route them to the DynamicToolProvider (static tools win on collision).
+// provider-discovered specs, and a route map from a provided tool's name to the
+// ToolProvider that services it (absence = static registry). Static tools win on
+// name collision, so a provided tool can never shadow a built-in.
 type turnTools struct {
-	specs        []provider.ToolSpec
-	dynamicNames map[string]struct{}
+	specs          []provider.ToolSpec
+	providerByTool map[string]ToolProvider
 }
 
 type Config struct {
@@ -348,6 +379,14 @@ type Config struct {
 	// auto-discovery can be disabled while leaving explicit discovery in place.
 	DynamicTools DynamicToolProvider
 
+	// ToolProviders are the generalized per-turn tool sources (unified discovery +
+	// routing). Each is queried every turn; provided tools merge into the turn's
+	// model-visible set and their invocations route back to the provider. Earlier
+	// entries win a name collision among providers; the static registry always
+	// wins over any provider. DynamicTools, when set, is appended to this list
+	// (wrapped) so existing callers keep working. Optional; nil → providers-less.
+	ToolProviders []ToolProvider
+
 	// Attachments, when set, resolves multimodal parts the provider cannot fetch
 	// itself (vfs_ref-only image/file parts) into a model-deliverable carrier,
 	// applied to the assembled request just before each provider call. Optional;
@@ -449,6 +488,12 @@ func NewRunner(cfg Config) (*Runner, error) {
 	if authHandoff == nil {
 		authHandoff = authhandoff.New()
 	}
+	// Unified provider list: explicit ToolProviders first (earlier wins), then the
+	// legacy DynamicTools slot appended (wrapped) so existing callers are unchanged.
+	toolProviders := append([]ToolProvider(nil), cfg.ToolProviders...)
+	if cfg.DynamicTools != nil {
+		toolProviders = append(toolProviders, dynamicToolAdapter{p: cfg.DynamicTools})
+	}
 	return &Runner{
 		store:                     cfg.Store,
 		loader:                    cfg.Loader,
@@ -491,7 +536,7 @@ func NewRunner(cfg Config) (*Runner, error) {
 		approvalTimeout:           cfg.ApprovalTimeout,
 		approvalScopes:            cfg.ApprovalScopes,
 		grantStore:                cfg.GrantStore,
-		dynamicTools:              cfg.DynamicTools,
+		toolProviders:             toolProviders,
 		staticToolNames:           staticNames,
 		attachments:               attachments,
 		notifier:                  cfg.Notifier,
@@ -504,38 +549,43 @@ func NewRunner(cfg Config) (*Runner, error) {
 }
 
 // assembleTurnTools builds the model-visible tool set for a turn: the static
-// specs plus any tools the DynamicToolProvider surfaces for this address/user
-// (e.g. the platform-bridge registry's top-N matches for the user's message).
-// Best-effort — a discovery error degrades to the static set. Static tools win
-// on name collision so a remote tool can never shadow a built-in.
+// specs plus any tools the configured ToolProviders surface for this address/user
+// (e.g. the platform-bridge registry's top-N matches for the user's message). Each
+// provider is queried in order; its descriptors merge into the specs and populate
+// the route map keyed by tool name. Best-effort — a provider error is logged and
+// skipped (static-only continues). Static tools win a name collision so a provided
+// tool can never shadow a built-in; among providers, earlier-in-list wins. When no
+// provider contributes anything, the static set is returned with a nil route map.
 func (r *Runner) assembleTurnTools(ctx context.Context, addr protocol.MessageAddress, user protocol.ChatMessage) turnTools {
 	tt := turnTools{specs: r.toolSpecs}
-	if r.dynamicTools == nil {
+	if len(r.toolProviders) == 0 {
 		return tt
 	}
-	descs, err := r.dynamicTools.Discover(ctx, addr, user)
-	if err != nil {
-		slog.WarnContext(ctx, "dynamic tool discovery failed; using static tools only", slog.Any("err", err))
-		return tt
-	}
-	if len(descs) == 0 {
-		return tt
-	}
-	specs := make([]provider.ToolSpec, len(r.toolSpecs), len(r.toolSpecs)+len(descs))
-	copy(specs, r.toolSpecs)
-	names := make(map[string]struct{}, len(descs))
-	for _, d := range descs {
-		if _, isStatic := r.staticToolNames[d.Name]; isStatic {
-			continue // a built-in tool always wins the name
-		}
-		if _, dup := names[d.Name]; dup {
+	specs := append([]provider.ToolSpec(nil), r.toolSpecs...)
+	route := map[string]ToolProvider{}
+	for _, p := range r.toolProviders {
+		descs, err := p.Tools(ctx, addr, user)
+		if err != nil {
+			slog.WarnContext(ctx, "tool provider discovery failed; skipping provider",
+				slog.String("provider", p.ID()), slog.Any("err", err))
 			continue
 		}
-		names[d.Name] = struct{}{}
-		specs = append(specs, provider.ToolSpec{Name: d.Name, Description: d.Description, Parameters: d.Parameters})
+		for _, d := range descs {
+			if _, isStatic := r.staticToolNames[d.Name]; isStatic {
+				continue // a built-in tool always wins the name
+			}
+			if _, dup := route[d.Name]; dup {
+				continue // an earlier provider (or intra-batch dup) already owns it
+			}
+			route[d.Name] = p
+			specs = append(specs, provider.ToolSpec{Name: d.Name, Description: d.Description, Parameters: d.Parameters})
+		}
+	}
+	if len(route) == 0 {
+		return tt // no provider contributed; static-only with nil route map
 	}
 	tt.specs = specs
-	tt.dynamicNames = names
+	tt.providerByTool = route
 	return tt
 }
 

@@ -163,7 +163,7 @@ func (r *Runner) runProviderLoop(ctx context.Context, session *harness.Session, 
 				continue
 			}
 
-			_, dynamicCall := tt.dynamicNames[call.Name]
+			_, dynamicCall := tt.providerByTool[call.Name]
 			toolStart := time.Now()
 			toolCtx, toolSpan := telemetry.StartTool(ctx, call.Name)
 			r.publishToolEvent(toolCtx, applyHookDecision(toolEventFromCall(tools.ToolEventStarted, call), decision))

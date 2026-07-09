@@ -12,6 +12,7 @@ import (
 	"github.com/scitrera/agent-harness-go/pkg/hooks"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 	"github.com/scitrera/agent-harness-go/pkg/provider"
+	"github.com/scitrera/agent-harness-go/pkg/telemetry"
 	"github.com/scitrera/agent-harness-go/pkg/tools"
 )
 
@@ -66,22 +67,24 @@ func toolCallsFromMessage(msg protocol.ChatMessage) ([]protocol.ToolInvokeEnvelo
 	return calls, nil
 }
 
-// invokeTool dispatches a tool call: a dynamically-discovered tool (one surfaced
-// by the DynamicToolProvider this turn, not in the static registry) routes to the
-// provider; everything else goes through the static registry's approval-aware
-// path. The hooks approval gate (approveToolCall) has already run for both in the
-// loop; the registry's requires-approval flow applies only to static tools.
+// invokeTool dispatches a tool call: a provider-surfaced tool (one a ToolProvider
+// discovered this turn, not in the static registry) routes to that provider;
+// everything else goes through the static registry's approval-aware path. The
+// hooks approval gate (approveToolCall) has already run for both in the loop; the
+// registry's requires-approval flow applies only to static tools.
 func (r *Runner) invokeTool(ctx context.Context, session *harness.Session, addr protocol.MessageAddress, call protocol.ToolInvokeEnvelope, tt turnTools) (tools.Result, error) {
-	if _, dynamic := tt.dynamicNames[call.Name]; dynamic {
-		return r.invokeDynamic(ctx, call)
+	if p, ok := tt.providerByTool[call.Name]; ok {
+		return r.invokeToolProvider(ctx, p, call)
 	}
 	return r.invokeWithApproval(ctx, session, addr, call)
 }
 
-// invokeDynamic invokes a discovered tool via the DynamicToolProvider, forwarding
-// the per-turn OBO authority (on ctx and on the request) so the remote side can
-// resolve the acting user.
-func (r *Runner) invokeDynamic(ctx context.Context, call protocol.ToolInvokeEnvelope) (tools.Result, error) {
+// invokeProvider invokes a provider-surfaced tool via its ToolProvider, forwarding
+// the per-turn OBO authority + enclosing message id (on ctx and on the request) so
+// the remote side can resolve the acting user. The call is wrapped in a StartTool
+// span for uniform provider telemetry (no approval gate — provider tools keep the
+// no-approval OBO-forwarding dispatch).
+func (r *Runner) invokeToolProvider(ctx context.Context, p ToolProvider, call protocol.ToolInvokeEnvelope) (result tools.Result, err error) {
 	req := tools.RequestFromEnvelope(call)
 	if auth, ok := tools.MemoryAuthorityFrom(ctx); ok {
 		req.Authority = auth
@@ -89,7 +92,9 @@ func (r *Runner) invokeDynamic(ctx context.Context, call protocol.ToolInvokeEnve
 	if id, ok := tools.MessageIDFrom(ctx); ok {
 		req.MessageID = id
 	}
-	return r.dynamicTools.Invoke(ctx, req)
+	ctx, span := telemetry.StartTool(ctx, call.Name)
+	defer func() { telemetry.FinishErr(span, err) }()
+	return p.Invoke(ctx, req)
 }
 
 // invokeWithApproval invokes a tool; if the policy gates it as "requires

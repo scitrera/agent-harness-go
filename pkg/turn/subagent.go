@@ -373,19 +373,19 @@ func filterSubagentTools(tt turnTools, req subagent.Request) turnTools {
 		return tt
 	}
 	specs := make([]provider.ToolSpec, 0, len(tt.specs))
-	dynamicNames := make(map[string]struct{}, len(tt.dynamicNames))
+	route := make(map[string]ToolProvider, len(tt.providerByTool))
 	for _, spec := range tt.specs {
 		if err := req.AllowsTool(spec.Name); err != nil {
 			continue
 		}
 		specs = append(specs, spec)
-		if _, ok := tt.dynamicNames[spec.Name]; ok {
-			dynamicNames[spec.Name] = struct{}{}
+		if p, ok := tt.providerByTool[spec.Name]; ok {
+			route[spec.Name] = p
 		}
 	}
 	filtered := turnTools{specs: specs}
-	if len(dynamicNames) > 0 {
-		filtered.dynamicNames = dynamicNames
+	if len(route) > 0 {
+		filtered.providerByTool = route
 	}
 	return filtered
 }
