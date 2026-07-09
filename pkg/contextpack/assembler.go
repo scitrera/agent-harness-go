@@ -20,6 +20,11 @@ type Config struct {
 	// caps still apply, plus the turn loop's reactive overflow recovery).
 	MaxContextTokens int
 
+	// Compactor, when set, is the pluggable strategy used to fit history to the
+	// per-call budget (evict/summarize/classic composites). nil -> the historical
+	// ReduceWithReport drop-oldest behavior, byte-for-byte unchanged.
+	Compactor compaction.Compactor
+
 	// InvokedSkillTTL bounds how many turns a load_skill invocation stays listed
 	// in the "## Loaded skills" prompt section. 0 -> defaultInvokedSkillTTL.
 	InvokedSkillTTL int
@@ -40,16 +45,20 @@ type Config struct {
 	MaxAutoRealizeBytes int
 
 	// System-prompt inputs (see internal/sysprompt).
-	Base         string
-	Tools        []sysprompt.ToolSummary
-	Subagents    bool // spawn_subagent available → emit delegation guidance
-	Skills       []sysprompt.SkillSummary
-	MemoryTools  bool
-	MaxFileBytes int
-	WorkspaceDir string
-	Model        string
-	SandboxID    string
-	Now          func() time.Time
+	Base      string
+	Tools     []sysprompt.ToolSummary
+	Subagents bool // spawn_subagent available → emit delegation guidance
+	Skills    []sysprompt.SkillSummary
+	// SkillLoadWarnings surfaces the untrusted skill-load warnings collected by
+	// skills.DiscoverWithWarnings (malformed name, over-cap SKILL.md, dropped
+	// duplicate). Rendered as an escaped, explicitly-untrusted prompt section.
+	SkillLoadWarnings []string
+	MemoryTools       bool
+	MaxFileBytes      int
+	WorkspaceDir      string
+	Model             string
+	SandboxID         string
+	Now               func() time.Time
 }
 
 // defaultInvokedSkillTTL: past this many turns since it was loaded, a skill drops
@@ -243,23 +252,24 @@ func (a Assembler) Build(ctx context.Context, bootstrap []bootstrap.File, histor
 	// cacheable prefix and auto-realizes nothing — identical to before.
 	promptSkills, skillsDynamic, autoLoaded := a.applyRelevance(ctx, history, wsSkills)
 	sysMsg, err := sysprompt.Build(sysprompt.Input{
-		Base:             a.cfg.Base,
-		Bootstrap:        bootstrap,
-		Tools:            a.cfg.Tools,
-		Skills:           promptSkills,
-		SkillsDynamic:    skillsDynamic,
-		AutoLoadedSkills: autoLoaded,
-		LoadedSkills:     wsSkills,
-		RecentFiles:      wsFiles,
-		Todos:            wsTodos,
-		Subagents:        wsSubagents,
-		MemoryTools:      a.cfg.MemoryTools,
-		SubagentsEnabled: a.cfg.Subagents,
-		MaxFileBytes:     a.cfg.MaxFileBytes,
-		WorkspaceDir:     a.cfg.WorkspaceDir,
-		Model:            a.cfg.Model,
-		SandboxID:        a.cfg.SandboxID,
-		Now:              now,
+		Base:              a.cfg.Base,
+		Bootstrap:         bootstrap,
+		Tools:             a.cfg.Tools,
+		Skills:            promptSkills,
+		SkillsDynamic:     skillsDynamic,
+		AutoLoadedSkills:  autoLoaded,
+		SkillLoadWarnings: a.cfg.SkillLoadWarnings,
+		LoadedSkills:      wsSkills,
+		RecentFiles:       wsFiles,
+		Todos:             wsTodos,
+		Subagents:         wsSubagents,
+		MemoryTools:       a.cfg.MemoryTools,
+		SubagentsEnabled:  a.cfg.Subagents,
+		MaxFileBytes:      a.cfg.MaxFileBytes,
+		WorkspaceDir:      a.cfg.WorkspaceDir,
+		Model:             a.cfg.Model,
+		SandboxID:         a.cfg.SandboxID,
+		Now:               now,
 	}).Message()
 	if err != nil {
 		return nil, fmt.Errorf("build system prompt: %w", err)
@@ -281,11 +291,18 @@ func (a Assembler) Build(ctx context.Context, bootstrap []bootstrap.File, histor
 			historyTokenBudget = 1 // keep at least the most recent message
 		}
 	}
-	report, err := compaction.ReduceWithReport(history, compaction.Config{
+	compactCfg := compaction.Config{
 		MaxMessages:      a.cfg.MaxHistoryMessages,
 		MaxTextPartBytes: a.cfg.MaxTextPartBytes,
 		MaxTokens:        historyTokenBudget,
-	})
+	}
+	// A nil Compactor keeps the historical ReduceWithReport path verbatim.
+	var report compaction.Report
+	if a.cfg.Compactor != nil {
+		report, err = a.cfg.Compactor.Compact(ctx, history, compactCfg)
+	} else {
+		report, err = compaction.ReduceWithReport(history, compactCfg)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("compact context: %w", err)
 	}
