@@ -11,6 +11,18 @@ type MemoryHit struct {
 	ID      string  `json:"id"`
 	Content string  `json:"content"`
 	Score   float64 `json:"score"`
+
+	// Detail fields — populated by memory_get (fetch-by-id) to give the model
+	// full context + provenance; memory_search leaves them empty so scan results
+	// stay lean (omitempty drops them). Document provenance (source filename,
+	// document id, page) lives in Metadata/Tags for ingested memories.
+	Type           string         `json:"type,omitempty"`
+	Subtype        string         `json:"subtype,omitempty"`
+	Tags           []string       `json:"tags,omitempty"`
+	Metadata       map[string]any `json:"metadata,omitempty"`
+	Abstract       string         `json:"abstract,omitempty"`
+	SourceMemoryID string         `json:"source_memory_id,omitempty"`
+	CreatedAt      string         `json:"created_at,omitempty"`
 }
 
 // MemoryAuthority is the per-turn OBO grant for MemoryLayer calls. A zero value
@@ -76,7 +88,7 @@ func RegisterMemory(reg *Registry, recaller MemoryRecaller) error {
 	})
 	reg.Describe(Descriptor{
 		Name:        "memory_get",
-		Description: "Fetch the full content of a specific memory by id (from memory_search results).",
+		Description: "Fetch a memory by id (from memory_search results) with full detail: content, type/subtype, tags, timestamps, and metadata — including source provenance (e.g. source_filename, source_document_id, page_number) for memories ingested from documents.",
 		Parameters:  json.RawMessage(`{"type":"object","properties":{"id":{"type":"string"}},"required":["id"]}`),
 	})
 	return nil
