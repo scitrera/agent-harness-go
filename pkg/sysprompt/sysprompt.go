@@ -117,13 +117,18 @@ type Input struct {
 	RecentFiles       []RecentFile   // files written/edited this session (dynamic; carries age)
 	Todos             []TodoLine     // the agent's todo board (dynamic; carries age)
 	Subagents         []SubagentLine // sub-agents delegated to this session (dynamic; carries age)
-	MemoryTools       bool           // emit the Memory guidance section (memory_search/memory_get available)
-	SubagentsEnabled  bool           // emit the delegation guidance section (spawn_subagent available)
-	MaxFileBytes      int            // per-file cap for bootstrap content; 0 disables capping
-	WorkspaceDir      string
-	Model             string
-	SandboxID         string
-	Now               time.Time // zero -> runtime line omits time
+	// RequestInstructions are per-turn caller-supplied instructions (e.g. an
+	// agent.synthesize one-shot's options.system/instructions), rendered as the
+	// last, highest-salience suffix section. Authenticated request config; empty ->
+	// omitted.
+	RequestInstructions string
+	MemoryTools         bool // emit the Memory guidance section (memory_search/memory_get available)
+	SubagentsEnabled    bool // emit the delegation guidance section (spawn_subagent available)
+	MaxFileBytes        int  // per-file cap for bootstrap content; 0 disables capping
+	WorkspaceDir        string
+	Model               string
+	SandboxID           string
+	Now                 time.Time // zero -> runtime line omits time
 }
 
 // Prompt is the assembled system prompt, split for cacheability.
@@ -220,8 +225,22 @@ func Build(in Input) Prompt {
 			recentFilesSection(in.RecentFiles),
 			todosSection(in.Todos),
 			subagentsSection(in.Subagents),
+			requestInstructionsSection(in.RequestInstructions),
 		),
 	}
+}
+
+// requestInstructionsSection renders per-turn caller-supplied instructions (e.g. an
+// agent.synthesize one-shot's options.system/instructions) as the LAST suffix
+// section — highest salience — so a one-shot's request framing dominates the
+// turn. Omitted when empty. The text is authenticated (OBO caller) request config,
+// rendered as-is (not escaped like untrusted skill warnings).
+func requestInstructionsSection(text string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return ""
+	}
+	return "## Request instructions\n" + text
 }
 
 // autoLoadedSkillsSection injects the full bodies of skills a relevance provider
