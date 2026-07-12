@@ -10,7 +10,10 @@ import (
 	"github.com/scitrera/agent-harness-go/pkg/subagent"
 )
 
-const subagentToolName = "spawn_subagent"
+// SubagentToolName is the registry name of the spawn_subagent tool. Exported so a
+// distribution can scope it out per turn (e.g. WithExcludedTools on an ephemeral
+// one-shot, which must not spawn durable child threads).
+const SubagentToolName = "spawn_subagent"
 
 type SubagentConfig struct {
 	Runner   subagent.Runner
@@ -41,7 +44,7 @@ func RegisterSubagentWithConfig(reg *Registry, cfg SubagentConfig) error {
 	if cfg.Runner == nil {
 		return fmt.Errorf("%w: subagent runner required", ErrInvalidTool)
 	}
-	err := reg.Register(subagentToolName, HandlerFunc(func(ctx context.Context, req Request) (Result, error) {
+	err := reg.Register(SubagentToolName, HandlerFunc(func(ctx context.Context, req Request) (Result, error) {
 		depth := subagent.Depth(ctx)
 		if cfg.MaxDepth > 0 && depth >= cfg.MaxDepth {
 			return errorResult(req, fmt.Sprintf("sub-agent depth limit (%d) reached; handle this task directly", cfg.MaxDepth))
@@ -150,7 +153,7 @@ func RegisterSubagentWithConfig(reg *Registry, cfg SubagentConfig) error {
 		props += `,"background":{"type":"boolean","description":"Optional: run the sub-agent in the BACKGROUND. Returns immediately with its thread_id and status 'running' instead of the result; the result is delivered later as a follow-up message on this thread, so you can keep working or spawn several in parallel and react to each as it finishes. Omit (default) to run synchronously and get the result inline."}`
 	}
 	reg.Describe(Descriptor{
-		Name:        subagentToolName,
+		Name:        SubagentToolName,
 		Description: "Delegate a self-contained sub-task to a sub-agent that runs on its own durable, persisted thread (bounded; isolated from the main conversation). Returns the sub-agent's final answer plus a `thread_id` handle and a short `summary`. Use for focused research/analysis you want isolated from the main thread, or to consult a specific/specialist model via the optional 'model' argument. Pass the optional `thread` (a prior `thread_id`) to CONTINUE a previous sub-agent instead of spawning a new one; the returned `thread_id` is that handle. PREFER continuing an existing sub-agent when a follow-up builds on work it already did: it keeps its own context (e.g. a document or image it already inspected, or a model it was pinned to) that you do not otherwise hold — reuse its handle rather than re-delegating the task from scratch.",
 		Parameters:  json.RawMessage(`{"type":"object","properties":{` + props + `},"required":["task"]}`),
 	})

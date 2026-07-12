@@ -549,10 +549,13 @@ func NewRunner(cfg Config) (*Runner, error) {
 // skipped (static-only continues). Static tools win a name collision so a provided
 // tool can never shadow a built-in; among providers, earlier-in-list wins. When no
 // provider contributes anything, the static set is returned with a nil route map.
-func (r *Runner) assembleTurnTools(ctx context.Context, addr protocol.MessageAddress, user protocol.ChatMessage) turnTools {
-	tt := turnTools{specs: r.toolSpecs}
+func (r *Runner) assembleTurnTools(ctx context.Context, addr protocol.MessageAddress, user protocol.ChatMessage) (tt turnTools) {
+	// Per-turn tool exclusions (WithExcludedTools) are applied at every exit so a
+	// scoped-out tool is never advertised (invokeTool separately blocks execution).
+	defer func() { tt = r.filterExcludedTools(ctx, tt) }()
+	tt = turnTools{specs: r.toolSpecs}
 	if len(r.toolProviders) == 0 {
-		return tt
+		return
 	}
 	specs := append([]provider.ToolSpec(nil), r.toolSpecs...)
 	route := map[string]ToolProvider{}
@@ -590,12 +593,35 @@ func (r *Runner) assembleTurnTools(ctx context.Context, addr protocol.MessageAdd
 		}
 	}
 	if len(route) == 0 {
-		return tt // no provider contributed; static-only with nil route map
+		return // no provider contributed; static-only with nil route map
 	}
 	tt.specs = specs
 	tt.providerByTool = route
 	if len(trust) > 0 {
 		tt.trustByTool = trust
+	}
+	return
+}
+
+// filterExcludedTools drops per-turn WithExcludedTools names from the assembled
+// tool set so they aren't advertised to the model. Execution is blocked
+// separately in invokeTool (a static tool stays in the registry). No exclusions →
+// tt unchanged (and r.toolSpecs is never mutated: a fresh specs slice is built).
+func (r *Runner) filterExcludedTools(ctx context.Context, tt turnTools) turnTools {
+	excl := excludedTools(ctx)
+	if len(excl) == 0 {
+		return tt
+	}
+	specs := make([]provider.ToolSpec, 0, len(tt.specs))
+	for _, s := range tt.specs {
+		if _, drop := excl[s.Name]; !drop {
+			specs = append(specs, s)
+		}
+	}
+	tt.specs = specs
+	for name := range excl {
+		delete(tt.providerByTool, name) // nil-map delete is a safe no-op
+		delete(tt.trustByTool, name)
 	}
 	return tt
 }

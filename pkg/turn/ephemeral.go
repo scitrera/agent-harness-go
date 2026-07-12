@@ -21,3 +21,35 @@ func EphemeralFrom(ctx context.Context) bool {
 	v, _ := ctx.Value(ephemeralCtxKey{}).(bool)
 	return v
 }
+
+type excludedToolsCtxKey struct{}
+
+// WithExcludedTools scopes a turn's tool set: the named tools are neither
+// advertised to the model (dropped from the assembled specs) NOR executable
+// (invokeTool rejects them). A general per-turn seam — the distribution uses it
+// to restrict a one-shot/ephemeral turn (e.g. excluding spawn_subagent so an
+// ephemeral turn can't spawn durable child threads). Empty names → no-op.
+func WithExcludedTools(ctx context.Context, names []string) context.Context {
+	set := make(map[string]struct{}, len(names))
+	for _, n := range names {
+		if n != "" {
+			set[n] = struct{}{}
+		}
+	}
+	if len(set) == 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, excludedToolsCtxKey{}, set)
+}
+
+// excludedTools returns the per-turn tool-exclusion set carried on ctx (nil = none).
+func excludedTools(ctx context.Context) map[string]struct{} {
+	set, _ := ctx.Value(excludedToolsCtxKey{}).(map[string]struct{})
+	return set
+}
+
+// toolExcluded reports whether name is scoped out of this turn.
+func toolExcluded(ctx context.Context, name string) bool {
+	_, ok := excludedTools(ctx)[name]
+	return ok
+}

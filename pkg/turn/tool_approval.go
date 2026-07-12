@@ -74,6 +74,18 @@ func toolCallsFromMessage(msg protocol.ChatMessage) ([]protocol.ToolInvokeEnvelo
 // hooks approval gate (approveToolCall) has already run for both in the loop; the
 // registry's requires-approval flow applies only to static tools.
 func (r *Runner) invokeTool(ctx context.Context, session *harness.Session, addr protocol.MessageAddress, call protocol.ToolInvokeEnvelope, tt turnTools) (tools.Result, error) {
+	// Per-turn tool exclusion (WithExcludedTools) is a hard gate: a scoped-out tool
+	// is dropped from the advertised specs, but a static registry tool is still
+	// invokable, so reject it here rather than execute (e.g. spawn_subagent on an
+	// ephemeral one-shot). The error is fed back to the model, not raised.
+	if toolExcluded(ctx, call.Name) {
+		return tools.Result{
+			CallID:  call.CallID,
+			Name:    call.Name,
+			Payload: toolErrorOutput(call.Name + " is not available in this context"),
+			IsError: true,
+		}, nil
+	}
 	trust := tt.trustByTool[call.Name]
 	if p, ok := tt.providerByTool[call.Name]; ok {
 		return r.invokeToolProvider(ctx, p, addr, call, trust)
