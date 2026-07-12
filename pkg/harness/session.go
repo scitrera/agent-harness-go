@@ -24,6 +24,10 @@ type Session struct {
 	tools     *tools.Registry
 	authority tools.MemoryAuthority
 	history   []protocol.ChatMessage
+	// ephemeral marks a one-shot turn: no durable history is loaded and Append
+	// mutates only in-memory state (never SaveHistory), so nothing the turn
+	// produces reaches the durable store.
+	ephemeral bool
 }
 
 func NewSession(ctx context.Context, addr protocol.MessageAddress, store HistoryStore, registry *tools.Registry, authority tools.MemoryAuthority) (*Session, error) {
@@ -45,14 +49,34 @@ func NewSession(ctx context.Context, addr protocol.MessageAddress, store History
 	return &Session{addr: addr, store: store, tools: registry, authority: authority, history: history}, nil
 }
 
+// NewEphemeralSession starts a session for a one-shot EPHEMERAL turn: it loads
+// NO prior durable history (the turn's context is only the inbound message + its
+// parts) and its Append mutates only in-memory state — SaveHistory is never
+// called, so nothing the turn produces is persisted durably. The in-memory
+// history still accumulates the user/tool/assistant messages so the tool loop
+// and context assembly work exactly as a normal turn.
+func NewEphemeralSession(addr protocol.MessageAddress, registry *tools.Registry, authority tools.MemoryAuthority) (*Session, error) {
+	if addr.ThreadID == "" {
+		return nil, ErrMissingThreadID
+	}
+	if registry == nil {
+		registry = tools.NewRegistry()
+	}
+	return &Session{addr: addr, tools: registry, authority: authority, ephemeral: true}, nil
+}
+
 func (s *Session) Append(ctx context.Context, msg protocol.ChatMessage) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	msg.Addr = mergeAddress(s.addr, msg.Addr)
 	next := append(s.History(), msg)
-	if err := s.store.SaveHistory(ctx, s.addr.ThreadID, next); err != nil {
-		return fmt.Errorf("save history: %w", err)
+	// Ephemeral turns never touch the durable store: keep the message in-memory
+	// (so the tool loop + context assembly see it) but do not persist it.
+	if !s.ephemeral {
+		if err := s.store.SaveHistory(ctx, s.addr.ThreadID, next); err != nil {
+			return fmt.Errorf("save history: %w", err)
+		}
 	}
 	s.history = next
 	return nil

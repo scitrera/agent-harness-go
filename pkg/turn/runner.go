@@ -684,6 +684,12 @@ func (r *Runner) Run(ctx context.Context, addr protocol.MessageAddress, user pro
 	}
 	// Link to the upstream trace (if the inbound address carries one).
 	ctx = telemetry.LinkUpstream(ctx, addr)
+	// EPHEMERAL one-shot turn (set by the distribution from the inbound signal):
+	// load NO prior durable history, force memory recall+commit OFF, and persist
+	// nothing durably (no session write, no backend thread mint). Everything else
+	// (bootstrap/system prompt, tools, skills, attachments, approval, streaming)
+	// runs normally. Read once here; the flag also rides ctx into the commit path.
+	ephemeral := EphemeralFrom(ctx)
 	// The turn's OBO authority is derived by the configured Authority hook (the
 	// distribution reads the inbound grant; core leaves it zero so memory uses its
 	// default authority). Computed up front — before anything keys off the address
@@ -699,7 +705,14 @@ func (r *Runner) Run(ctx context.Context, addr protocol.MessageAddress, user pro
 	// session, stream egress, commit, and the returned message all carry it. The
 	// client learns the id from the egress addr (and the returned message).
 	if addr.ThreadID == "" {
-		addr.ThreadID = r.resolveNewThreadID(ctx, auth, addr, user)
+		if ephemeral {
+			// An ephemeral turn must not mint a durable backend thread (EnsureThread
+			// is an OBO write). Use a local, non-persisted id purely to key per-turn
+			// stream egress + world-state.
+			addr.ThreadID = r.localThreadID()
+		} else {
+			addr.ThreadID = r.resolveNewThreadID(ctx, auth, addr, user)
+		}
 	}
 	// Open the per-turn span with the resolved address.
 	ctx, span := telemetry.StartTurn(ctx, addr)
@@ -765,7 +778,13 @@ func (r *Runner) Run(ctx context.Context, addr protocol.MessageAddress, user pro
 	// act under the user's grant. Tools also receive it via req.Authority on the
 	// session; this covers the ctx path.
 	ctx = tools.WithMemoryAuthority(ctx, auth)
-	session, err := harness.NewSession(ctx, addr, r.store, r.registry, auth)
+	var session *harness.Session
+	if ephemeral {
+		// No durable history loaded; Append mutates in-memory only (never persists).
+		session, err = harness.NewEphemeralSession(addr, r.registry, auth)
+	} else {
+		session, err = harness.NewSession(ctx, addr, r.store, r.registry, auth)
+	}
 	if err != nil {
 		return protocol.ChatMessage{}, fmt.Errorf("start session: %w", err)
 	}
@@ -788,13 +807,17 @@ func (r *Runner) Run(ctx context.Context, addr protocol.MessageAddress, user pro
 		return protocol.ChatMessage{}, fmt.Errorf("load bootstrap: %w", err)
 	}
 	var injected []protocol.ChatMessage
-	if newThread {
-		if dn, ok := r.dailyNotesMessage(ctx, addr); ok {
-			injected = append(injected, dn)
+	// Ephemeral turns take ONLY the inbound message as context: skip both the
+	// first-turn daily-notes background and memory auto-recall.
+	if !ephemeral {
+		if newThread {
+			if dn, ok := r.dailyNotesMessage(ctx, addr); ok {
+				injected = append(injected, dn)
+			}
 		}
-	}
-	if rm := r.recallForTurn(ctx, auth, addr, user); rm != nil {
-		injected = append(injected, *rm)
+		if rm := r.recallForTurn(ctx, auth, addr, user); rm != nil {
+			injected = append(injected, *rm)
+		}
 	}
 	streamer := newTurnStreamer(r.publisher, addr, streamMessageID(addr), r.now, r.streamFlush)
 	if err := streamer.start(ctx); err != nil {
@@ -1156,6 +1179,13 @@ func (r *Runner) commitToMemory(ctx context.Context, auth tools.MemoryAuthority,
 // given messages to the thread when auto-commit is on. Best-effort: errors are
 // logged, never returned.
 func (r *Runner) commitMessages(ctx context.Context, auth tools.MemoryAuthority, addr protocol.MessageAddress, msgs []protocol.ChatMessage) {
+	// An ephemeral turn never persists to the durable store — force auto-commit
+	// off regardless of runner config. The ephemeral flag rides ctx (preserved by
+	// context.WithoutCancel on the detached cancel/failure commit paths), so this
+	// single chokepoint covers the happy, cancel, and failure wrap-ups.
+	if EphemeralFrom(ctx) {
+		return
+	}
 	if !r.memAutoCommit || r.memory == nil {
 		return
 	}
