@@ -50,7 +50,7 @@ func MemoryAuthorityFrom(ctx context.Context) (MemoryAuthority, bool) {
 // the client.
 type MemoryRecaller interface {
 	Recall(ctx context.Context, auth MemoryAuthority, workspace, query string, limit int) ([]MemoryHit, error)
-	GetMemory(ctx context.Context, id string) (MemoryHit, error)
+	GetMemory(ctx context.Context, auth MemoryAuthority, id string) (MemoryHit, error)
 }
 
 // RegisterMemory registers the memory_search and memory_get tools backed by the
@@ -106,7 +106,7 @@ func memoryGet(ctx context.Context, recaller MemoryRecaller, req Request) (Resul
 	if err := decodeArgs(req, &args); err != nil {
 		return Result{}, err
 	}
-	hit, err := recaller.GetMemory(ctx, args.ID)
+	hit, err := recaller.GetMemory(ctx, req.Authority, args.ID)
 	if err != nil {
 		return Result{}, err
 	}
