@@ -324,6 +324,13 @@ func LoadTool(reg *Registry) tools.HandlerFunc {
 				res.ModelSwitched = target.PreferredModel
 			}
 		}
+		// Materialize the loaded skills' bundle files (utils.py, references/, assets/,
+		// the shared bundle) into the sandbox's shared /skills dir so code can resolve
+		// their /skills/<name>/... paths. Best-effort + idempotent; no-op without a
+		// realizer (non-relay transport / no materialize dir).
+		if realize, ok := tools.SkillRealizerFrom(ctx); ok {
+			_, _ = realize(ctx, order)
+		}
 		return jsonResult(req, res, false)
 	}
 }

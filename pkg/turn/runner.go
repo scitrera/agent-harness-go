@@ -112,6 +112,9 @@ type Runner struct {
 	// Guarded by threadModelsMu.
 	threadModels   map[string]string
 	threadModelsMu sync.Mutex
+	// skillRealizer materializes a loaded skill's bundle files into /skills; installed
+	// on ctx each turn for load_skill. nil → no materialization.
+	skillRealizer tools.SkillRealizerFunc
 
 	maxToolIterations   int
 	maxModelAttempts    int
@@ -249,6 +252,11 @@ type Config struct {
 	// model.CapabilityDefault. The distribution plugs in a cost/complexity router
 	// here (policy stays out of oss).
 	ModelSelector modelpkg.Selector
+	// SkillRealizer, when set, materializes a loaded skill's bundle files into the
+	// sandbox's shared /skills dir (installed on ctx each turn so load_skill can call
+	// it). nil → no materialization (skills load body-only). The distribution wires
+	// the source (MemoryLayer bundle files / workspace folders); oss stays agnostic.
+	SkillRealizer tools.SkillRealizerFunc
 	// ProviderResolver, when set, maps the per-turn model to a distinct Provider
 	// (multi-provider config/models.yaml: a model referencing a named provider is
 	// served by that upstream). A model with no provider — or any resolution
@@ -494,6 +502,7 @@ func NewRunner(cfg Config) (*Runner, error) {
 		ctxMgr:                    ctxMgr,
 		model:                     cfg.Model,
 		modelRegistry:             cfg.ModelRegistry,
+		skillRealizer:             cfg.SkillRealizer,
 		modelSelector:             modelSelector,
 		providerResolver:          cfg.ProviderResolver,
 		threadModels:              map[string]string{},
@@ -887,6 +896,11 @@ func (r *Runner) Run(ctx context.Context, addr protocol.MessageAddress, user pro
 		r.setStickyModel(addr.ThreadID, name)
 		return true
 	})
+	// Per-turn skill-realizer seam: load_skill materializes a loaded skill's bundle
+	// files into the shared /skills dir. nil -> no-op (skills load body-only).
+	if r.skillRealizer != nil {
+		ctx = tools.WithSkillRealizer(ctx, r.skillRealizer)
+	}
 	// Per-turn tool set: static tools plus any provider-discovered ones (each
 	// ToolProvider is queried with the user's message for relevant tools).
 	tt := r.assembleTurnTools(ctx, addr, user)
