@@ -872,6 +872,21 @@ func (r *Runner) Run(ctx context.Context, addr protocol.MessageAddress, user pro
 	// Carry the current turn number so the assembler ages invoked skills against
 	// "now" (the in-flight turn), not the last turn already stamped in history.
 	ctx = compaction.WithTurnNumber(ctx, wsTurn)
+	// Per-turn model-preference seam: lets a tool (load_skill honoring a skill's
+	// preferred_model) pin the thread's model, best-effort. Bound to the model
+	// registry + the same sticky-pin /model uses; a no-op without a registry or for
+	// an unknown model. Pins for the thread → effective from the next turn (this
+	// turn's model was already resolved).
+	ctx = tools.WithModelPreference(ctx, func(name string) bool {
+		if name == "" || r.modelRegistry == nil {
+			return false
+		}
+		if _, ok := r.modelRegistry.Get(name); !ok {
+			return false
+		}
+		r.setStickyModel(addr.ThreadID, name)
+		return true
+	})
 	// Per-turn tool set: static tools plus any provider-discovered ones (each
 	// ToolProvider is queried with the user's message for relevant tools).
 	tt := r.assembleTurnTools(ctx, addr, user)

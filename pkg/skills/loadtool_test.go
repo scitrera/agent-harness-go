@@ -1,11 +1,14 @@
 package skills
 
 import (
+	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/scitrera/agent-harness-go/pkg/catalog"
+	"github.com/scitrera/agent-harness-go/pkg/tools"
 )
 
 func writePrereqSkill(t *testing.T, root, name string, prereqs []string) catalog.SkillSpec {
@@ -27,6 +30,54 @@ func writePrereqSkill(t *testing.T, root, name string, prereqs []string) catalog
 		t.Fatal(err)
 	}
 	return catalog.SkillSpec{Name: name, Path: path, Enabled: true}
+}
+
+func TestBuildRegistry_ParsesPreferredModel(t *testing.T) {
+	body := "---\nname: vis\ndescription: d\nmetadata:\n  scitrera:\n    preferred_model: sahara-vision-advanced\n---\nbody"
+	reg := BuildRegistry([]catalog.SkillSpec{{Name: "vis", Content: body, Enabled: true}}, t.TempDir())
+	if got := reg.byName["vis"].PreferredModel; got != "sahara-vision-advanced" {
+		t.Fatalf("PreferredModel = %q, want sahara-vision-advanced", got)
+	}
+}
+
+// load_skill honors the target skill's preferred_model via the ctx ModelPreference
+// seam: it calls the pin fn and reports model_switched only when the fn applied it.
+func TestLoadTool_PreferredModelSwitch(t *testing.T) {
+	withModel := "---\nname: vis\ndescription: d\nmetadata:\n  scitrera:\n    preferred_model: m-vision\n---\nbody"
+	plain := "---\nname: plain\ndescription: d\n---\nbody"
+	reg := BuildRegistry([]catalog.SkillSpec{
+		{Name: "vis", Content: withModel, Enabled: true},
+		{Name: "plain", Content: plain, Enabled: true},
+	}, t.TempDir())
+
+	load := func(t *testing.T, name string, available bool) (asked string, payload map[string]any) {
+		t.Helper()
+		ctx := tools.WithModelPreference(context.Background(), func(m string) bool {
+			asked = m
+			return available
+		})
+		res, err := LoadTool(reg)(ctx, tools.Request{Name: LoadToolName, Arguments: json.RawMessage(`{"name":"` + name + `"}`)})
+		if err != nil {
+			t.Fatalf("load %s: %v", name, err)
+		}
+		if err := json.Unmarshal(res.Payload, &payload); err != nil {
+			t.Fatalf("unmarshal payload: %v", err)
+		}
+		return asked, payload
+	}
+
+	// Available: pin fn called with the preferred model + result records the switch.
+	if asked, p := load(t, "vis", true); asked != "m-vision" || p["model_switched"] != "m-vision" {
+		t.Fatalf("available: asked=%q model_switched=%v", asked, p["model_switched"])
+	}
+	// Unavailable: pin fn is consulted but declines, so no switch is claimed.
+	if asked, p := load(t, "vis", false); asked != "m-vision" || p["model_switched"] != nil {
+		t.Fatalf("unavailable: asked=%q model_switched=%v (want none)", asked, p["model_switched"])
+	}
+	// No preferred_model: the pin fn is never called.
+	if asked, p := load(t, "plain", true); asked != "" || p["model_switched"] != nil {
+		t.Fatalf("plain: asked=%q model_switched=%v (want none)", asked, p["model_switched"])
+	}
 }
 
 func TestLoadOrder_TransitivePrereqsDedupTargetLast(t *testing.T) {

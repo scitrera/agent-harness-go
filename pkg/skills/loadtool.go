@@ -39,6 +39,10 @@ type LoadableSkill struct {
 	Path        string
 	Body        string
 	Prereqs     []string
+	// PreferredModel is the skill's declared default model (metadata.scitrera.
+	// preferred_model). When set and available, load_skill pins the thread to it —
+	// no-op otherwise. "" means no preference.
+	PreferredModel string
 	// AllowedTools is the skill's declared tool scope (parsed from the SKILL.md
 	// `allowed-tools` frontmatter key). Surfaced to the model in the load_skill
 	// result only — NOT enforced; tool-call restriction against this list is a
@@ -72,7 +76,8 @@ func (r *Registry) DirectPrereqs() map[string][]string {
 type skillFrontmatter struct {
 	Metadata struct {
 		Scitrera struct {
-			PrereqSkills []string `yaml:"prereq_skills"`
+			PrereqSkills   []string `yaml:"prereq_skills"`
+			PreferredModel string   `yaml:"preferred_model"`
 		} `yaml:"scitrera"`
 	} `yaml:"metadata"`
 }
@@ -95,12 +100,13 @@ func BuildRegistry(specs []catalog.SkillSpec, workspaceRoot string) *Registry {
 			continue
 		}
 		r.byName[s.Name] = &LoadableSkill{
-			Name:         s.Name,
-			Description:  s.Description,
-			Path:         s.Path,
-			Body:         body,
-			Prereqs:      parsePrereqs(body),
-			AllowedTools: s.AllowedTools,
+			Name:           s.Name,
+			Description:    s.Description,
+			Path:           s.Path,
+			Body:           body,
+			Prereqs:        parsePrereqs(body),
+			PreferredModel: parsePreferredModel(body),
+			AllowedTools:   s.AllowedTools,
 		}
 		r.order = append(r.order, s.Name)
 	}
@@ -172,6 +178,21 @@ func parsePrereqs(body string) []string {
 		}
 	}
 	return out
+}
+
+// parsePreferredModel extracts metadata.scitrera.preferred_model from a SKILL.md's
+// leading `---` YAML frontmatter block ("" when absent). load_skill switches the
+// thread to this model when it is registered/available.
+func parsePreferredModel(body string) string {
+	block, ok := frontmatterBlock(body)
+	if !ok {
+		return ""
+	}
+	var fm skillFrontmatter
+	if err := yaml.Unmarshal([]byte(block), &fm); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(fm.Metadata.Scitrera.PreferredModel)
 }
 
 // frontmatterBlock returns the YAML between the leading `---` fences, if present.
@@ -290,10 +311,20 @@ func LoadTool(reg *Registry) tools.HandlerFunc {
 				sink.RecordInvokedSkill(sk.Name, sk.Path)
 			}
 		}
-		return jsonResult(req, struct {
-			Skills   []loadedSkillOut `json:"skills"`
-			Warnings []string         `json:"warnings,omitempty"`
-		}{Skills: out, Warnings: warnings}, false)
+		res := struct {
+			Skills        []loadedSkillOut `json:"skills"`
+			Warnings      []string         `json:"warnings,omitempty"`
+			ModelSwitched string           `json:"model_switched,omitempty"`
+		}{Skills: out, Warnings: warnings}
+		// Honor the TARGET skill's preferred_model: pin the thread's model when it's
+		// available (best-effort — no-op without a model registry / preference fn, or
+		// if the model isn't registered). Effective from the next turn, like /model.
+		if target := reg.byName[name]; target != nil && target.PreferredModel != "" {
+			if pref, ok := tools.ModelPreferenceFrom(ctx); ok && pref(target.PreferredModel) {
+				res.ModelSwitched = target.PreferredModel
+			}
+		}
+		return jsonResult(req, res, false)
 	}
 }
 
