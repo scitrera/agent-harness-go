@@ -74,10 +74,46 @@ func TestBuildBaseOverride(t *testing.T) {
 }
 
 func TestBuildSkillSection(t *testing.T) {
+	// Without load_skill: instruct read_file and list the path.
 	p := Build(Input{Skills: []SkillSummary{{Name: "contract-review", Description: "review a contract", Path: "/workspace/.memorylayer-skills/contract-review/SKILL.md"}}})
 	for _, want := range []string{"## Skills", "contract-review: review a contract", "read: /workspace/.memorylayer-skills/contract-review/SKILL.md", "read_file"} {
 		if !strings.Contains(p.StablePrefix, want) {
 			t.Fatalf("skill section missing %q: %s", want, p.StablePrefix)
+		}
+	}
+	if strings.Contains(p.StablePrefix, "load_skill") {
+		t.Fatalf("read_file mode should not mention load_skill: %s", p.StablePrefix)
+	}
+}
+
+func TestBuildSkillSectionHiddenHint(t *testing.T) {
+	skills := []SkillSummary{{Name: "contract-review", Description: "review a contract"}}
+	// With hidden > 0, a "+N more" hint appears.
+	p := Build(Input{SkillLoadTool: true, SkillsDynamic: true, Skills: skills, SkillsHidden: 7})
+	if !strings.Contains(p.DynamicSuffix, "+7 more skill(s) available but not shown") {
+		t.Fatalf("expected hidden-skills hint, got: %s", p.DynamicSuffix)
+	}
+	// With hidden == 0, no hint.
+	q := Build(Input{SkillLoadTool: true, SkillsDynamic: true, Skills: skills})
+	if strings.Contains(q.DynamicSuffix, "more skill(s) available") {
+		t.Fatalf("hint rendered with nothing hidden: %s", q.DynamicSuffix)
+	}
+}
+
+func TestBuildSkillSectionLoadTool(t *testing.T) {
+	// With load_skill registered: instruct load-by-name and DON'T leak the path.
+	p := Build(Input{
+		SkillLoadTool: true,
+		Skills:        []SkillSummary{{Name: "contract-review", Description: "review a contract", Path: "/workspace/.memorylayer-skills/contract-review/SKILL.md"}},
+	})
+	for _, want := range []string{"## Skills", "contract-review: review a contract", "load_skill"} {
+		if !strings.Contains(p.StablePrefix, want) {
+			t.Fatalf("skill section missing %q: %s", want, p.StablePrefix)
+		}
+	}
+	for _, absent := range []string{"read_file", "read: /workspace"} {
+		if strings.Contains(p.StablePrefix, absent) {
+			t.Fatalf("load_skill mode should not contain %q: %s", absent, p.StablePrefix)
 		}
 	}
 }
@@ -99,6 +135,34 @@ func TestBuildToolSection(t *testing.T) {
 	p := Build(Input{Tools: []ToolSummary{{Name: "read_file", Description: "read a file"}}})
 	if !strings.Contains(p.StablePrefix, "## Tools") || !strings.Contains(p.StablePrefix, "read_file: read a file") {
 		t.Fatalf("tool section missing: %s", p.StablePrefix)
+	}
+}
+
+func TestBuildAttachmentsSection(t *testing.T) {
+	p := Build(Input{Attachments: []AttachmentSummary{
+		{Name: "report.pdf", Mime: "application/pdf", Size: 245760, Purpose: "document", Path: "/workspace/vfs/downloads/vfs_a/report.pdf"},
+		{Name: "notes.txt", Mime: "text/plain", Size: 512, Purpose: "attachment", Path: "/workspace/vfs/downloads/vfs_b/notes.txt"},
+	}})
+	// Split into two sections by purpose, each with name/mime/size/path.
+	for _, want := range []string{
+		"## Attached documents",
+		"report.pdf — application/pdf, 240.0 KiB — /workspace/vfs/downloads/vfs_a/report.pdf",
+		"## Attached files",
+		"notes.txt — text/plain, 512 B — /workspace/vfs/downloads/vfs_b/notes.txt",
+	} {
+		if !strings.Contains(p.DynamicSuffix, want) {
+			t.Fatalf("attachments section missing %q: %s", want, p.DynamicSuffix)
+		}
+	}
+	// Documents are listed before plain files.
+	docIdx := strings.Index(p.DynamicSuffix, "## Attached documents")
+	fileIdx := strings.Index(p.DynamicSuffix, "## Attached files")
+	if docIdx < 0 || fileIdx < 0 || docIdx > fileIdx {
+		t.Fatalf("section order wrong: docIdx=%d fileIdx=%d", docIdx, fileIdx)
+	}
+	// Empty -> no section at all.
+	if off := Build(Input{}); strings.Contains(off.DynamicSuffix, "## Attached") {
+		t.Fatalf("attachments section rendered with no attachments: %s", off.DynamicSuffix)
 	}
 }
 

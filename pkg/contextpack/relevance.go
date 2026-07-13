@@ -79,6 +79,11 @@ type SkillRelevanceResult struct {
 	// (dedup) or unresolvable, and caps the total injected bytes — so a provider
 	// may nominate freely.
 	Realize []string
+	// Suppressed counts catalog skills the provider omitted from Listed because they
+	// are prerequisites of a shown skill (they auto-load with it). The assembler
+	// excludes these from the "+N more available" hint — a covered prerequisite is
+	// not a coverage gap. 0 when the provider does no prerequisite suppression.
+	Suppressed int
 }
 
 // SkillBodyResolver returns a skill's SKILL.md body by name for auto-realization.

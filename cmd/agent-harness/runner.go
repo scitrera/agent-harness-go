@@ -65,6 +65,13 @@ func buildRunner(cfg appConfig, pub channel.Publisher, approvals approval.Awaite
 
 	fsStore := store.NewFileStore(cfg.workspaceRoot, cfg.stateDir)
 	skillSpecs, skillWarnings, _ := skills.DiscoverWithWarnings(cfg.workspaceRoot, []string{"skills", ".agent-harness-skills"})
+	// Register load_skill so the model loads a skill by name — resolving its file
+	// and any prerequisite skills — instead of read_file'ing the path. The same
+	// mechanism the sahara distribution uses; nothing about it is distribution-specific.
+	skillReg := skills.BuildRegistry(skillSpecs, cfg.workspaceRoot)
+	if err := reg.Register(skills.LoadToolName, skills.LoadTool(skillReg)); err != nil {
+		return nil, nil, fmt.Errorf("register load_skill: %w", err)
+	}
 	cmdSpecs, _ := commands.Discover(cfg.workspaceRoot, []string{"commands", ".agent-harness-commands"})
 
 	// Pluggable compaction: default to the evict→classic composite (evicts oversized
@@ -86,6 +93,8 @@ func buildRunner(cfg appConfig, pub channel.Publisher, approvals approval.Awaite
 			MaxFileBytes:       16 << 10,
 			Compactor:          compactor,
 			Skills:             skillSummaries(skillSpecs),
+			SkillLoadTool:      true,
+			SkillBodies:        skillReg.Body,
 			SkillLoadWarnings:  skillWarnings,
 			WorkspaceDir:       cfg.workspaceRoot,
 			Model:              cfg.model,

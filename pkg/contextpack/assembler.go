@@ -3,6 +3,7 @@ package contextpack
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/scitrera/agent-harness-go/pkg/bootstrap"
@@ -10,6 +11,18 @@ import (
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 	"github.com/scitrera/agent-harness-go/pkg/sysprompt"
 )
+
+// AttachmentPreparer materializes the non-image files referenced in the turn's
+// messages (side effect: blobs to disk) and returns their summaries for the
+// system prompt, so the model is told what it was given and can open it with its
+// file tools. Images are handled separately by the turn.AttachmentResolver, not
+// here. The oss core ships no implementation (it can't fetch a vfs_ref); a
+// distribution wires one over its own transport. A nil provider -> no attachment
+// section (today's behavior). A returned error is non-fatal: Build logs it and
+// omits the section rather than failing the turn.
+type AttachmentPreparer interface {
+	PrepareAttachments(ctx context.Context, messages []protocol.ChatMessage) ([]sysprompt.AttachmentSummary, error)
+}
 
 type Config struct {
 	MaxHistoryMessages int
@@ -28,6 +41,11 @@ type Config struct {
 	// InvokedSkillTTL bounds how many turns a load_skill invocation stays listed
 	// in the "## Loaded skills" prompt section. 0 -> defaultInvokedSkillTTL.
 	InvokedSkillTTL int
+
+	// AttachmentPreparer, when set, materializes the current turn's non-image
+	// attachments and returns their summaries for the "## Attached documents/files"
+	// prompt sections. nil -> no attachment section (today's behavior).
+	AttachmentPreparer AttachmentPreparer
 
 	// SkillRelevance, when set, ranks/selects the skills listed each turn and may
 	// nominate skills to auto-realize (inject their body). nil -> the full Skills
@@ -48,7 +66,10 @@ type Config struct {
 	Base      string
 	Tools     []sysprompt.ToolSummary
 	Subagents bool // spawn_subagent available → emit delegation guidance
-	Skills    []sysprompt.SkillSummary
+	// SkillLoadTool reports that the load_skill tool is registered, so the skills
+	// listing instructs the model to load by name (not read_file the path).
+	SkillLoadTool bool
+	Skills        []sysprompt.SkillSummary
 	// SkillLoadWarnings surfaces the untrusted skill-load warnings collected by
 	// skills.DiscoverWithWarnings (malformed name, over-cap SKILL.md, dropped
 	// duplicate). Rendered as an escaped, explicitly-untrusted prompt section.
@@ -123,9 +144,9 @@ func (a Assembler) workingState(ctx context.Context, history []protocol.ChatMess
 // dynamic suffix), and any skill bodies to auto-realize this turn. With no
 // provider — or on a provider error — it returns the full catalog unchanged, not
 // dynamic, and nothing auto-loaded (today's behavior).
-func (a Assembler) applyRelevance(ctx context.Context, history []protocol.ChatMessage, realized []sysprompt.LoadedSkill) ([]sysprompt.SkillSummary, bool, []sysprompt.AutoLoadedSkill) {
+func (a Assembler) applyRelevance(ctx context.Context, history []protocol.ChatMessage, realized []sysprompt.LoadedSkill) ([]sysprompt.SkillSummary, bool, []sysprompt.AutoLoadedSkill, int) {
 	if a.cfg.SkillRelevance == nil || len(a.cfg.Skills) == 0 {
-		return a.cfg.Skills, false, nil
+		return a.cfg.Skills, false, nil, 0
 	}
 	turn := 0
 	if n, ok := compaction.TurnNumberFrom(ctx); ok {
@@ -138,10 +159,10 @@ func (a Assembler) applyRelevance(ctx context.Context, history []protocol.ChatMe
 		Turn:      turn,
 	})
 	if err != nil {
-		return a.cfg.Skills, false, nil
+		return a.cfg.Skills, false, nil, 0
 	}
 	skills, dynamic := a.rankedListing(res)
-	return skills, dynamic, a.autoRealize(res.Realize, realized)
+	return skills, dynamic, a.autoRealize(res.Realize, realized), res.Suppressed
 }
 
 // rankedListing turns a provider result into the skills to list. An empty ranking
@@ -250,19 +271,43 @@ func (a Assembler) Build(ctx context.Context, bootstrap []bootstrap.File, histor
 	// Relevance seam: a provider may reorder/replace the listed skills and inject
 	// relevant skill bodies. Default (nil provider) keeps the full catalog in the
 	// cacheable prefix and auto-realizes nothing — identical to before.
-	promptSkills, skillsDynamic, autoLoaded := a.applyRelevance(ctx, history, wsSkills)
+	promptSkills, skillsDynamic, autoLoaded, suppressed := a.applyRelevance(ctx, history, wsSkills)
+	// A relevance provider in ListReplace mode lists fewer skills than the catalog;
+	// the difference is surfaced as a "+N more available" hint so the model knows the
+	// listing is a filtered subset. Skills suppressed as prerequisites of a shown
+	// skill are excluded — they auto-load with their dependent, so they're not a
+	// coverage gap. Refine/nil-provider list the full catalog -> 0.
+	skillsHidden := len(a.cfg.Skills) - len(promptSkills) - suppressed
+	if skillsHidden < 0 {
+		skillsHidden = 0
+	}
+	// Attachment seam: a distribution may materialize the current turn's non-image
+	// attachments and surface them as a prompt listing. Default (nil) adds nothing.
+	// A failure is non-fatal — the turn proceeds without the section.
+	var attachments []sysprompt.AttachmentSummary
+	if a.cfg.AttachmentPreparer != nil {
+		atts, aerr := a.cfg.AttachmentPreparer.PrepareAttachments(ctx, history)
+		if aerr != nil {
+			slog.WarnContext(ctx, "contextpack: prepare attachments failed; omitting section", slog.Any("err", aerr))
+		} else {
+			attachments = atts
+		}
+	}
 	sysMsg, err := sysprompt.Build(sysprompt.Input{
 		Base:                a.cfg.Base,
 		Bootstrap:           bootstrap,
 		Tools:               a.cfg.Tools,
 		Skills:              promptSkills,
 		SkillsDynamic:       skillsDynamic,
+		SkillLoadTool:       a.cfg.SkillLoadTool,
+		SkillsHidden:        skillsHidden,
 		AutoLoadedSkills:    autoLoaded,
 		SkillLoadWarnings:   a.cfg.SkillLoadWarnings,
 		LoadedSkills:        wsSkills,
 		RecentFiles:         wsFiles,
 		Todos:               wsTodos,
 		Subagents:           wsSubagents,
+		Attachments:         attachments,
 		RequestInstructions: systemPromptExtraFrom(ctx),
 		MemoryTools:         a.cfg.MemoryTools,
 		SubagentsEnabled:    a.cfg.Subagents,

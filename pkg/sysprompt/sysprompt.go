@@ -97,6 +97,21 @@ type SubagentLine struct {
 	AgeTurns int
 }
 
+// AttachmentSummary is a non-image file the user attached to the current turn's
+// message — an "attachment" (a novel upload) or a "document" (already
+// preprocessed by MemoryLayer). The harness materializes it to disk and lists it
+// here so the model knows what it was given and can open it with its file tools;
+// the bytes are NOT inlined into the request (only images are). Path is an
+// absolute, tool-readable location; Purpose is the spec FilePart purpose
+// ("document"/"attachment"/"").
+type AttachmentSummary struct {
+	Name    string
+	Mime    string
+	Size    int64
+	Purpose string
+	Path    string
+}
+
 // Input is the data composed into the system prompt.
 type Input struct {
 	Base      string // base instructions; DefaultBase if empty
@@ -106,7 +121,17 @@ type Input struct {
 	// SkillsDynamic renders the "## Skills" listing in the dynamic suffix rather
 	// than the cacheable prefix — set when a relevance provider makes the listing
 	// per-turn. Off (default) keeps the full catalog in the stable, cacheable prefix.
-	SkillsDynamic    bool
+	SkillsDynamic bool
+	// SkillLoadTool reports that the load_skill tool is registered, so the "## Skills"
+	// section instructs the model to load a skill by name (load_skill resolves the
+	// file + prerequisites) instead of reading its file directly. Off -> the model is
+	// told to read_file the skill path (the path is then listed per skill).
+	SkillLoadTool bool
+	// SkillsHidden is the count of catalog skills NOT shown in the listing because a
+	// relevance provider capped it (ListReplace). >0 renders a "+N more available"
+	// hint so the model knows the listing is a relevance-filtered subset, not the
+	// whole catalog. 0 -> no hint.
+	SkillsHidden     int
 	AutoLoadedSkills []AutoLoadedSkill // bodies injected this turn by a relevance provider (dynamic)
 	LoadedSkills     []LoadedSkill     // previously loaded via load_skill (dynamic; carries age)
 	// SkillLoadWarnings are skill-discovery validation warnings (see
@@ -117,6 +142,11 @@ type Input struct {
 	RecentFiles       []RecentFile   // files written/edited this session (dynamic; carries age)
 	Todos             []TodoLine     // the agent's todo board (dynamic; carries age)
 	Subagents         []SubagentLine // sub-agents delegated to this session (dynamic; carries age)
+	// Attachments are the non-image files attached to the current turn's user
+	// message, materialized to disk and surfaced as a text listing (name/mime/size
+	// + on-disk path) so the model can open them with its file tools. Images are
+	// delivered inline (not listed here). Per-turn (dynamic); empty -> omitted.
+	Attachments []AttachmentSummary
 	// RequestInstructions are per-turn caller-supplied instructions (e.g. an
 	// agent.synthesize one-shot's options.system/instructions), rendered as the
 	// last, highest-salience suffix section. Authenticated request config; empty ->
@@ -196,7 +226,7 @@ func Build(in Input) Prompt {
 	// The skills listing stays in the cacheable prefix by default. A relevance
 	// provider makes it per-turn (SkillsDynamic) → render it in the suffix instead.
 	if !in.SkillsDynamic {
-		if section := skillSection(in.Skills); section != "" {
+		if section := skillSection(in.Skills, in.SkillLoadTool, in.SkillsHidden); section != "" {
 			prefix.WriteString("\n\n")
 			prefix.WriteString(section)
 		}
@@ -212,7 +242,7 @@ func Build(in Input) Prompt {
 
 	var dynamicSkills string
 	if in.SkillsDynamic {
-		dynamicSkills = skillSection(in.Skills)
+		dynamicSkills = skillSection(in.Skills, in.SkillLoadTool, in.SkillsHidden)
 	}
 	return Prompt{
 		StablePrefix: prefix.String(),
@@ -225,9 +255,89 @@ func Build(in Input) Prompt {
 			recentFilesSection(in.RecentFiles),
 			todosSection(in.Todos),
 			subagentsSection(in.Subagents),
+			attachmentsSection(in.Attachments),
 			requestInstructionsSection(in.RequestInstructions),
 		),
 	}
+}
+
+// attachmentsSection lists the non-image files attached to the current turn,
+// split into documents (already preprocessed) and plain attachments (novel
+// uploads), each with mime/size and the on-disk path the model can read with its
+// file tools. The bytes are not inlined (only images are); this tells the model
+// what it was given so it can open, parse, or otherwise act on each file. Omitted
+// when empty.
+func attachmentsSection(atts []AttachmentSummary) string {
+	if len(atts) == 0 {
+		return ""
+	}
+	var docs, files []AttachmentSummary
+	for _, a := range atts {
+		if a.Purpose == "document" {
+			docs = append(docs, a)
+		} else {
+			files = append(files, a)
+		}
+	}
+	var b strings.Builder
+	writeList := func(heading, intro string, list []AttachmentSummary) {
+		if len(list) == 0 {
+			return
+		}
+		if b.Len() > 0 {
+			b.WriteString("\n\n")
+		}
+		b.WriteString(heading)
+		b.WriteString("\n")
+		b.WriteString(intro)
+		for _, a := range list {
+			b.WriteString("\n- ")
+			b.WriteString(attachmentLine(a))
+		}
+	}
+	writeList("## Attached documents",
+		"The user attached these documents (already preprocessed and materialized on disk). Read them with your file tools as needed:", docs)
+	writeList("## Attached files",
+		"The user attached these files (materialized on disk). Read them with your file tools as needed:", files)
+	return b.String()
+}
+
+// attachmentLine renders one attachment as "name — mime, size — /abs/path",
+// omitting any component that is absent.
+func attachmentLine(a AttachmentSummary) string {
+	name := a.Name
+	if name == "" {
+		name = "(unnamed)"
+	}
+	var meta []string
+	if a.Mime != "" {
+		meta = append(meta, a.Mime)
+	}
+	if a.Size > 0 {
+		meta = append(meta, humanizeBytes(a.Size))
+	}
+	line := name
+	if len(meta) > 0 {
+		line += " — " + strings.Join(meta, ", ")
+	}
+	if a.Path != "" {
+		line += " — " + a.Path
+	}
+	return line
+}
+
+// humanizeBytes formats a byte count as a compact human-readable size.
+func humanizeBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for m := n / unit; m >= unit; m /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
 }
 
 // requestInstructionsSection renders per-turn caller-supplied instructions (e.g. an
@@ -460,13 +570,20 @@ You have durable memory across sessions. Use it on demand:
 
 Call memory_search before assuming something is unknown or asking the user to repeat context. Use recalled facts to inform your answer, and prefer them over guessing.`
 
-func skillSection(skills []SkillSummary) string {
+func skillSection(skills []SkillSummary, useLoadTool bool, hidden int) string {
 	if len(skills) == 0 {
 		return ""
 	}
 	var b strings.Builder
 	b.WriteString("## Skills\n")
-	b.WriteString("Specialized instructions you can load on demand. When a task matches one, read its file with the read_file tool and follow it.\n")
+	if useLoadTool {
+		// load_skill is registered: it resolves the skill by name and auto-loads any
+		// prerequisites, so the model must not read the file directly (and the path
+		// is omitted below so it isn't tempted to).
+		b.WriteString("Specialized instructions you can load on demand. When a task matches one, load it by name with the load_skill tool — it resolves the skill's file and loads any prerequisite skills first. Do not read the skill file yourself.\n")
+	} else {
+		b.WriteString("Specialized instructions you can load on demand. When a task matches one, read its file with the read_file tool and follow it.\n")
+	}
 	for _, s := range skills {
 		b.WriteString("- ")
 		b.WriteString(s.Name)
@@ -479,12 +596,20 @@ func skillSection(skills []SkillSummary) string {
 			b.WriteString(s.Note)
 			b.WriteString("]")
 		}
-		if s.Path != "" {
+		// Only surface the on-disk path when the model is expected to read_file it;
+		// with load_skill the name is the handle and the path would just invite a
+		// direct read.
+		if !useLoadTool && s.Path != "" {
 			b.WriteString(" (read: ")
 			b.WriteString(s.Path)
 			b.WriteString(")")
 		}
 		b.WriteString("\n")
+	}
+	// Signal that the listing is a relevance-filtered subset, not the whole catalog,
+	// so the model knows more skills exist beyond the ones shown.
+	if hidden > 0 {
+		b.WriteString(fmt.Sprintf("\n(+%d more skill(s) available but not shown — filtered by relevance to the current request.)", hidden))
 	}
 	return strings.TrimRight(b.String(), "\n")
 }

@@ -52,6 +52,20 @@ type Registry struct {
 	order  []string
 }
 
+// DirectPrereqs returns each skill's declared direct prerequisite names (from
+// metadata.scitrera.prereq_skills). Skills with no prerequisites are omitted. A
+// relevance strategy uses this to avoid listing a prerequisite that a shown,
+// higher-ranked dependent will auto-load. The returned map + slices are copies.
+func (r *Registry) DirectPrereqs() map[string][]string {
+	out := make(map[string][]string, len(r.byName))
+	for name, sk := range r.byName {
+		if len(sk.Prereqs) > 0 {
+			out[name] = append([]string(nil), sk.Prereqs...)
+		}
+	}
+	return out
+}
+
 // skillFrontmatter is the subset of SKILL.md YAML frontmatter load_skill needs.
 // yaml.v3 ignores unknown keys, so existing SKILL.md files (no prereqs) parse
 // fine and yield an empty slice.
