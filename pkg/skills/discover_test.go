@@ -72,6 +72,48 @@ func TestDiscoverFoldedDescription(t *testing.T) {
 	}
 }
 
+// A realistic "when to use this" description (well over the old 240 cap) is kept
+// in full and produces NO warning — long descriptions are not load failures.
+func TestDiscoverLongDescriptionKeptAndNotWarned(t *testing.T) {
+	root := t.TempDir()
+	desc := strings.TrimSpace(strings.Repeat("word ", 120)) // ~595 chars
+	writeSkill(t, root, "skills", "welcome", "---\nname: welcome\ndescription: "+desc+"\n---\nbody")
+	specs, warnings, err := DiscoverWithWarnings(root, []string{"skills"})
+	if err != nil {
+		t.Fatalf("discover: %v", err)
+	}
+	if len(specs) != 1 || specs[0].Description != desc {
+		t.Fatalf("description not kept in full: %q", specs[0].Description)
+	}
+	for _, w := range warnings {
+		if strings.Contains(w, "description") {
+			t.Fatalf("a long description must not warn: %q", w)
+		}
+	}
+}
+
+// An oversize description is silently truncated (rune-bounded, ellipsis) with no
+// warning.
+func TestDiscoverOversizeDescriptionSilentlyTruncated(t *testing.T) {
+	root := t.TempDir()
+	writeSkill(t, root, "skills", "big", "---\nname: big\ndescription: "+strings.Repeat("x", 2000)+"\n---\nbody")
+	specs, warnings, err := DiscoverWithWarnings(root, []string{"skills"})
+	if err != nil {
+		t.Fatalf("discover: %v", err)
+	}
+	if len(specs) != 1 || !strings.HasSuffix(specs[0].Description, "…") {
+		t.Fatalf("expected truncation ellipsis, got %q", specs[0].Description)
+	}
+	if n := len([]rune(specs[0].Description)); n > maxDescription+1 {
+		t.Fatalf("description not bounded: %d runes (cap %d)", n, maxDescription)
+	}
+	for _, w := range warnings {
+		if strings.Contains(w, "description") {
+			t.Fatalf("truncation must not warn: %q", w)
+		}
+	}
+}
+
 func TestDiscoverDedupFirstDirWins(t *testing.T) {
 	root := t.TempDir()
 	writeSkill(t, root, ".memorylayer-skills", "shared", "---\nname: shared\ndescription: from primary\n---\n")

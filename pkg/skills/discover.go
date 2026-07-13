@@ -18,9 +18,14 @@ import (
 )
 
 const (
-	skillFileName  = "SKILL.md"
-	maxSkillBytes  = 16 << 10
-	maxDescription = 240
+	skillFileName = "SKILL.md"
+	maxSkillBytes = 16 << 10
+	// maxDescription bounds the per-skill description shown in the "## Skills"
+	// listing. A skill's `description` frontmatter is a "when to use this" blurb
+	// (the relevance signal the model + the ranker read), routinely 400-600 chars,
+	// so this is generous — it's a prompt-size guard, not a spec limit. Over-length
+	// descriptions are silently truncated (not a load failure), measured in runes.
+	maxDescription = 1024
 	maxSkills      = 128
 	// maxWarnings/maxWarningLen bound the injection-safe warnings collected by
 	// DiscoverWithWarnings: these strings are derived from untrusted on-disk
@@ -46,10 +51,11 @@ func Discover(workspaceRoot string, dirs []string) ([]catalog.SkillSpec, error) 
 // DiscoverWithWarnings does everything Discover does, and additionally collects
 // human-readable warnings for skill folders that look like skills but fail
 // validation: an unreadable/over-cap SKILL.md, a frontmatter name that doesn't
-// match skillNameRe or doesn't equal the folder name, a duplicate name
-// (collision dropped), or an over-cap description. Warnings never change which
-// skills are returned (name/description validation is advisory) except for the
-// duplicate case, which already dropped the skill before this change.
+// match skillNameRe or doesn't equal the folder name, or a duplicate name
+// (collision dropped). Warnings never change which skills are returned (name
+// validation is advisory) except for the duplicate case, which already dropped
+// the skill before this change. A long description is NOT a warning — it is
+// silently truncated for the listing (see parseSkillMeta), not a load failure.
 //
 // Warnings are derived from untrusted on-disk content (a workspace file an
 // attacker controls could shape them), so they are kept factual and bounded
@@ -116,9 +122,6 @@ func DiscoverWithWarnings(workspaceRoot string, dirs []string) ([]catalog.SkillS
 			if meta.rawName != "" && (!skillNameRe.MatchString(meta.rawName) || meta.rawName != sub) {
 				warn("skill %q: frontmatter name %q must be lowercase-hyphenated and match the folder name", sub, meta.rawName)
 			}
-			if meta.descriptionOverCap {
-				warn("skill %q: description exceeds %d chars; truncated", sub, maxDescription)
-			}
 			if meta.name == "" {
 				continue
 			}
@@ -169,11 +172,10 @@ func readCapped(path string) (content string, overCap bool, err error) {
 
 // skillMeta is the result of parsing a SKILL.md's frontmatter + body.
 type skillMeta struct {
-	name               string // resolved name (frontmatter name: else folder name)
-	rawName            string // frontmatter `name:` as written, empty if absent
-	description        string
-	descriptionOverCap bool
-	allowedTools       []string
+	name         string // resolved name (frontmatter name: else folder name)
+	rawName      string // frontmatter `name:` as written, empty if absent
+	description  string
+	allowedTools []string
 }
 
 // skillMetaFrontmatter is the SKILL.md frontmatter subset discovery surfaces:
@@ -217,9 +219,9 @@ func parseSkillMeta(content, folderName string) skillMeta {
 			break
 		}
 	}
-	if len(m.description) > maxDescription {
-		m.description = m.description[:maxDescription] + "…"
-		m.descriptionOverCap = true
+	// Silent, rune-safe truncation to bound the prompt listing (not a load failure).
+	if runes := []rune(m.description); len(runes) > maxDescription {
+		m.description = string(runes[:maxDescription]) + "…"
 	}
 	return m
 }
