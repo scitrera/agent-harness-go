@@ -580,7 +580,7 @@ func skillSection(skills []SkillSummary, useLoadTool bool, hidden int) string {
 		// load_skill is registered: it resolves the skill by name and auto-loads any
 		// prerequisites, so the model must not read the file directly (and the path
 		// is omitted below so it isn't tempted to).
-		b.WriteString("Specialized instructions you can load on demand. When a task matches one, load it by name with the load_skill tool — it resolves the skill's file and loads any prerequisite skills first. Do not read the skill file yourself.\n")
+		b.WriteString("Specialized instructions you can load on demand. When a task matches one, load it by name with the load_skill tool — it resolves the skill's file and loads any prerequisite skills first. Do not read the skill file yourself. To load a skill, call load_skill with its exact name from the list below (e.g. name: \"" + exampleSkillName(skills) + "\").\n")
 	} else {
 		b.WriteString("Specialized instructions you can load on demand. When a task matches one, read its file with the read_file tool and follow it.\n")
 	}
@@ -612,6 +612,16 @@ func skillSection(skills []SkillSummary, useLoadTool bool, hidden int) string {
 		b.WriteString(fmt.Sprintf("\n(+%d more skill(s) available but not shown — filtered by relevance to the current request.)", hidden))
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+// exampleSkillName picks a concrete skill name for the load_skill usage example —
+// the first listed (most relevant after ranking). Falls back to a placeholder,
+// though skillSection only calls this with a non-empty list.
+func exampleSkillName(skills []SkillSummary) string {
+	if len(skills) > 0 && skills[0].Name != "" {
+		return skills[0].Name
+	}
+	return "skill-name"
 }
 
 // contextFileOrder mirrors OpenClaw's precedence: lower sorts first; unknown

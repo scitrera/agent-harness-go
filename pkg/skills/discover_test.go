@@ -54,6 +54,24 @@ func TestDiscoverFrontmatterAndFallback(t *testing.T) {
 	}
 }
 
+// A YAML folded block scalar (description: >-) must resolve to its folded text,
+// not leak the ">-" indicator, and multi-line content collapses to one line.
+func TestDiscoverFoldedDescription(t *testing.T) {
+	root := t.TempDir()
+	writeSkill(t, root, "skills", "welcome",
+		"---\nname: welcome\ndescription: >-\n  Greet the user and\n  bootstrap the session.\n---\n# Welcome\nbody")
+	specs, err := Discover(root, []string{"skills"})
+	if err != nil {
+		t.Fatalf("discover: %v", err)
+	}
+	if len(specs) != 1 {
+		t.Fatalf("want 1 skill, got %d", len(specs))
+	}
+	if got := specs[0].Description; got != "Greet the user and bootstrap the session." {
+		t.Fatalf("folded description mis-parsed: %q", got)
+	}
+}
+
 func TestDiscoverDedupFirstDirWins(t *testing.T) {
 	root := t.TempDir()
 	writeSkill(t, root, ".memorylayer-skills", "shared", "---\nname: shared\ndescription: from primary\n---\n")

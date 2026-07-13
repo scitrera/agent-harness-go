@@ -176,37 +176,39 @@ type skillMeta struct {
 	allowedTools       []string
 }
 
-// parseSkillMeta derives name + description from YAML-ish frontmatter (name:,
+// skillMetaFrontmatter is the SKILL.md frontmatter subset discovery surfaces:
+// name, description, and the optional allowed-tools scope. Parsed via yaml.v3 so
+// folded/literal block scalars (`description: >-` with the text on the following
+// indented lines) and quoted values resolve to their real content instead of
+// leaking the YAML block indicator.
+type skillMetaFrontmatter struct {
+	Name         string           `yaml:"name"`
+	Description  string           `yaml:"description"`
+	AllowedTools allowedToolsList `yaml:"allowed-tools"`
+}
+
+// parseSkillMeta derives name + description from YAML frontmatter (name:,
 // description:) when present, else falls back to the folder name and the first
 // meaningful body line. It also parses the optional `allowed-tools` frontmatter
-// key (YAML list or comma-separated string) via yaml.v3.
+// key (YAML list or comma-separated string). All three come from a single yaml.v3
+// parse so block scalars are handled correctly.
 func parseSkillMeta(content, folderName string) skillMeta {
 	m := skillMeta{name: folderName}
-	lines := strings.Split(content, "\n")
-	body := lines
-	if len(lines) > 0 && strings.TrimSpace(lines[0]) == "---" {
-		for i := 1; i < len(lines); i++ {
-			if strings.TrimSpace(lines[i]) == "---" {
-				body = lines[i+1:]
-				break
-			}
-			if k, v, ok := splitKV(lines[i]); ok {
-				switch strings.ToLower(k) {
-				case "name":
-					if v != "" {
-						m.name = v
-						m.rawName = v
-					}
-				case "description":
-					if v != "" {
-						m.description = v
-					}
-				}
-			}
-		}
+	var fm skillMetaFrontmatter
+	if block, ok := frontmatterBlock(content); ok {
+		_ = yaml.Unmarshal([]byte(block), &fm) // best-effort: malformed -> fall back
 	}
+	if name := strings.TrimSpace(fm.Name); name != "" {
+		m.name = name
+		m.rawName = name
+	}
+	// Collapse the whitespace a folded/literal scalar preserves so a multi-line
+	// description renders on a single prompt line.
+	m.description = strings.Join(strings.Fields(fm.Description), " ")
+	m.allowedTools = []string(fm.AllowedTools)
+
 	if m.description == "" {
-		for _, l := range body {
+		for _, l := range bodyLines(content) {
 			t := strings.TrimSpace(l)
 			if t == "" || t == "---" || strings.HasPrefix(t, "#") {
 				continue
@@ -219,16 +221,22 @@ func parseSkillMeta(content, folderName string) skillMeta {
 		m.description = m.description[:maxDescription] + "…"
 		m.descriptionOverCap = true
 	}
-	m.allowedTools = parseAllowedTools(content)
 	return m
 }
 
-// skillToolsFrontmatter is the subset of SKILL.md YAML frontmatter needed to
-// parse the optional `allowed-tools` key. Surfaced to the model only (see
-// LoadableSkill.AllowedTools) — enforcement is a turn-loop follow-up, not
-// implemented here.
-type skillToolsFrontmatter struct {
-	AllowedTools allowedToolsList `yaml:"allowed-tools"`
+// bodyLines returns the SKILL.md lines after the leading `---` frontmatter block
+// (or all lines when there is no frontmatter).
+func bodyLines(content string) []string {
+	lines := strings.Split(content, "\n")
+	if len(lines) == 0 || strings.TrimSpace(lines[0]) != "---" {
+		return lines
+	}
+	for i := 1; i < len(lines); i++ {
+		if strings.TrimSpace(lines[i]) == "---" {
+			return lines[i+1:]
+		}
+	}
+	return nil
 }
 
 // allowedToolsList unmarshals `allowed-tools` from either a YAML sequence
@@ -261,30 +269,4 @@ func cleanToolNames(items []string) []string {
 		}
 	}
 	return out
-}
-
-// parseAllowedTools extracts allowed-tools from a SKILL.md's leading `---` YAML
-// frontmatter block (reusing frontmatterBlock from loadtool.go). Best-effort:
-// malformed YAML yields no allowed-tools rather than an error.
-func parseAllowedTools(content string) []string {
-	block, ok := frontmatterBlock(content)
-	if !ok {
-		return nil
-	}
-	var fm skillToolsFrontmatter
-	if err := yaml.Unmarshal([]byte(block), &fm); err != nil {
-		return nil
-	}
-	return []string(fm.AllowedTools)
-}
-
-func splitKV(line string) (key, value string, ok bool) {
-	idx := strings.Index(line, ":")
-	if idx <= 0 {
-		return "", "", false
-	}
-	key = strings.TrimSpace(line[:idx])
-	value = strings.TrimSpace(line[idx+1:])
-	value = strings.Trim(value, `"'`)
-	return key, value, key != ""
 }
