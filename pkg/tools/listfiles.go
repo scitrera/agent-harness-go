@@ -64,8 +64,13 @@ func listFiles(ctx context.Context, lister FileLister, req Request) (Result, err
 		Limit        int    `json:"limit"`
 		Offset       int    `json:"offset"`
 	}
-	if err := decodeArgs(req, &args); err != nil {
-		return Result{}, err
+	// All params are optional — a no-argument call means "list the current
+	// workspace with defaults". decodeArgs rejects empty arguments, so only decode
+	// when the model actually passed some.
+	if len(req.Arguments) > 0 {
+		if err := decodeArgs(req, &args); err != nil {
+			return Result{}, err
+		}
 	}
 	ws := args.Workspace
 	if ws == "" {
