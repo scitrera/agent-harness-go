@@ -40,6 +40,29 @@ func TestBuildRegistry_ParsesPreferredModel(t *testing.T) {
 	}
 }
 
+// A MemoryLayer catalog strips SKILL.md frontmatter into a metadata field, so the
+// Content is frontmatter-less and prereqs/preferred_model arrive on the spec. Those
+// must be used (else no auto prereq load, no model switch for ML skills).
+func TestBuildRegistry_UsesSpecPrereqsAndModelWhenBodyHasNoFrontmatter(t *testing.T) {
+	reg := BuildRegistry([]catalog.SkillSpec{{
+		Name:           "p2",
+		Content:        "just the body, no --- frontmatter",
+		Enabled:        true,
+		Prereqs:        []string{"p0-a", "p1-b"},
+		PreferredModel: "sahara-text-advanced",
+	}}, t.TempDir())
+	sk := reg.byName["p2"]
+	if sk == nil {
+		t.Fatal("p2 not registered")
+	}
+	if got := sk.PreferredModel; got != "sahara-text-advanced" {
+		t.Fatalf("PreferredModel = %q, want sahara-text-advanced", got)
+	}
+	if len(sk.Prereqs) != 2 || sk.Prereqs[0] != "p0-a" || sk.Prereqs[1] != "p1-b" {
+		t.Fatalf("Prereqs = %v, want [p0-a p1-b]", sk.Prereqs)
+	}
+}
+
 // load_skill honors the target skill's preferred_model via the ctx ModelPreference
 // seam: it calls the pin fn and reports model_switched only when the fn applied it.
 func TestLoadTool_PreferredModelSwitch(t *testing.T) {

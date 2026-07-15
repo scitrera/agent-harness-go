@@ -34,6 +34,13 @@ type SkillSpec struct {
 	// `allowed-tools` SKILL.md frontmatter key (YAML list or comma-separated
 	// string). Surfaced to the model only — enforcement is a turn-loop follow-up.
 	AllowedTools []string `json:"allowed_tools,omitempty"`
+	// Prereqs / PreferredModel carry metadata.scitrera.{prereq_skills,preferred_model}
+	// when the SOURCE already has it structured (e.g. a MemoryLayer catalog, which
+	// strips SKILL.md frontmatter into a metadata field and leaves Content
+	// frontmatter-less). BuildRegistry prefers these; when empty it falls back to
+	// parsing the body frontmatter (the on-disk SKILL.md path).
+	Prereqs        []string `json:"prereq_skills,omitempty"`
+	PreferredModel string   `json:"preferred_model,omitempty"`
 }
 
 type MCPServerSpec struct {

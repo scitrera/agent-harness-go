@@ -99,13 +99,24 @@ func BuildRegistry(specs []catalog.SkillSpec, workspaceRoot string) *Registry {
 		if !ok {
 			continue
 		}
+		// Prefer prereqs/model carried on the spec (a MemoryLayer catalog strips
+		// SKILL.md frontmatter into a metadata field, so the body has none); fall
+		// back to parsing the body frontmatter for the on-disk SKILL.md path.
+		prereqs := s.Prereqs
+		if len(prereqs) == 0 {
+			prereqs = parsePrereqs(body)
+		}
+		preferredModel := s.PreferredModel
+		if preferredModel == "" {
+			preferredModel = parsePreferredModel(body)
+		}
 		r.byName[s.Name] = &LoadableSkill{
 			Name:           s.Name,
 			Description:    s.Description,
 			Path:           s.Path,
 			Body:           body,
-			Prereqs:        parsePrereqs(body),
-			PreferredModel: parsePreferredModel(body),
+			Prereqs:        prereqs,
+			PreferredModel: preferredModel,
 			AllowedTools:   s.AllowedTools,
 		}
 		r.order = append(r.order, s.Name)
