@@ -77,7 +77,7 @@ type ArtifactConfig struct {
 	MaxBytes int
 	// SessionDir, when set, returns the per-(thread,context) working directory a
 	// code session writes relative files into (e.g. sahara's
-	// /workspace/sessions/<key>). A RELATIVE artifact path is resolved against it
+	// /sahara/sessions/<key>). A RELATIVE artifact path is resolved against it
 	// first — so a file a kernel saved with a bare name (plt.savefig('p.png')) is
 	// found — falling back to the workspace root. nil (or "" result) → paths
 	// resolve against the workspace root only (the prior behavior). The harness

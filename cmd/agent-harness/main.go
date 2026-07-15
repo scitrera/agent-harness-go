@@ -9,7 +9,7 @@ import (
 )
 
 func main() {
-	workspace := flag.String("workspace", env("SAHARA_WORKSPACE_ROOT", "./workspace"), "workspace root")
+	workspace := flag.String("workspace", env("SAHARA_WORKING_DIRECTORY", "./workspace"), "workspace root")
 	thread := flag.String("thread", "cli", "chat thread id (CLI/TUI mode)")
 	baseURL := flag.String("base-url", os.Getenv("SAHARA_LLM_BASE_URL"), "OpenAI-compatible base URL")
 	model := flag.String("model", env("SAHARA_LLM_MODEL", "gpt-4o-mini"), "model id")

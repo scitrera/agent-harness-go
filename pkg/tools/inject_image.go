@@ -33,7 +33,7 @@ type InjectImageConfig struct {
 	// Workspace reads the image bytes the agent names. Required.
 	Workspace *localtools.Workspace
 	// SessionDir, when set, returns the per-(thread,context) working directory a
-	// code session writes relative files into (sahara's /workspace/sessions/<key>).
+	// code session writes relative files into (sahara's /sahara/sessions/<key>).
 	// A RELATIVE image path resolves against it first, falling back to the
 	// workspace root. nil → workspace-root only. Shares the artifact tool's
 	// derivation; the distribution owns it.

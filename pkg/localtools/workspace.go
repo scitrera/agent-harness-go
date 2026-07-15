@@ -204,7 +204,7 @@ func (w *Workspace) resolveForWrite(relPath string) (string, error) {
 func (w *Workspace) join(relPath string, allowReadRoots bool) (string, error) {
 	if filepath.IsAbs(relPath) {
 		// An absolute path is accepted when it lexically points inside the workspace
-		// root (models routinely pass /workspace/...), or — for reads — inside a
+		// root (models routinely pass /sahara/...), or — for reads — inside a
 		// registered read-only root (e.g. image-baked system skills). Symlink escapes
 		// are still caught downstream by EvalSymlinks + containedInAny().
 		clean := filepath.Clean(relPath)
