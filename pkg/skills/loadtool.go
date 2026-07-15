@@ -15,6 +15,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -303,6 +304,7 @@ func LoadTool(reg *Registry) tools.HandlerFunc {
 
 		sink, hasSink := tools.WorldStateSinkFrom(ctx)
 		out := make([]loadedSkillOut, 0, len(order))
+		prereqs := make([]string, 0, len(order))
 		for _, n := range order {
 			sk := reg.byName[n]
 			if sk == nil {
@@ -311,6 +313,8 @@ func LoadTool(reg *Registry) tools.HandlerFunc {
 			role := "prerequisite"
 			if n == name {
 				role = "target"
+			} else {
+				prereqs = append(prereqs, sk.Name)
 			}
 			out = append(out, loadedSkillOut{
 				Name: sk.Name, Description: sk.Description, Path: sk.Path, Body: sk.Body, Role: role,
@@ -322,6 +326,16 @@ func LoadTool(reg *Registry) tools.HandlerFunc {
 				sink.RecordInvokedSkill(sk.Name, sk.Path)
 			}
 		}
+		// Observability: how many prerequisites this load pulled in (and which). A
+		// prereq_count of 0 for a skill that should have them is the signal that its
+		// metadata.scitrera.prereq_skills didn't reach the registry (e.g. a skill
+		// seeded before the frontmatter-metadata fix, so it must be re-seeded).
+		slog.InfoContext(ctx, "load_skill: loaded skill",
+			slog.String("skill", name),
+			slog.Bool("include_prereqs", includePrereqs),
+			slog.Int("prereq_count", len(prereqs)),
+			slog.Any("prereqs", prereqs))
+
 		res := struct {
 			Skills        []loadedSkillOut `json:"skills"`
 			Warnings      []string         `json:"warnings,omitempty"`
@@ -330,10 +344,22 @@ func LoadTool(reg *Registry) tools.HandlerFunc {
 		// Honor the TARGET skill's preferred_model: pin the thread's model when it's
 		// available (best-effort — no-op without a model registry / preference fn, or
 		// if the model isn't registered). Effective from the next turn, like /model.
-		if target := reg.byName[name]; target != nil && target.PreferredModel != "" {
-			if pref, ok := tools.ModelPreferenceFrom(ctx); ok && pref(target.PreferredModel) {
-				res.ModelSwitched = target.PreferredModel
+		if target := reg.byName[name]; target != nil {
+			preferred := target.PreferredModel
+			switched := false
+			if preferred != "" {
+				if pref, ok := tools.ModelPreferenceFrom(ctx); ok && pref(preferred) {
+					res.ModelSwitched = preferred
+					switched = true
+				}
 			}
+			// Log the model preference outcome every load: preferred_model is ""
+			// when the skill declared none (or the metadata didn't survive seeding);
+			// switched=false means it was declared but unavailable/not applied.
+			slog.InfoContext(ctx, "load_skill: model preference",
+				slog.String("skill", name),
+				slog.String("preferred_model", preferred),
+				slog.Bool("switched", switched))
 		}
 		// Materialize the loaded skills' bundle files (utils.py, references/, assets/,
 		// the shared bundle) into the sandbox's shared /skills dir so code can resolve
