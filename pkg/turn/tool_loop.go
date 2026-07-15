@@ -52,6 +52,22 @@ func (r *Runner) runProviderLoop(ctx context.Context, session *harness.Session, 
 	maxToolIterations := toolIterationLimit(ctx, r.maxToolIterations)
 	toolIterations := 0
 	for {
+		// A tool earlier THIS turn may have pinned a model — load_skill honoring a
+		// skill's preferred_model, or /model. Apply it to the rest of this turn's
+		// provider calls: the turn's model was resolved once up front (before any
+		// tool ran), and in a per-turn harness the "effective next turn" in-memory
+		// pin is gone by the next turn, so the pin would otherwise never take effect.
+		// Only adopt it when it can satisfy the current required capabilities so a
+		// vision escalation (below / pre-turn) isn't undone by a text-only pin.
+		if r.modelRegistry != nil {
+			if sticky := r.stickyModel(addr.ThreadID); sticky != "" && sticky != model {
+				if m, ok := r.modelRegistry.Get(sticky); ok && m.Capabilities.Satisfies(required) {
+					slog.InfoContext(ctx, "turn: adopting pinned model mid-turn",
+						slog.String("model", sticky), slog.String("was", model))
+					model = sticky
+				}
+			}
+		}
 		// Turn-lifecycle observers see each model-call boundary (and any compaction
 		// that ran while building this call's context). callWithRecovery may compact
 		// inside its Build; a counter delta detects it without threading the pointer.

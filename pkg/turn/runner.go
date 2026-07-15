@@ -884,8 +884,10 @@ func (r *Runner) Run(ctx context.Context, addr protocol.MessageAddress, user pro
 	// Per-turn model-preference seam: lets a tool (load_skill honoring a skill's
 	// preferred_model) pin the thread's model, best-effort. Bound to the model
 	// registry + the same sticky-pin /model uses; a no-op without a registry or for
-	// an unknown model. Pins for the thread → effective from the next turn (this
-	// turn's model was already resolved).
+	// an unknown model. The pin takes effect on the NEXT provider call this turn
+	// (the tool loop re-reads the sticky each iteration) — a skill's work follows
+	// load_skill in the same turn, and a per-turn harness would otherwise never see
+	// the in-memory pin on a later turn.
 	ctx = tools.WithModelPreference(ctx, func(name string) bool {
 		if name == "" || r.modelRegistry == nil {
 			return false
