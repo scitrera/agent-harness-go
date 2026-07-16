@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/scitrera/agent-harness-go/pkg/imageutil"
 	"github.com/scitrera/agent-harness-go/pkg/localtools"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 )
@@ -40,6 +41,11 @@ type InjectImageConfig struct {
 	SessionDir func(threadID, context string) string
 	// MaxBytes hard-caps a single injected image read (<=0 → 5 MiB).
 	MaxBytes int
+	// MaxImageEdge, when > 0, downscales an injected image so its longest edge is
+	// <= MaxImageEdge before it's inlined as a data_uri — bounding the vision-token
+	// cost of a high-resolution screenshot / PDF-page render. Only the model-bound
+	// copy is scaled; the on-disk artifact is untouched. <=0 → no downscale.
+	MaxImageEdge int
 }
 
 // RegisterInjectImage registers inject_image: the agent names a local image it
@@ -100,6 +106,14 @@ func RegisterInjectImage(reg *Registry, cfg InjectImageConfig) error {
 			mimeType := artifactMime(name, data)
 			if !strings.HasPrefix(mimeType, "image/") {
 				return errorResult(req, fmt.Sprintf("inject_image only accepts images; %s is %s", name, mimeType))
+			}
+			// Cap the injected resolution to bound vision-token cost (the on-disk
+			// artifact is left untouched — only this model-bound copy is downscaled).
+			if cfg.MaxImageEdge > 0 {
+				if scaled, m, ok := imageutil.Downscale(data, cfg.MaxImageEdge); ok {
+					data = scaled
+					mimeType = m
+				}
 			}
 			img, err := protocol.NewImagePart(protocol.ImagePart{Mime: mimeType, DataURI: artifactDataURI(mimeType, data), AltText: name})
 			if err != nil {
