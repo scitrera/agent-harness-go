@@ -166,6 +166,29 @@ func TestBuildAttachmentsSection(t *testing.T) {
 	}
 }
 
+func TestBuildAttachmentsSectionSurfacesFailures(t *testing.T) {
+	// A failed materialization is still listed (so the model knows an input is
+	// missing) — with the reason and no on-disk path.
+	p := Build(Input{Attachments: []AttachmentSummary{
+		{Name: "bid.pdf", Mime: "application/pdf", Size: 1048576, Purpose: "attachment",
+			Error: "blob GET 403: capability requires authenticated principal"},
+	}})
+	for _, want := range []string{
+		"## Attached files",
+		"bid.pdf — application/pdf, 1.0 MiB",
+		"⚠ UNAVAILABLE (blob GET 403: capability requires authenticated principal)",
+		"do not assume its contents",
+	} {
+		if !strings.Contains(p.DynamicSuffix, want) {
+			t.Fatalf("failed-attachment line missing %q: %s", want, p.DynamicSuffix)
+		}
+	}
+	// A failed entry must NOT present a readable path.
+	if strings.Contains(p.DynamicSuffix, "/workspace/vfs/downloads") {
+		t.Fatalf("failed attachment should carry no on-disk path: %s", p.DynamicSuffix)
+	}
+}
+
 func TestBuildSubagentsSection(t *testing.T) {
 	p := Build(Input{Subagents: []SubagentLine{
 		{Name: "reviewer", ThreadID: "parent::sub::4", Status: "completed", Summary: "found the bug", AgeTurns: 2},

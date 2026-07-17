@@ -110,6 +110,11 @@ type AttachmentSummary struct {
 	Size    int64
 	Purpose string
 	Path    string
+	// Error, when non-empty, means the attachment could NOT be materialized
+	// (fetch/permission failure). It is still listed — so the model knows an
+	// input was provided but is missing rather than pursuing the task blind —
+	// with this reason and no Path/usable bytes.
+	Error string
 }
 
 // Input is the data composed into the system prompt.
@@ -319,6 +324,12 @@ func attachmentLine(a AttachmentSummary) string {
 	line := name
 	if len(meta) > 0 {
 		line += " — " + strings.Join(meta, ", ")
+	}
+	if a.Error != "" {
+		// Materialization failed: surface the reason instead of an on-disk path
+		// (there is none) so the model treats the input as missing rather than
+		// trying to open a file that isn't there.
+		return line + " — ⚠ UNAVAILABLE (" + a.Error + "): attached but could not be loaded; do not assume its contents"
 	}
 	if a.Path != "" {
 		line += " — " + a.Path
