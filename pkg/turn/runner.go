@@ -842,6 +842,9 @@ func (r *Runner) Run(ctx context.Context, addr protocol.MessageAddress, user pro
 		return protocol.ChatMessage{}, fmt.Errorf("load bootstrap: %w", err)
 	}
 	var injected []protocol.ChatMessage
+	// World state (todos, invoked skills, sub-agents) reconstructed from history;
+	// computed once here and reused below for the turn counter + injected context.
+	prior := compaction.ExtractWorldState(session.History())
 	// Ephemeral turns take ONLY the inbound message as context: skip both the
 	// first-turn daily-notes background and memory auto-recall.
 	if !ephemeral {
@@ -852,6 +855,12 @@ func (r *Runner) Run(ctx context.Context, addr protocol.MessageAddress, user pro
 		}
 		if rm := r.recallForTurn(ctx, auth, addr, user); rm != nil {
 			injected = append(injected, *rm)
+		}
+		// Surface the model's own outstanding todos as a fresh per-turn system
+		// reminder (like recalled memories) so its plan stays in view deep in a
+		// long thread, where the top-of-prompt ## Todos section gets buried.
+		if tm, ok := remainingTodosMessage(prior.Todos, addr); ok {
+			injected = append(injected, tm)
 		}
 	}
 	streamer := newTurnStreamer(r.publisher, addr, streamMessageID(addr), r.now, r.streamFlush)
@@ -865,8 +874,8 @@ func (r *Runner) Run(ctx context.Context, addr protocol.MessageAddress, user pro
 	// Per-turn world-state sink: lets tools record durable, compaction-surviving
 	// state (e.g. load_skill → invoked skills). Advance the per-thread turn counter
 	// (carried in world-state meta on the assistant message) so invoked skills can
-	// be aged; the counter survives compaction via ExtractWorldState.
-	prior := compaction.ExtractWorldState(session.History())
+	// be aged; the counter survives compaction via ExtractWorldState. `prior` is
+	// the world state reconstructed above.
 	wsTurn := prior.Turn + 1
 	// Per-turn compaction-event counter: the assembler bumps it each time a context
 	// Build drops messages; the sink persists prior.Compactions + this turn's count.
@@ -1165,6 +1174,53 @@ func (r *Runner) recallForTurn(ctx context.Context, auth tools.MemoryAuthority, 
 		return nil
 	}
 	return &msg
+}
+
+// remainingTodosMessage builds a per-turn system reminder listing the model's
+// OUTSTANDING todos (pending + in_progress) from world state, mirroring
+// recalledMemoryMessage. Returns false when nothing is outstanding, so a
+// finished or empty board injects nothing. Surfaced alongside recalled memories
+// each turn so the model keeps its own plan in view deep in a long thread, where
+// the top-of-prompt "## Todos" section gets buried. The status comparisons use
+// the spec's TodoStatus wire values ("completed"/"cancelled"/"in_progress").
+func remainingTodosMessage(todos []compaction.TodoState, addr protocol.MessageAddress) (protocol.ChatMessage, bool) {
+	var b strings.Builder
+	n := 0
+	for _, t := range todos {
+		switch t.Status {
+		case "completed", "cancelled":
+			continue
+		}
+		content := strings.TrimSpace(t.Content)
+		if content == "" {
+			continue
+		}
+		if n == 0 {
+			b.WriteString("Remaining todo items (your own plan; keep working them and update via todo_write):\n")
+		}
+		n++
+		if t.Status == "in_progress" {
+			b.WriteString("- [in progress] ")
+		} else {
+			b.WriteString("- [pending] ")
+		}
+		b.WriteString(content)
+		b.WriteString("\n")
+	}
+	if n == 0 {
+		return protocol.ChatMessage{}, false
+	}
+	part, err := protocol.NewTextPart(strings.TrimRight(b.String(), "\n"))
+	if err != nil {
+		return protocol.ChatMessage{}, false
+	}
+	return protocol.ChatMessage{
+		SchemaVersion: "1.0",
+		ID:            "remaining-todos",
+		Role:          protocol.RoleSystem,
+		Addr:          addr,
+		Content:       []protocol.ContentPart{part},
+	}, true
 }
 
 // dailyNotesMessage loads recent workspace daily notes as an untrusted
