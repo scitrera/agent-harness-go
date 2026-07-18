@@ -509,15 +509,78 @@ func toolCallArgs(raw json.RawMessage) map[string]json.RawMessage {
 		}
 		var m map[string]json.RawMessage
 		if json.Unmarshal([]byte(asString), &m) == nil {
-			return m
+			return repairToolArgs(m)
 		}
 		return map[string]json.RawMessage{}
 	}
 	var m map[string]json.RawMessage
 	if json.Unmarshal(raw, &m) == nil {
-		return m
+		return repairToolArgs(m)
 	}
 	return map[string]json.RawMessage{}
+}
+
+// repairToolArgs works around a malformed-tool-argument artifact from some
+// upstreams (observed via the MLflow AI Gateway / fireworks for array-valued
+// arguments): a structured value is delivered wrapped as {"$text":"<the value
+// as a JSON string>"} instead of the value itself, so e.g. every todo item
+// arrives as {"$text":"{...}"} and the tool's typed decode sees empty fields.
+// Recursively unwrap any such wrapper back to the real object/array. STOPGAP
+// until the upstream stops emitting $text; safe because it only fires on a
+// single-key {"$text": <string>} whose string parses to an object or array.
+func repairToolArgs(m map[string]json.RawMessage) map[string]json.RawMessage {
+	for k, raw := range m {
+		var v any
+		if json.Unmarshal(raw, &v) != nil {
+			continue
+		}
+		if rv, changed := repairDollarText(v); changed {
+			if b, err := json.Marshal(rv); err == nil {
+				m[k] = b
+			}
+		}
+	}
+	return m
+}
+
+// repairDollarText returns v with every {"$text":"<json>"} wrapper (whose inner
+// string parses to an object or array) replaced by the parsed value, and a bool
+// reporting whether anything changed.
+func repairDollarText(v any) (any, bool) {
+	switch t := v.(type) {
+	case map[string]any:
+		if len(t) == 1 {
+			if s, ok := t["$text"].(string); ok {
+				var inner any
+				if json.Unmarshal([]byte(s), &inner) == nil {
+					switch inner.(type) {
+					case map[string]any, []any:
+						r, _ := repairDollarText(inner)
+						return r, true
+					}
+				}
+			}
+		}
+		changed := false
+		for k, val := range t {
+			if nv, c := repairDollarText(val); c {
+				t[k] = nv
+				changed = true
+			}
+		}
+		return t, changed
+	case []any:
+		changed := false
+		for i, val := range t {
+			if nv, c := repairDollarText(val); c {
+				t[i] = nv
+				changed = true
+			}
+		}
+		return t, changed
+	default:
+		return v, false
+	}
 }
 
 // SandboxGuard is the Scitrera-sandbox provider policy (opt-in via
