@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/scitrera/agent-harness-go/pkg/localtools"
@@ -60,7 +61,7 @@ func RegisterLocal(reg *Registry, cfg LocalConfig) error {
 func localDescriptors() []Descriptor {
 	schema := func(s string) json.RawMessage { return json.RawMessage(s) }
 	return []Descriptor{
-		{Name: "read_file", Description: "Read a UTF-8 text file from the workspace.", Parameters: schema(`{"type":"object","properties":{"path":{"type":"string","description":"Workspace-relative path"},"max_bytes":{"type":"integer","description":"Optional max bytes to read"}},"required":["path"]}`)},
+		{Name: "read_file", Description: "Read a UTF-8 text file from the workspace. Optionally return only a 1-indexed inclusive line range via start_line/end_line; when a range is given the output is line-number prefixed.", Parameters: schema(`{"type":"object","properties":{"path":{"type":"string","description":"Workspace-relative path"},"max_bytes":{"type":"integer","description":"Optional max bytes to read"},"start_line":{"type":"integer","description":"Optional 1-indexed first line to return (inclusive); enables line-number-prefixed output"},"end_line":{"type":"integer","description":"Optional 1-indexed last line to return (inclusive); defaults to end of file"}},"required":["path"]}`)},
 		{Name: "write_file", Description: "Create or overwrite a workspace file with the given content.", Parameters: schema(`{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}`)},
 		{Name: "edit_file", Description: "Replace an exact substring in a workspace file (old_text must occur exactly once).", Parameters: schema(`{"type":"object","properties":{"path":{"type":"string"},"old_text":{"type":"string"},"new_text":{"type":"string"}},"required":["path","old_text","new_text"]}`)},
 		{Name: "list_dir", Description: "List entries in a workspace directory.", Parameters: schema(`{"type":"object","properties":{"path":{"type":"string","description":"Workspace-relative directory; empty for root"}}}`)},
@@ -73,8 +74,10 @@ func localDescriptors() []Descriptor {
 
 func readFile(ctx context.Context, cfg LocalConfig, req Request) (Result, error) {
 	var args struct {
-		Path     string `json:"path"`
-		MaxBytes int64  `json:"max_bytes"`
+		Path      string `json:"path"`
+		MaxBytes  int64  `json:"max_bytes"`
+		StartLine int    `json:"start_line"`
+		EndLine   int    `json:"end_line"`
 	}
 	if err := decodeArgs(req, &args); err != nil {
 		return Result{}, err
@@ -91,9 +94,42 @@ func readFile(ctx context.Context, cfg LocalConfig, req Request) (Result, error)
 	if err != nil {
 		return Result{}, err
 	}
+	// Optional 1-indexed inclusive line range. Applied AFTER the read (max_bytes
+	// still bounds the bytes fetched), so a range past a max_bytes cap simply
+	// yields fewer lines. When either bound is set, the slice is line-number
+	// prefixed (cat -n style) so the model can reference exact lines; a full read
+	// (no bounds) is returned raw, unchanged.
+	if args.StartLine > 0 || args.EndLine > 0 {
+		text = numberedLineSlice(text, args.StartLine, args.EndLine)
+	}
 	return marshalResult(req, struct {
 		Text string `json:"text"`
 	}{Text: text})
+}
+
+// numberedLineSlice returns lines [start, end] (1-indexed, inclusive) of text,
+// each prefixed with its line number in "%6d\t" form. start <= 0 clamps to 1;
+// end <= 0 or past EOF clamps to the last line. A trailing newline does not count
+// as an extra line. Returns "" when the range starts past EOF.
+func numberedLineSlice(text string, start, end int) string {
+	lines := strings.Split(text, "\n")
+	if n := len(lines); n > 0 && lines[n-1] == "" {
+		lines = lines[:n-1] // drop the phantom line from a trailing newline
+	}
+	if start < 1 {
+		start = 1
+	}
+	if end < 1 || end > len(lines) {
+		end = len(lines)
+	}
+	if start > len(lines) || start > end {
+		return ""
+	}
+	var b strings.Builder
+	for i := start; i <= end; i++ {
+		fmt.Fprintf(&b, "%6d\t%s\n", i, lines[i-1])
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 func writeFile(ctx context.Context, cfg LocalConfig, req Request) (Result, error) {
