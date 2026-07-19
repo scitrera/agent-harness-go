@@ -18,6 +18,9 @@ type todoWriteArgs struct {
 		Content    string `json:"content"`
 		Status     string `json:"status"`
 		ActiveForm string `json:"active_form"`
+		// ActiveFormAlt accepts the no-underscore "activeform" some models emit
+		// instead of the schema's "active_form"; used only when active_form is absent.
+		ActiveFormAlt string `json:"activeform"`
 	} `json:"items"`
 }
 
@@ -37,16 +40,30 @@ func todoWrite(ctx context.Context, req Request) (Result, error) {
 		id = "todo_main"
 	}
 	items := make([]spec.TodoItem, 0, len(args.Items))
-	for _, it := range args.Items {
+	for i, it := range args.Items {
 		status := spec.TodoStatus(it.Status)
 		if status == "" {
 			status = spec.TodoPending
 		}
+		itemID := it.ID
+		if itemID == "" {
+			// Stable positional id for id-less items. The model rewrites the FULL
+			// board each call, so <board>#<index> keeps a re-worded item at the same
+			// position mapped to the SAME durable world-state entry (updated in
+			// place). Without it the sink falls back to keying on content, so every
+			// re-wording spawned a NEW entry and stale todos piled up in the
+			// "## Todos" prompt section over a long task.
+			itemID = fmt.Sprintf("%s#%d", id, i)
+		}
+		activeForm := it.ActiveForm
+		if activeForm == "" {
+			activeForm = it.ActiveFormAlt // tolerate the "activeform" alias
+		}
 		items = append(items, spec.TodoItem{
-			ID:         it.ID,
+			ID:         itemID,
 			Content:    it.Content,
 			Status:     status,
-			ActiveForm: it.ActiveForm,
+			ActiveForm: activeForm,
 		})
 	}
 	part := spec.NewTodoPart(spec.TodoPart{ID: id, Title: args.Title, Items: items})

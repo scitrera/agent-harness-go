@@ -58,6 +58,41 @@ func Test_todoWrite_emits_todo_part_and_summarizes(t *testing.T) {
 	}
 }
 
+func Test_todoWrite_stable_ids_and_activeform_alias(t *testing.T) {
+	em := &capturingEmitter{}
+	ctx := WithPartEmitter(context.Background(), em)
+	// Two id-less items (the model omits per-item ids) + the no-underscore
+	// "activeform" alias, plus one item with an explicit id to confirm it's kept.
+	args := `{"items":[` +
+		`{"content":"First","status":"completed"},` +
+		`{"content":"Second","status":"in_progress","activeform":"Doing second"},` +
+		`{"id":"keep-me","content":"Third","status":"pending"}]}`
+	if _, err := todoWrite(ctx, Request{CallID: "c1", Name: "todo_write", Arguments: json.RawMessage(args)}); err != nil {
+		t.Fatalf("todoWrite: %v", err)
+	}
+	body, ok := em.parts[0].AsTodo()
+	if !ok {
+		t.Fatalf("emitted part is not a todo: %s", em.parts[0].Raw())
+	}
+	// id-less items get a stable positional id <board>#<index> (so a re-wording at
+	// the same position updates the same world-state entry instead of piling up).
+	if body.Items[0].ID != "todo_main#0" || body.Items[1].ID != "todo_main#1" {
+		t.Fatalf("stable positional ids wrong: %q %q", body.Items[0].ID, body.Items[1].ID)
+	}
+	// an explicit model id is preserved.
+	if body.Items[2].ID != "keep-me" {
+		t.Fatalf("explicit id not preserved: %q", body.Items[2].ID)
+	}
+	// "activeform" (no underscore) is honored as active_form.
+	if body.Items[1].ActiveForm != "Doing second" {
+		t.Fatalf("activeform alias not honored: %q", body.Items[1].ActiveForm)
+	}
+	// content is preserved on every item.
+	if body.Items[0].Content != "First" || body.Items[1].Content != "Second" || body.Items[2].Content != "Third" {
+		t.Fatalf("content wrong: %#v", body.Items)
+	}
+}
+
 func Test_todoWrite_is_noop_without_emitter(t *testing.T) {
 	res, err := todoWrite(context.Background(), Request{
 		CallID: "c1", Name: "todo_write",
