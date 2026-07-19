@@ -58,7 +58,7 @@ func buildRunner(cfg appConfig, pub channel.Publisher, approvals approval.Awaite
 	if k := os.Getenv("SAHARA_LLM_API_KEY"); k != "" {
 		auth = "Bearer " + k
 	}
-	prov, err := provider.NewSidecarClient(provider.SidecarConfig{BaseURL: cfg.baseURL, AuthHeader: auth, Format: provider.FormatOpenAI})
+	prov, err := provider.NewOpenAICompatClient(provider.OpenAICompatConfig{BaseURL: cfg.baseURL, AuthHeader: auth, Format: provider.FormatOpenAI})
 	if err != nil {
 		return nil, nil, fmt.Errorf("provider: %w", err)
 	}

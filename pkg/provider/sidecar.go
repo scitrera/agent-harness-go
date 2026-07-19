@@ -40,7 +40,7 @@ const (
 // sandbox policy.
 type Guard func(base *url.URL, authHeader string) error
 
-type SidecarConfig struct {
+type OpenAICompatConfig struct {
 	BaseURL    string
 	AuthHeader string
 	ChatPath   string
@@ -49,7 +49,7 @@ type SidecarConfig struct {
 	// StreamFirstChunk bounds the wait for the FIRST streamed chunk (time-to-first-
 	// token — long for big-context reasoning). StreamIdle bounds the gap between
 	// SUBSEQUENT chunks (once tokens flow, gaps are short). Neither is a total-duration
-	// cap. 0 → defaults (see NewSidecarClient).
+	// cap. 0 → defaults (see NewOpenAICompatClient).
 	StreamFirstChunk time.Duration
 	StreamIdle       time.Duration
 	// Guard, when set, validates BaseURL + AuthHeader (e.g. SandboxGuard).
@@ -62,7 +62,11 @@ type SidecarConfig struct {
 	PromptCaching bool
 }
 
-type SidecarClient struct {
+// OpenAICompatClient talks to an OpenAI-compatible chat endpoint over HTTP. In
+// the Scitrera distribution that endpoint is the in-sandbox sidecar (which the
+// comments below call "the sidecar"); FormatOpenAI also lets it target any
+// OpenAI-compatible provider directly for sidecar-less testing.
+type OpenAICompatClient struct {
 	baseURL    *url.URL
 	chatPath   string
 	authHeader string
@@ -113,7 +117,7 @@ type ChatResponse struct {
 	Message protocol.ChatMessage `json:"message"`
 }
 
-func NewSidecarClient(cfg SidecarConfig) (*SidecarClient, error) {
+func NewOpenAICompatClient(cfg OpenAICompatConfig) (*OpenAICompatClient, error) {
 	parsed, err := url.ParseRequestURI(cfg.BaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("%w: base url: %w", ErrInvalidProviderConfig, err)
@@ -149,14 +153,14 @@ func NewSidecarClient(cfg SidecarConfig) (*SidecarClient, error) {
 	if format == "" {
 		format = FormatNative
 	}
-	return &SidecarClient{baseURL: parsed, chatPath: chatPath, authHeader: cfg.AuthHeader, format: format, client: client, streamClient: streamClient, streamFirstChunk: streamFirstChunk, streamIdle: streamIdle, promptCaching: cfg.PromptCaching}, nil
+	return &OpenAICompatClient{baseURL: parsed, chatPath: chatPath, authHeader: cfg.AuthHeader, format: format, client: client, streamClient: streamClient, streamFirstChunk: streamFirstChunk, streamIdle: streamIdle, promptCaching: cfg.PromptCaching}, nil
 }
 
-func (c *SidecarClient) BaseURL() string {
+func (c *OpenAICompatClient) BaseURL() string {
 	return c.baseURL.String()
 }
 
-func (c *SidecarClient) Chat(ctx context.Context, chat ChatRequest) (ChatResponse, error) {
+func (c *OpenAICompatClient) Chat(ctx context.Context, chat ChatRequest) (ChatResponse, error) {
 	chat.Messages = sanitizeTranscript(chat.Messages)
 	body, err := c.encodeRequest(chat)
 	if err != nil {
@@ -186,7 +190,7 @@ func (c *SidecarClient) Chat(ctx context.Context, chat ChatRequest) (ChatRespons
 	return decodeChatResponse(data)
 }
 
-func (c *SidecarClient) encodeRequest(chat ChatRequest) ([]byte, error) {
+func (c *OpenAICompatClient) encodeRequest(chat ChatRequest) ([]byte, error) {
 	if c.format == FormatOpenAI {
 		// The openai wire path has no provider prompt-cache breakpoint concept and
 		// drops the meta hint (see lowerMessage); prompt caching is a native-path
@@ -425,7 +429,7 @@ func messageText(m protocol.ChatMessage) string {
 	return b.String()
 }
 
-func (c *SidecarClient) endpoint() string {
+func (c *OpenAICompatClient) endpoint() string {
 	endpoint := *c.baseURL
 	endpoint.Path = strings.TrimRight(endpoint.Path, "/") + c.chatPath
 	return endpoint.String()
@@ -584,7 +588,7 @@ func repairDollarText(v any) (any, bool) {
 }
 
 // SandboxGuard is the Scitrera-sandbox provider policy (opt-in via
-// SidecarConfig.Guard): it rejects a real provider key or a direct provider host
+// OpenAICompatConfig.Guard): it rejects a real provider key or a direct provider host
 // unless allowDirect is set (sidecar-less testing). The core does not apply it
 // by default — the sandbox distribution wires it.
 func SandboxGuard(allowDirect bool) Guard {

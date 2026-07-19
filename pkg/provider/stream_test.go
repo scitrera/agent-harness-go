@@ -26,9 +26,9 @@ func sseServer(t *testing.T, chunks []string) *httptest.Server {
 	}))
 }
 
-func streamClient(t *testing.T, baseURL string) *SidecarClient {
+func streamClient(t *testing.T, baseURL string) *OpenAICompatClient {
 	t.Helper()
-	c, err := NewSidecarClient(SidecarConfig{BaseURL: baseURL, Format: FormatOpenAI})
+	c, err := NewOpenAICompatClient(OpenAICompatConfig{BaseURL: baseURL, Format: FormatOpenAI})
 	if err != nil {
 		t.Fatalf("client: %v", err)
 	}

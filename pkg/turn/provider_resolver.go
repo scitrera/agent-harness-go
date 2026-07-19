@@ -67,18 +67,18 @@ func (r *providerResolver) ProviderForModel(model string) (Provider, bool) {
 	return p, true
 }
 
-// build constructs a SidecarClient from the resolved SidecarConfig for pc.
+// build constructs a OpenAICompatClient from the resolved OpenAICompatConfig for pc.
 func (r *providerResolver) build(pc modelpkg.ProviderConfig) (Provider, error) {
-	return provider.NewSidecarClient(r.sidecarConfig(pc))
+	return provider.NewOpenAICompatClient(r.sidecarConfig(pc))
 }
 
-// sidecarConfig lowers a ProviderConfig to a provider.SidecarConfig, filling
+// sidecarConfig lowers a ProviderConfig to a provider.OpenAICompatConfig, filling
 // missing fields from the env default and resolving the API key. Fill order:
 // BaseURL/Format from def when pc omits them; the key comes from pc (APIKey, else
 // APIKeyEnv) or — when pc names neither — from def; APIKeyEnv is read from the
 // environment. Kept pure (no client construction) so it is directly observable in
 // tests. AuthHeader is "Bearer <key>" when a key resolves, else "".
-func (r *providerResolver) sidecarConfig(pc modelpkg.ProviderConfig) provider.SidecarConfig {
+func (r *providerResolver) sidecarConfig(pc modelpkg.ProviderConfig) provider.OpenAICompatConfig {
 	baseURL := pc.BaseURL
 	if baseURL == "" {
 		baseURL = r.def.BaseURL
@@ -103,7 +103,7 @@ func (r *providerResolver) sidecarConfig(pc modelpkg.ProviderConfig) provider.Si
 	if format == "native" {
 		wire = provider.FormatNative
 	}
-	return provider.SidecarConfig{
+	return provider.OpenAICompatConfig{
 		BaseURL:    baseURL,
 		AuthHeader: authHeader,
 		Format:     wire,

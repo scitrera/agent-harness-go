@@ -27,7 +27,7 @@ type Attribution struct {
 type attributionKey struct{}
 
 // WithAttribution returns a context carrying a for stamping onto the next LLM
-// request built by a SidecarClient. A zero Attribution is a no-op passthrough
+// request built by a OpenAICompatClient. A zero Attribution is a no-op passthrough
 // (keeps callers from having to guard the empty case).
 func WithAttribution(ctx context.Context, a Attribution) context.Context {
 	if a == (Attribution{}) {

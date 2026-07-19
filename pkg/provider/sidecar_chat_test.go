@@ -10,7 +10,7 @@ import (
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 )
 
-func Test_SidecarClient_Chat_posts_scitrera_messages_to_sidecar(t *testing.T) {
+func Test_OpenAICompatClient_Chat_posts_scitrera_messages_to_sidecar(t *testing.T) {
 	// Given
 	ctx := context.Background()
 	var got ChatRequest
@@ -26,7 +26,7 @@ func Test_SidecarClient_Chat_posts_scitrera_messages_to_sidecar(t *testing.T) {
 		_, _ = w.Write([]byte(`{"message":{"id":"a1","role":"assistant","addr":{"thread_id":"thread-1"},"content":[{"type":"text","text":"ok"}]}}`))
 	}))
 	defer server.Close()
-	client, err := NewSidecarClient(SidecarConfig{BaseURL: server.URL, AuthHeader: "Bearer placeholder-rewrite", HTTPClient: server.Client()})
+	client, err := NewOpenAICompatClient(OpenAICompatConfig{BaseURL: server.URL, AuthHeader: "Bearer placeholder-rewrite", HTTPClient: server.Client()})
 	if err != nil {
 		t.Fatalf("sidecar client: %v", err)
 	}
@@ -53,14 +53,14 @@ func Test_SidecarClient_Chat_posts_scitrera_messages_to_sidecar(t *testing.T) {
 	}
 }
 
-func Test_SidecarClient_Chat_decodes_openai_compatible_response_when_sidecar_returns_choices(t *testing.T) {
+func Test_OpenAICompatClient_Chat_decodes_openai_compatible_response_when_sidecar_returns_choices(t *testing.T) {
 	// Given
 	ctx := context.Background()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"id":"chatcmpl-1","choices":[{"message":{"role":"assistant","content":"hello"}}]}`))
 	}))
 	defer server.Close()
-	client, err := NewSidecarClient(SidecarConfig{BaseURL: server.URL, HTTPClient: server.Client()})
+	client, err := NewOpenAICompatClient(OpenAICompatConfig{BaseURL: server.URL, HTTPClient: server.Client()})
 	if err != nil {
 		t.Fatalf("sidecar client: %v", err)
 	}

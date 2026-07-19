@@ -22,7 +22,7 @@ type DeltaFunc func(text string) error
 // onDelta as they arrive; the accumulated final message (text + tool calls) is
 // returned. If the endpoint does not respond with SSE, it falls back to
 // decoding a normal JSON response (emitting the full text as one delta).
-func (c *SidecarClient) ChatStream(ctx context.Context, chat ChatRequest, onDelta DeltaFunc) (ChatResponse, error) {
+func (c *OpenAICompatClient) ChatStream(ctx context.Context, chat ChatRequest, onDelta DeltaFunc) (ChatResponse, error) {
 	chat.Stream = true
 	chat.Messages = sanitizeTranscript(chat.Messages)
 	body, err := c.encodeRequest(chat)

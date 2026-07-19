@@ -44,7 +44,7 @@ func TestProviderResolverPerModel(t *testing.T) {
 	if !ok || p1 == nil {
 		t.Fatalf("on-openrouter: ok=%v p=%v", ok, p1)
 	}
-	if got := p1.(*provider.SidecarClient).BaseURL(); got != "https://openrouter.example/api" {
+	if got := p1.(*provider.OpenAICompatClient).BaseURL(); got != "https://openrouter.example/api" {
 		t.Fatalf("on-openrouter base url = %q", got)
 	}
 
@@ -56,7 +56,7 @@ func TestProviderResolverPerModel(t *testing.T) {
 	if p1 == p2 {
 		t.Fatal("expected distinct clients per provider")
 	}
-	if got := p2.(*provider.SidecarClient).BaseURL(); got != "https://groq.example/api" {
+	if got := p2.(*provider.OpenAICompatClient).BaseURL(); got != "https://groq.example/api" {
 		t.Fatalf("on-groq base url = %q", got)
 	}
 

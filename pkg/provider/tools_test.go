@@ -73,7 +73,7 @@ func TestPromptCachingStampsNativeBreakpoint(t *testing.T) {
 	req := ChatRequest{Messages: []protocol.ChatMessage{sys, usr}}
 
 	// native + PromptCaching=true → breakpoint emitted at end of system prefix.
-	on := &SidecarClient{format: FormatNative, promptCaching: true}
+	on := &OpenAICompatClient{format: FormatNative, promptCaching: true}
 	body, err := on.encodeRequest(req)
 	if err != nil {
 		t.Fatalf("encode (caching on): %v", err)
@@ -87,7 +87,7 @@ func TestPromptCachingStampsNativeBreakpoint(t *testing.T) {
 	}
 
 	// native + PromptCaching=false → no breakpoint.
-	off := &SidecarClient{format: FormatNative, promptCaching: false}
+	off := &OpenAICompatClient{format: FormatNative, promptCaching: false}
 	body, err = off.encodeRequest(req)
 	if err != nil {
 		t.Fatalf("encode (caching off): %v", err)
@@ -97,7 +97,7 @@ func TestPromptCachingStampsNativeBreakpoint(t *testing.T) {
 	}
 
 	// openai + PromptCaching=true → no-op (openai path drops the hint).
-	oai := &SidecarClient{format: FormatOpenAI, promptCaching: true}
+	oai := &OpenAICompatClient{format: FormatOpenAI, promptCaching: true}
 	body, err = oai.encodeRequest(req)
 	if err != nil {
 		t.Fatalf("encode (openai): %v", err)

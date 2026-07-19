@@ -12,7 +12,7 @@ import (
 )
 
 func TestSandboxGuardRejectsRealKey(t *testing.T) {
-	_, err := NewSidecarClient(SidecarConfig{
+	_, err := NewOpenAICompatClient(OpenAICompatConfig{
 		BaseURL:    "http://127.0.0.1:8787",
 		AuthHeader: "sk-realisticlooking123",
 		Guard:      SandboxGuard(false),
@@ -23,7 +23,7 @@ func TestSandboxGuardRejectsRealKey(t *testing.T) {
 }
 
 func TestSandboxGuardAllowDirectAcceptsRealKeyAndDirectHost(t *testing.T) {
-	c, err := NewSidecarClient(SidecarConfig{
+	c, err := NewOpenAICompatClient(OpenAICompatConfig{
 		BaseURL:    "https://api.openai.com",
 		AuthHeader: "sk-realisticlooking123",
 		Guard:      SandboxGuard(true),
@@ -37,7 +37,7 @@ func TestSandboxGuardAllowDirectAcceptsRealKeyAndDirectHost(t *testing.T) {
 }
 
 func TestSandboxGuardRejectsDirectHost(t *testing.T) {
-	_, err := NewSidecarClient(SidecarConfig{
+	_, err := NewOpenAICompatClient(OpenAICompatConfig{
 		BaseURL:    "https://api.openai.com",
 		AuthHeader: "Bearer placeholder-sidecar-rewrite",
 		Guard:      SandboxGuard(false),
@@ -49,7 +49,7 @@ func TestSandboxGuardRejectsDirectHost(t *testing.T) {
 
 func TestNoGuardIsPermissive(t *testing.T) {
 	// Core default: no guard => a direct host + real-looking key is accepted.
-	c, err := NewSidecarClient(SidecarConfig{
+	c, err := NewOpenAICompatClient(OpenAICompatConfig{
 		BaseURL:    "https://api.openai.com",
 		AuthHeader: "sk-realisticlooking123",
 	})
