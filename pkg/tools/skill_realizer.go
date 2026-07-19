@@ -3,9 +3,10 @@ package tools
 import "context"
 
 // SkillRealizerFunc materializes the named skills' bundle files — utils.py,
-// references/, assets/, and the shared bundle — into the sandbox's shared /skills
-// directory, so code running in the code-sidecar (import_path('/skills/<name>/
-// utils.py'), and skill bodies citing /skills/... paths) resolves them. load_skill
+// references/, assets/, and the shared bundle — into the distribution's skills
+// root (e.g. the sandbox's shared /skills directory), so code running in the
+// code-sidecar (e.g. import_path('/skills/<name>/utils.py'), and skill bodies
+// citing that root) resolves them. load_skill
 // calls it with the target skill plus its prerequisites. It is best-effort and
 // idempotent: it returns the number of files realized; absence on ctx (no
 // materialize dir / non-relay transport) is a silent no-op.
