@@ -45,7 +45,9 @@ type StreamingProvider interface {
 // across concurrent turns.
 type MemoryService interface {
 	Recall(ctx context.Context, auth tools.MemoryAuthority, workspace, query string, limit int) ([]tools.MemoryHit, error)
-	AppendThreadMessages(ctx context.Context, auth tools.MemoryAuthority, workspace, threadID string, messages []protocol.ChatMessage) error
+	// ownership selects the storage workspace: "" / "user" folds into the
+	// backend's user-chat home; "workspace" homes the messages under workspace.
+	AppendThreadMessages(ctx context.Context, auth tools.MemoryAuthority, workspace, threadID, ownership string, messages []protocol.ChatMessage) error
 }
 
 // ThreadSpec describes a thread to declare durably, independent of its message
@@ -60,6 +62,10 @@ type ThreadSpec struct {
 	ParentThreadID string
 	// Origin records what created the thread (e.g. "subagent"); a hint only.
 	Origin string
+	// Ownership selects where the thread is stored: "" / "user" folds into the
+	// backend's user-chat home; "workspace" homes the thread under WorkspaceID
+	// (workspace-homed threads). A hint the registrar MAY honor.
+	Ownership string
 }
 
 // ThreadRegistrar is an OPTIONAL capability a MemoryService (or any backend) may
@@ -1015,7 +1021,7 @@ func (r *Runner) resolveNewThreadID(ctx context.Context, auth tools.MemoryAuthor
 	// drops task-less/identity-less turns before they reach a turn at all.)
 	if reg, ok := r.memory.(ThreadRegistrar); ok && r.memAutoCommit &&
 		auth.GrantID != "" && auth.SubjectID != "" {
-		id, err := reg.EnsureThread(ctx, auth, ThreadSpec{WorkspaceID: addr.WorkspaceID, Origin: "chat"})
+		id, err := reg.EnsureThread(ctx, auth, ThreadSpec{WorkspaceID: addr.WorkspaceID, Ownership: addr.Ownership, Origin: "chat"})
 		if err == nil && id != "" {
 			slog.InfoContext(ctx, "turn: minted new thread via registrar", slog.String("thread", id))
 			return id
@@ -1302,7 +1308,7 @@ func (r *Runner) commitMessages(ctx context.Context, auth tools.MemoryAuthority,
 	if !r.memAutoCommit || r.memory == nil {
 		return
 	}
-	if err := r.memory.AppendThreadMessages(ctx, auth, addr.WorkspaceID, addr.ThreadID, msgs); err != nil {
+	if err := r.memory.AppendThreadMessages(ctx, auth, addr.WorkspaceID, addr.ThreadID, addr.Ownership, msgs); err != nil {
 		slog.WarnContext(ctx, "memory auto-commit failed", slog.Any("err", err))
 	}
 }

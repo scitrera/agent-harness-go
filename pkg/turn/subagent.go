@@ -147,7 +147,10 @@ func (r *Runner) runSubagentOn(ctx context.Context, req subagent.Request, childT
 				WorkspaceID:    addr.WorkspaceID,
 				ThreadID:       childThreadID,
 				ParentThreadID: parentThread,
-				Origin:         "subagent",
+				// Inherit the parent thread's ownership so a workspace-homed
+				// conversation's sub-threads co-locate under the same workspace.
+				Ownership: addr.Ownership,
+				Origin:    "subagent",
 			}); err != nil {
 				slog.WarnContext(ctx, "subagent: ensure child thread failed",
 					slog.String("thread", childThreadID),

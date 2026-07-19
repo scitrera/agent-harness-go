@@ -47,3 +47,8 @@ require (
 	golang.org/x/sys v0.45.0 // indirect
 	golang.org/x/text v0.24.0 // indirect
 )
+
+// TEMPORARY: local spec until the MessageAddress.ownership field ships in a
+// published tag + the require above is bumped. Mirrors sahara/go.mod so
+// `oss` builds standalone against the same source the harness image uses.
+replace github.com/scitrera/ecosystem-messaging-spec/go => ../../scitrera-ecosystem-messaging-spec/go

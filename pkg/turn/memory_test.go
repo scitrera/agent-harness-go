@@ -16,6 +16,7 @@ type fakeMemory struct {
 	appended        [][]protocol.ChatMessage
 	appendWorkspace string
 	appendThread    string
+	appendOwnership string
 	appendGrant     string
 	recallWorkspace string
 	recallQuery     string
@@ -31,9 +32,10 @@ func (m *fakeMemory) Recall(_ context.Context, auth tools.MemoryAuthority, works
 	return m.hits, nil
 }
 
-func (m *fakeMemory) AppendThreadMessages(_ context.Context, auth tools.MemoryAuthority, workspace, threadID string, msgs []protocol.ChatMessage) error {
+func (m *fakeMemory) AppendThreadMessages(_ context.Context, auth tools.MemoryAuthority, workspace, threadID, ownership string, msgs []protocol.ChatMessage) error {
 	m.appendWorkspace = workspace
 	m.appendThread = threadID
+	m.appendOwnership = ownership
 	m.appendGrant = auth.GrantID
 	m.appended = append(m.appended, msgs)
 	return nil
