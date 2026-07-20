@@ -1,4 +1,12 @@
-package main
+// Package otlpexport installs a global OpenTelemetry tracer + OTLP/HTTP exporter so
+// the harness's pkg/telemetry spans (turn/tool/LLM) are exported to MLflow. It is a
+// SEPARATE package from pkg/telemetry on purpose: importing the span helpers stays
+// lightweight (OTel API only, no-op without a provider), and only a main that calls
+// Init links the OTel SDK + exporter. Both the oss reference CLI and the production
+// sahara main call Init — otherwise spans are created but never exported.
+//
+// See saas/DESIGN_sahara_agent_tracing.md.
+package otlpexport
 
 import (
 	"context"
@@ -17,20 +25,20 @@ import (
 	"github.com/scitrera/agent-harness-go/pkg/telemetry"
 )
 
-// initTracing installs a global OTel TracerProvider + W3C propagator so the
-// harness's already-instrumented turn/tool spans (pkg/telemetry) export to MLflow
-// over OTLP/HTTP. Gated on SAHARA_TRACING_ENABLED + an OTLP endpoint; when either
-// is absent it is a no-op (spans stay no-op, no propagator installed) and returns a
-// no-op shutdown. The returned shutdown (always non-nil) flushes+stops the batch
-// exporter — call it before process exit.
+// Init installs a global TracerProvider (batch OTLP/HTTP exporter) + W3C propagator +
+// the selected backend convention when SAHARA_TRACING_ENABLED is set and an OTLP
+// endpoint is configured. Otherwise it is a no-op (spans stay no-op, no propagator
+// installed) and returns a no-op shutdown. The returned shutdown (always non-nil)
+// flushes + stops the exporter — call it before process exit.
 //
 // Endpoint resolution (first non-empty): SAHARA_TRACING_OTLP_ENDPOINT,
-// OTEL_EXPORTER_OTLP_TRACES_ENDPOINT, OTEL_EXPORTER_OTLP_ENDPOINT. A path-less URL
-// gets MLflow's /v1/traces appended. In the platform the endpoint is the sidecar's
-// local OTLP receiver, which forwards to the llm-gateway /v1/traces route and stamps
-// x-mlflow-experiment-id authoritatively; SAHARA_TRACING_EXPERIMENT_ID lets a
-// standalone harness stamp it itself. See saas/DESIGN_sahara_agent_tracing.md.
-func initTracing(ctx context.Context) (func(context.Context) error, error) {
+// OTEL_EXPORTER_OTLP_TRACES_ENDPOINT, OTEL_EXPORTER_OTLP_ENDPOINT. A path-less URL gets
+// MLflow's /v1/traces appended. In the platform the endpoint is a sidecar-rewritten
+// alias (otlp.local) that reaches the llm-gateway /v1/traces route with authoritative
+// tenant attribution stamped; SAHARA_TRACING_EXPERIMENT_ID lets a standalone run stamp
+// the experiment id itself. SAHARA_TRACING_CONVENTION selects the attribute vocabulary
+// (default MLflow).
+func Init(ctx context.Context) (func(context.Context) error, error) {
 	noop := func(context.Context) error { return nil }
 	if !envBool("SAHARA_TRACING_ENABLED") {
 		return noop, nil
@@ -52,7 +60,7 @@ func initTracing(ctx context.Context) (func(context.Context) error, error) {
 	}
 
 	opts := []otlptracehttp.Option{otlptracehttp.WithEndpointURL(u.String())}
-	if hdrs := tracingHeaders(); len(hdrs) > 0 {
+	if hdrs := exportHeaders(); len(hdrs) > 0 {
 		opts = append(opts, otlptracehttp.WithHeaders(hdrs))
 	}
 	exp, err := otlptracehttp.New(ctx, opts...)
@@ -61,7 +69,7 @@ func initTracing(ctx context.Context) (func(context.Context) error, error) {
 	}
 
 	res, err := resource.New(ctx, resource.WithAttributes(
-		attribute.String("service.name", env("SAHARA_TRACING_SERVICE_NAME", "sahara")),
+		attribute.String("service.name", getenvOr("SAHARA_TRACING_SERVICE_NAME", "sahara")),
 	))
 	if err != nil {
 		res = resource.Default()
@@ -72,16 +80,14 @@ func initTracing(ctx context.Context) (func(context.Context) error, error) {
 	)
 	otel.SetTracerProvider(tp)
 	otel.SetTextMapPropagator(propagation.TraceContext{})
-	// Select the backend attribute convention (default MLflow). Pluggable so a sink
-	// with different conventions can be swapped without touching the turn loop.
 	telemetry.SetConventions(telemetry.SelectConventions(os.Getenv("SAHARA_TRACING_CONVENTION")))
 	return tp.Shutdown, nil
 }
 
-// tracingHeaders builds the static OTLP export headers. SAHARA_TRACING_EXPERIMENT_ID
-// stamps MLflow's required experiment id for standalone runs; in the platform the
-// sidecar receiver stamps it per-tenant, so this stays empty there.
-func tracingHeaders() map[string]string {
+// exportHeaders builds the static OTLP export headers. SAHARA_TRACING_EXPERIMENT_ID
+// stamps MLflow's experiment id for standalone runs; in the platform the sidecar
+// stamps the per-tenant name header, so this stays empty there.
+func exportHeaders() map[string]string {
 	h := map[string]string{}
 	if v := os.Getenv("SAHARA_TRACING_EXPERIMENT_ID"); v != "" {
 		h["x-mlflow-experiment-id"] = v
@@ -104,4 +110,11 @@ func firstNonEmpty(vals ...string) string {
 		}
 	}
 	return ""
+}
+
+func getenvOr(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
 }

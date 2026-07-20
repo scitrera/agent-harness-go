@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/scitrera/agent-harness-go/pkg/telemetry/otlpexport"
 )
 
 func main() {
@@ -48,7 +50,7 @@ func main() {
 
 	// Install the OTel tracer/exporter (no-op unless SAHARA_TRACING_ENABLED + an
 	// OTLP endpoint are set). A tracing init failure must not stop the agent.
-	shutdownTracing, terr := initTracing(context.Background())
+	shutdownTracing, terr := otlpexport.Init(context.Background())
 	if terr != nil {
 		fmt.Fprintln(os.Stderr, "warning: tracing init:", terr)
 	}
