@@ -2,10 +2,12 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 func main() {
@@ -44,6 +46,13 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Install the OTel tracer/exporter (no-op unless SAHARA_TRACING_ENABLED + an
+	// OTLP endpoint are set). A tracing init failure must not stop the agent.
+	shutdownTracing, terr := initTracing(context.Background())
+	if terr != nil {
+		fmt.Fprintln(os.Stderr, "warning: tracing init:", terr)
+	}
+
 	cfg := appConfig{
 		workspaceRoot: *workspace,
 		stateDir:      env("SAHARA_STATE_DIR", filepath.Join(*workspace, ".agent-harness")),
@@ -63,6 +72,13 @@ func main() {
 		err = runACP(cfg)
 	default:
 		err = runWeb(cfg, *addr, !*noBrowser)
+	}
+	// Flush + stop the trace exporter before exit (os.Exit skips defers, so do it
+	// explicitly). Bounded so a stuck collector can't hang shutdown.
+	if shutdownTracing != nil {
+		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = shutdownTracing(sctx)
+		cancel()
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)

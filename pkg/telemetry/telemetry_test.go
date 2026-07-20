@@ -41,7 +41,8 @@ func TestStartAndFinishDoNotPanicWithoutExporter(t *testing.T) {
 	_, llm := StartLLM(ctx, "m")
 	var nilErr error
 	Finish(llm, &nilErr)
-	_, tool := StartTool(ctx, "shell")
+	_, tool := StartTool(ctx, "shell", json.RawMessage(`{"cmd":"ls"}`))
+	AnnotateToolResult(tool, json.RawMessage(`{"ok":true}`), false)
 	FinishErr(tool, context.Canceled)
 	Finish(span, &nilErr)
 }

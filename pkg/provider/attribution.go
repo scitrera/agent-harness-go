@@ -3,6 +3,9 @@ package provider
 import (
 	"context"
 	"net/http"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
 )
 
 // Attribution carries the per-turn identifiers stamped as X-Scitrera-*
@@ -46,6 +49,14 @@ func attributionFromContext(ctx context.Context) (Attribution, bool) {
 // (the gateway simply sees fewer attributes). Never overwrites a header a
 // caller already set.
 func applyAttributionHeaders(ctx context.Context, req *http.Request) {
+	// Propagate the active trace context (W3C traceparent) so the platform LLM
+	// gateway links its own LLM span into the harness's turn trace instead of
+	// starting a separate root (annotate-and-link; see
+	// saas/DESIGN_sahara_agent_tracing.md). The global propagator is a no-op until
+	// initTracing installs one, so this is inert when tracing is disabled, and
+	// TraceContext writes nothing when ctx carries no valid recording span.
+	otel.GetTextMapPropagator().Inject(ctx, propagation.HeaderCarrier(req.Header))
+
 	a, ok := attributionFromContext(ctx)
 	if !ok {
 		return

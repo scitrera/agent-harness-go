@@ -56,35 +56,54 @@ func stringField(m map[string]json.RawMessage, key string) (string, bool) {
 	return "", false
 }
 
-// StartTurn starts the per-turn span with addressing attributes.
+// StartTurn starts the per-turn span (the agent trace root) with generic
+// addressing attributes; the active Conventions add the backend's span-type mapping
+// (e.g. MLflow AGENT) so it anchors the agent-shaped trace.
 func StartTurn(ctx context.Context, addr protocol.MessageAddress) (context.Context, trace.Span) {
-	return tracer().Start(ctx, "agent.turn", trace.WithAttributes(
+	attrs := []attribute.KeyValue{
 		attribute.String("scitrera.tenant", addr.TenantID),
 		attribute.String("scitrera.workspace", addr.WorkspaceID),
 		attribute.String("scitrera.thread", addr.ThreadID),
 		attribute.String("scitrera.task", addr.TaskID),
-	))
+	}
+	attrs = append(attrs, active.Turn(addr)...)
+	return tracer().Start(ctx, "agent.turn", trace.WithAttributes(attrs...))
 }
 
-// StartLLM starts a span around one provider request.
+// StartLLM starts a span around one provider request (generic llm.model attribute).
+// Whether it carries a backend span-type is the convention's call — the MLflow
+// convention leaves it untyped so the platform gateway can supply the authoritative
+// LLM mirror span (linked via the injected traceparent) without double-counting.
 func StartLLM(ctx context.Context, model string) (context.Context, trace.Span) {
-	return tracer().Start(ctx, "agent.llm.request", trace.WithAttributes(
-		attribute.String("llm.model", model),
-	))
+	attrs := []attribute.KeyValue{attribute.String("llm.model", model)}
+	attrs = append(attrs, active.LLM(model)...)
+	return tracer().Start(ctx, "agent.llm.request", trace.WithAttributes(attrs...))
 }
 
-// StartTool starts a span around one tool execution.
-func StartTool(ctx context.Context, name string) (context.Context, trace.Span) {
-	return tracer().Start(ctx, "agent.tool.exec", trace.WithAttributes(
-		attribute.String("tool.name", name),
-	))
+// StartTool starts a span around one tool execution (generic tool.name attribute);
+// the convention adds the backend span-type + inputs mapping (raw JSON args). Pair
+// with AnnotateToolResult at the finish site.
+func StartTool(ctx context.Context, name string, inputs json.RawMessage) (context.Context, trace.Span) {
+	attrs := []attribute.KeyValue{attribute.String("tool.name", name)}
+	attrs = append(attrs, active.Tool(inputs)...)
+	return tracer().Start(ctx, "agent.tool.exec", trace.WithAttributes(attrs...))
 }
 
-// StartSubagent starts a span around an in-process sub-agent run.
+// AnnotateToolResult records the tool's output payload + error flag on its span via
+// the active convention (e.g. MLflow spanOutputs + tool.is_error). Safe on a
+// nil/empty payload. Call before Finish/FinishErr.
+func AnnotateToolResult(span trace.Span, outputs json.RawMessage, isError bool) {
+	if kv := active.ToolResult(outputs, isError); len(kv) > 0 {
+		span.SetAttributes(kv...)
+	}
+}
+
+// StartSubagent starts a span around an in-process sub-agent run (generic depth
+// attribute); the convention adds any backend span-type mapping.
 func StartSubagent(ctx context.Context, depth int) (context.Context, trace.Span) {
-	return tracer().Start(ctx, "agent.subagent", trace.WithAttributes(
-		attribute.Int("subagent.depth", depth),
-	))
+	attrs := []attribute.KeyValue{attribute.Int("subagent.depth", depth)}
+	attrs = append(attrs, active.Subagent()...)
+	return tracer().Start(ctx, "agent.subagent", trace.WithAttributes(attrs...))
 }
 
 // Finish ends a span, recording an error+status when *err is non-nil. Intended

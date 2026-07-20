@@ -13,7 +13,6 @@ import (
 	"github.com/scitrera/agent-harness-go/pkg/hooks"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 	"github.com/scitrera/agent-harness-go/pkg/provider"
-	"github.com/scitrera/agent-harness-go/pkg/telemetry"
 	"github.com/scitrera/agent-harness-go/pkg/tools"
 )
 
@@ -95,8 +94,9 @@ func (r *Runner) invokeTool(ctx context.Context, session *harness.Session, addr 
 
 // invokeToolProvider invokes a provider-surfaced tool via its ToolProvider,
 // forwarding the per-turn OBO authority + enclosing message id (on ctx and on
-// the request) so the remote side can resolve the acting user. The call is
-// wrapped in a StartTool span for uniform provider telemetry. It first runs the
+// the request) so the remote side can resolve the acting user. The tool-exec
+// telemetry span is opened once by the caller (runProviderLoop), so this path is
+// not re-wrapped. It first runs the
 // provider authorization pipeline (grant → policy → safety, plus the interactive
 // prompt only when the outcome is a Prompt): with no ToolPolicy, the default
 // no-op safety, and a TrustDefault tool this resolves to Allow and the provider
@@ -118,8 +118,6 @@ func (r *Runner) invokeToolProvider(ctx context.Context, p ToolProvider, addr pr
 	if id, ok := tools.MessageIDFrom(ctx); ok {
 		req.MessageID = id
 	}
-	ctx, span := telemetry.StartTool(ctx, call.Name)
-	defer func() { telemetry.FinishErr(span, err) }()
 	return p.Invoke(ctx, req)
 }
 

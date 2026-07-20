@@ -181,11 +181,12 @@ func (r *Runner) runProviderLoop(ctx context.Context, session *harness.Session, 
 
 			_, dynamicCall := tt.providerByTool[call.Name]
 			toolStart := time.Now()
-			toolCtx, toolSpan := telemetry.StartTool(ctx, call.Name)
+			toolCtx, toolSpan := telemetry.StartTool(ctx, call.Name, protocol.ArgsToRaw(call.Args))
 			r.publishToolEvent(toolCtx, applyHookDecision(toolEventFromCall(tools.ToolEventStarted, call), decision))
 			r.notifyToolStarted(toolCtx, hc)
 			result, err := r.invokeTool(toolCtx, session, addr, call, tt)
 			r.notifyToolFinished(toolCtx, hc, err != nil, err)
+			telemetry.AnnotateToolResult(toolSpan, result.Payload, result.IsError || err != nil)
 			telemetry.FinishErr(toolSpan, err)
 			r.publishToolEvent(toolCtx, finishToolEvent(call, toolStart, result, err))
 			// Canonical per-call log covering every tool — local/static, MCP,
