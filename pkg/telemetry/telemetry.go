@@ -80,13 +80,19 @@ func StartLLM(ctx context.Context, model string) (context.Context, trace.Span) {
 	return tracer().Start(ctx, "agent.llm.request", trace.WithAttributes(attrs...))
 }
 
-// StartTool starts a span around one tool execution (generic tool.name attribute);
-// the convention adds the backend span-type + inputs mapping (raw JSON args). Pair
-// with AnnotateToolResult at the finish site.
+// StartTool starts a span around one tool execution. The span is NAMED after the
+// tool (e.g. "frontend_show_toast") — MLflow's Tool Calls dashboard labels/aggregates
+// TOOL spans by span name, so a static name would collapse every tool into one row.
+// The convention adds the backend span-type + inputs mapping (raw JSON args); pair with
+// AnnotateToolResult at the finish site.
 func StartTool(ctx context.Context, name string, inputs json.RawMessage) (context.Context, trace.Span) {
+	spanName := name
+	if spanName == "" {
+		spanName = "agent.tool.exec"
+	}
 	attrs := []attribute.KeyValue{attribute.String("tool.name", name)}
 	attrs = append(attrs, active.Tool(inputs)...)
-	return tracer().Start(ctx, "agent.tool.exec", trace.WithAttributes(attrs...))
+	return tracer().Start(ctx, spanName, trace.WithAttributes(attrs...))
 }
 
 // AnnotateToolResult records the tool's output payload + error flag on its span via

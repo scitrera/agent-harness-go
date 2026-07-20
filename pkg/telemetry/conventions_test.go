@@ -57,13 +57,15 @@ func TestMLflowConventionEmitsBareSpanType(t *testing.T) {
 		t.Fatalf("agent.turn mlflow.spanType = %q (ok=%v), want bare \"AGENT\"", v.AsString(), ok)
 	}
 
-	toolSpan, ok := byName["agent.tool.exec"]
+	// The tool span is NAMED after the tool (so MLflow's dashboard labels it per-tool),
+	// not the static "agent.tool.exec".
+	toolSpan, ok := byName["read_file"]
 	if !ok {
-		t.Fatal("missing agent.tool.exec span")
+		t.Fatal("missing tool span named after the tool (read_file)")
 	}
 	v, ok := attrOf(toolSpan.Attributes, "mlflow.spanType")
 	if !ok {
-		t.Fatal("agent.tool.exec missing mlflow.spanType")
+		t.Fatal("tool span missing mlflow.spanType")
 	}
 	// The whole point: the value is the bare enum, not a JSON-quoted string. A
 	// wrong (JSON) encoding would yield the 6-char `"TOOL"`.
