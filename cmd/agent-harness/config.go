@@ -11,4 +11,5 @@ type appConfig struct {
 	baseURL       string
 	model         string
 	seed          bool
+	record        string // --record path: opt-in per-LLM-call JSONL trace log ("" = off)
 }

@@ -58,7 +58,10 @@ func buildRunner(cfg appConfig, pub channel.Publisher, approvals approval.Awaite
 	if k := os.Getenv("SAHARA_LLM_API_KEY"); k != "" {
 		auth = "Bearer " + k
 	}
-	prov, err := provider.NewOpenAICompatClient(provider.OpenAICompatConfig{BaseURL: cfg.baseURL, AuthHeader: auth, Format: provider.FormatOpenAI})
+	// StreamUsage: the oss CLI talks to a standard OpenAI-compatible endpoint that
+	// sends a terminal `[DONE]`/usage chunk, so request streamed token usage for
+	// trace/export. (Distributions behind a proxy that omits `[DONE]` leave it off.)
+	prov, err := provider.NewOpenAICompatClient(provider.OpenAICompatConfig{BaseURL: cfg.baseURL, AuthHeader: auth, Format: provider.FormatOpenAI, StreamUsage: true})
 	if err != nil {
 		return nil, nil, fmt.Errorf("provider: %w", err)
 	}
@@ -81,6 +84,16 @@ func buildRunner(cfg appConfig, pub channel.Publisher, approvals approval.Awaite
 	// Summarizer wired here yet, so it degrades to classic).
 	compactor := compaction.CompactorFor(os.Getenv("AGENT_HARNESS_COMPACTION"), localtools.NewEvictionSink(ws, ""), nil)
 
+	// Opt-in trace/training recorder: off unless --record <path> is set.
+	var recorder turn.TurnRecorder
+	if cfg.record != "" {
+		fr, rerr := newFileTurnRecorder(cfg.record)
+		if rerr != nil {
+			return nil, nil, fmt.Errorf("record: %w", rerr)
+		}
+		recorder = fr
+	}
+
 	runner, err := turn.NewRunner(turn.Config{
 		Store:     fsStore,
 		Loader:    fsStore,
@@ -100,8 +113,9 @@ func buildRunner(cfg appConfig, pub channel.Publisher, approvals approval.Awaite
 			Model:              cfg.model,
 			Now:                time.Now,
 		}),
-		Model:     cfg.model,
-		Streaming: true,
+		Model:        cfg.model,
+		Streaming:    true,
+		TurnRecorder: recorder,
 		Commands:  commands.New(cmdSpecs),
 		Now:       time.Now,
 		Approvals: approvals,

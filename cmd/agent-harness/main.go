@@ -23,6 +23,9 @@ func main() {
 	acpMode := flag.Bool("acp", false, "run as an Agent Client Protocol (ACP) agent over stdio")
 	addr := flag.String("addr", env("SAHARA_WEB_ADDR", "127.0.0.1:8787"), "web UI listen address (NO auth - localhost only)")
 	noBrowser := flag.Bool("no-browser", false, "do not open a browser (web mode)")
+	exportThread := flag.String("export", "", "export thread history as JSONL to stdout and exit (a thread id, or 'all')")
+	exportFormat := flag.String("export-format", "openai", "export schema: openai (chat SFT) | trace (lossless spec messages)")
+	record := flag.String("record", "", "record each LLM call (assembled prompt + response + usage) as JSONL to this path; off by default")
 	flag.Usage = func() {
 		fmt.Fprintf(flag.CommandLine.Output(), "Usage: agent-harness [flags]\n\nFlags:\n")
 		flag.VisitAll(func(f *flag.Flag) {
@@ -34,6 +37,17 @@ func main() {
 		})
 	}
 	flag.Parse()
+
+	// Export mode reads local state only (no provider needed): dump thread history
+	// as JSONL and exit, before the base-url requirement below.
+	if *exportThread != "" {
+		stateDir := env("SAHARA_STATE_DIR", filepath.Join(*workspace, ".agent-harness"))
+		if err := runExport(stateDir, *exportThread, *exportFormat, os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	if *baseURL == "" {
 		fmt.Fprintln(os.Stderr, "error: set --base-url or SAHARA_LLM_BASE_URL (an OpenAI-compatible endpoint)")
@@ -62,6 +76,7 @@ func main() {
 		baseURL:       *baseURL,
 		model:         *model,
 		seed:          *seed,
+		record:        *record,
 	}
 
 	var err error
