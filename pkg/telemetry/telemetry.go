@@ -11,6 +11,7 @@ package telemetry
 import (
 	"context"
 	"encoding/json"
+	"time"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -102,6 +103,22 @@ func AnnotateToolResult(span trace.Span, outputs json.RawMessage, isError bool) 
 	if kv := active.ToolResult(outputs, isError); len(kv) > 0 {
 		span.SetAttributes(kv...)
 	}
+}
+
+// RecordLLMResult stamps the served model, token usage, and wall-clock latency on
+// the LLM span (best-effort; a no-op span just drops them). Call on a successful
+// provider response before Finish. Generic attribute keys; a convention MAY remap.
+func RecordLLMResult(span trace.Span, model string, promptTokens, completionTokens, totalTokens int, latency time.Duration) {
+	if span == nil {
+		return
+	}
+	span.SetAttributes(
+		attribute.String("llm.response.model", model),
+		attribute.Int("llm.usage.prompt_tokens", promptTokens),
+		attribute.Int("llm.usage.completion_tokens", completionTokens),
+		attribute.Int("llm.usage.total_tokens", totalTokens),
+		attribute.Int64("llm.latency_ms", latency.Milliseconds()),
+	)
 }
 
 // StartSubagent starts a span around an in-process sub-agent run (generic depth

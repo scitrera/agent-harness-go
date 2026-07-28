@@ -60,6 +60,12 @@ type OpenAICompatConfig struct {
 	// default false so it cannot regress existing behavior; a no-op on the openai
 	// wire format (which drops the hint).
 	PromptCaching bool
+	// StreamUsage, when true, requests a trailing usage chunk on streamed calls
+	// (stream_options.include_usage) and reads it instead of short-circuiting on
+	// finish_reason. Opt-in and default false: it must only be enabled against
+	// providers that send a terminal `[DONE]`/usage chunk, else the stream waits on
+	// the idle-liveness timer. Non-stream calls always report usage regardless.
+	StreamUsage bool
 }
 
 // OpenAICompatClient talks to an OpenAI-compatible chat endpoint over HTTP. In
@@ -78,6 +84,7 @@ type OpenAICompatClient struct {
 	streamFirstChunk time.Duration
 	streamIdle       time.Duration
 	promptCaching    bool
+	streamUsage      bool
 }
 
 type ChatRequest struct {
@@ -87,6 +94,24 @@ type ChatRequest struct {
 	Stream      bool                   `json:"stream,omitempty"`
 	Temperature float64                `json:"temperature,omitempty"`
 	MaxTokens   int                    `json:"max_tokens,omitempty"`
+	// StreamOptions carries OpenAI streaming options; ChatStream sets
+	// include_usage so the final chunk reports token usage. Omitted on non-stream
+	// requests (the usage block is always present in a non-stream response).
+	StreamOptions *StreamOptions `json:"stream_options,omitempty"`
+}
+
+// StreamOptions mirrors OpenAI's stream_options. include_usage asks the provider
+// to emit a final usage-only chunk on the streamed response.
+type StreamOptions struct {
+	IncludeUsage bool `json:"include_usage,omitempty"`
+}
+
+// Usage is the provider-reported token accounting for one chat completion. Fields
+// are best-effort: a provider that omits usage yields a zero Usage.
+type Usage struct {
+	PromptTokens     int `json:"prompt_tokens,omitempty"`
+	CompletionTokens int `json:"completion_tokens,omitempty"`
+	TotalTokens      int `json:"total_tokens,omitempty"`
 }
 
 // ToolSpec is a tool exposed to the model. It marshals to the OpenAI
@@ -115,6 +140,11 @@ func (t ToolSpec) MarshalJSON() ([]byte, error) {
 
 type ChatResponse struct {
 	Message protocol.ChatMessage `json:"message"`
+	// Model is the provider-echoed served model ("" if the provider omits it; the
+	// caller falls back to the requested model).
+	Model string `json:"model,omitempty"`
+	// Usage is the provider-reported token accounting (zero when unavailable).
+	Usage Usage `json:"usage,omitempty"`
 }
 
 func NewOpenAICompatClient(cfg OpenAICompatConfig) (*OpenAICompatClient, error) {
@@ -153,7 +183,7 @@ func NewOpenAICompatClient(cfg OpenAICompatConfig) (*OpenAICompatClient, error) 
 	if format == "" {
 		format = FormatNative
 	}
-	return &OpenAICompatClient{baseURL: parsed, chatPath: chatPath, authHeader: cfg.AuthHeader, format: format, client: client, streamClient: streamClient, streamFirstChunk: streamFirstChunk, streamIdle: streamIdle, promptCaching: cfg.PromptCaching}, nil
+	return &OpenAICompatClient{baseURL: parsed, chatPath: chatPath, authHeader: cfg.AuthHeader, format: format, client: client, streamClient: streamClient, streamFirstChunk: streamFirstChunk, streamIdle: streamIdle, promptCaching: cfg.PromptCaching, streamUsage: cfg.StreamUsage}, nil
 }
 
 func (c *OpenAICompatClient) BaseURL() string {
@@ -247,12 +277,13 @@ func stampPromptCacheBreakpoint(msgs []protocol.ChatMessage) []protocol.ChatMess
 }
 
 type openAIChatRequest struct {
-	Model       string          `json:"model,omitempty"`
-	Messages    []openAIMessage `json:"messages"`
-	Tools       []ToolSpec      `json:"tools,omitempty"`
-	Stream      bool            `json:"stream,omitempty"`
-	Temperature float64         `json:"temperature,omitempty"`
-	MaxTokens   int             `json:"max_tokens,omitempty"`
+	Model         string          `json:"model,omitempty"`
+	Messages      []openAIMessage `json:"messages"`
+	Tools         []ToolSpec      `json:"tools,omitempty"`
+	Stream        bool            `json:"stream,omitempty"`
+	Temperature   float64         `json:"temperature,omitempty"`
+	MaxTokens     int             `json:"max_tokens,omitempty"`
+	StreamOptions *StreamOptions  `json:"stream_options,omitempty"`
 }
 
 type openAIMessage struct {
@@ -296,7 +327,7 @@ func toOpenAIRequest(chat ChatRequest) openAIChatRequest {
 	for _, m := range chat.Messages {
 		msgs = append(msgs, lowerMessage(m)...)
 	}
-	return openAIChatRequest{Model: chat.Model, Messages: msgs, Tools: chat.Tools, Stream: chat.Stream, Temperature: chat.Temperature, MaxTokens: chat.MaxTokens}
+	return openAIChatRequest{Model: chat.Model, Messages: msgs, Tools: chat.Tools, Stream: chat.Stream, Temperature: chat.Temperature, MaxTokens: chat.MaxTokens, StreamOptions: chat.StreamOptions}
 }
 
 // lowerMessage converts one native message into one or more OpenAI messages.
@@ -442,6 +473,8 @@ func decodeChatResponse(data []byte) (ChatResponse, error) {
 	}
 	var openAI struct {
 		ID      string `json:"id"`
+		Model   string `json:"model"`
+		Usage   Usage  `json:"usage"`
 		Choices []struct {
 			Message struct {
 				Role      protocol.Role `json:"role"`
@@ -497,7 +530,11 @@ func decodeChatResponse(data []byte) (ChatResponse, error) {
 		}
 		parts = append(parts, part)
 	}
-	return ChatResponse{Message: protocol.ChatMessage{ID: openAI.ID, Role: role, Content: parts}}, nil
+	return ChatResponse{
+		Message: protocol.ChatMessage{ID: openAI.ID, Role: role, Content: parts},
+		Model:   openAI.Model,
+		Usage:   openAI.Usage,
+	}, nil
 }
 
 // toolCallArgs normalizes OpenAI tool-call arguments (a JSON-encoded string, or

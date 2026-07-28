@@ -51,6 +51,9 @@ func (r *Runner) runProviderLoop(ctx context.Context, session *harness.Session, 
 	}
 	maxToolIterations := toolIterationLimit(ctx, r.maxToolIterations)
 	toolIterations := 0
+	// Sum token usage across this turn's provider calls; stamped onto the final
+	// assistant message so the persisted turn carries its own accounting.
+	var tu turnUsage
 	for {
 		// A tool earlier THIS turn may have pinned a model — load_skill honoring a
 		// skill's preferred_model, or /model. Apply it to the rest of this turn's
@@ -84,6 +87,7 @@ func (r *Runner) runProviderLoop(ctx context.Context, session *harness.Session, 
 		// Stick with the (possibly escalated) model for the rest of the turn:
 		// reverting after a fallback would likely re-hit the original failure.
 		model = usedModel
+		tu.add(response.Usage, usedModel)
 		assistant := response.Message
 		if assistant.Addr.ThreadID == "" {
 			assistant.Addr = addr
@@ -101,6 +105,9 @@ func (r *Runner) runProviderLoop(ctx context.Context, session *harness.Session, 
 			return protocol.ChatMessage{}, err
 		}
 		if len(calls) == 0 {
+			// Terminal assistant of the turn: stamp the summed token usage so it
+			// persists (survives finalize, which preserves Meta).
+			tu.stamp(&assistant)
 			return assistant, nil
 		}
 		if toolIterations >= maxToolIterations {

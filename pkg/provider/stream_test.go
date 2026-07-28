@@ -35,6 +35,62 @@ func streamClient(t *testing.T, baseURL string) *OpenAICompatClient {
 	return c
 }
 
+// usageStreamClient builds a client that opts into streamed usage capture.
+func usageStreamClient(t *testing.T, baseURL string) *OpenAICompatClient {
+	t.Helper()
+	c, err := NewOpenAICompatClient(OpenAICompatConfig{BaseURL: baseURL, Format: FormatOpenAI, StreamUsage: true})
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+	return c
+}
+
+// TestChatStreamCapturesUsage verifies that with StreamUsage on, the trailing
+// usage-only chunk (which arrives AFTER finish_reason and carries no choices) is
+// read into ChatResponse.Usage + Model rather than being skipped by the
+// finish_reason short-circuit.
+func TestChatStreamCapturesUsage(t *testing.T) {
+	srv := sseServer(t, []string{
+		`{"id":"a1","model":"gpt-4o-mini","choices":[{"delta":{"role":"assistant","content":"Hi"},"finish_reason":"stop"}]}`,
+		`{"model":"gpt-4o-mini","choices":[],"usage":{"prompt_tokens":11,"completion_tokens":3,"total_tokens":14}}`,
+	})
+	defer srv.Close()
+
+	resp, err := usageStreamClient(t, srv.URL).ChatStream(context.Background(), ChatRequest{}, func(string) error { return nil })
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	if resp.Usage.PromptTokens != 11 || resp.Usage.CompletionTokens != 3 || resp.Usage.TotalTokens != 14 {
+		t.Fatalf("usage = %+v, want 11/3/14", resp.Usage)
+	}
+	if resp.Model != "gpt-4o-mini" {
+		t.Fatalf("model = %q, want gpt-4o-mini", resp.Model)
+	}
+	tp, ok := resp.Message.Content[0].AsText()
+	if !ok || tp.Text != "Hi" {
+		t.Fatalf("final text = %q", tp.Text)
+	}
+}
+
+// TestChatStreamDefaultDropsPostFinishUsage confirms the default (StreamUsage off)
+// keeps the finish_reason short-circuit — so a post-finish usage chunk is NOT
+// awaited (no regression to the [DONE]-less hang). Usage is simply zero.
+func TestChatStreamDefaultDropsPostFinishUsage(t *testing.T) {
+	srv := sseServer(t, []string{
+		`{"id":"a1","choices":[{"delta":{"content":"Hi"},"finish_reason":"stop"}]}`,
+		`{"choices":[],"usage":{"prompt_tokens":11,"completion_tokens":3,"total_tokens":14}}`,
+	})
+	defer srv.Close()
+
+	resp, err := streamClient(t, srv.URL).ChatStream(context.Background(), ChatRequest{}, func(string) error { return nil })
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	if resp.Usage.TotalTokens != 0 {
+		t.Fatalf("usage total = %d, want 0 (finish_reason short-circuit before usage chunk)", resp.Usage.TotalTokens)
+	}
+}
+
 func TestChatStreamSSEText(t *testing.T) {
 	srv := sseServer(t, []string{
 		`{"id":"a1","choices":[{"delta":{"role":"assistant","content":"Hel"}}]}`,

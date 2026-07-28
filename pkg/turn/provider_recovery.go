@@ -69,7 +69,7 @@ func (r *Runner) callWithRecovery(ctx context.Context, addr protocol.MessageAddr
 			messages = resolved
 		}
 		req := provider.ChatRequest{Model: model, Messages: messages, Tools: tt.specs}
-		response, err := r.invokeProvider(ctx, req, streamer)
+		response, err := r.invokeProvider(ctx, addr, req, streamer)
 		if err == nil {
 			return response, model, nil
 		}
@@ -195,7 +195,7 @@ func defaultRetryBackoff(attempt int) time.Duration {
 
 // invokeProvider issues one provider call, streaming tokens via the streamer
 // when the provider supports it and streaming is enabled.
-func (r *Runner) invokeProvider(ctx context.Context, req provider.ChatRequest, streamer *turnStreamer) (resp provider.ChatResponse, err error) {
+func (r *Runner) invokeProvider(ctx context.Context, addr protocol.MessageAddress, req provider.ChatRequest, streamer *turnStreamer) (resp provider.ChatResponse, err error) {
 	ctx, span := telemetry.StartLLM(ctx, req.Model)
 	defer telemetry.Finish(span, &err)
 	// Log every provider call + its outcome. The LLM request is otherwise opaque
@@ -240,6 +240,7 @@ func (r *Runner) invokeProvider(ctx context.Context, req provider.ChatRequest, s
 			p = rp
 		}
 	}
+	start := time.Now()
 	if sp, ok := p.(StreamingProvider); ok && r.streaming {
 		textIndex := -1
 		onDelta := func(text string) error {
@@ -253,8 +254,42 @@ func (r *Runner) invokeProvider(ctx context.Context, req provider.ChatRequest, s
 			return streamer.tokenDelta(ctx, textIndex, text)
 		}
 		resp, err = sp.ChatStream(ctx, req, onDelta)
-		return resp, err
+	} else {
+		resp, err = p.Chat(ctx, req)
 	}
-	resp, err = p.Chat(ctx, req)
+	// On success, record the served model, token usage, and latency onto the LLM
+	// span + the harness log. Usage is best-effort (zero when the provider omits
+	// it / the streamed usage chunk wasn't captured). This is also the single
+	// choke point a per-call trace recorder hooks (see TurnRecorder).
+	if err == nil {
+		respModel := resp.Model
+		if respModel == "" {
+			respModel = req.Model
+		}
+		latency := time.Since(start)
+		telemetry.RecordLLMResult(span, respModel, resp.Usage.PromptTokens, resp.Usage.CompletionTokens, resp.Usage.TotalTokens, latency)
+		slog.InfoContext(ctx, "llm: provider result",
+			slog.String("model", respModel),
+			slog.Int("prompt_tokens", resp.Usage.PromptTokens),
+			slog.Int("completion_tokens", resp.Usage.CompletionTokens),
+			slog.Int("total_tokens", resp.Usage.TotalTokens),
+			slog.Int64("latency_ms", latency.Milliseconds()))
+		// Opt-in trace/training capture: record the assembled prompt + response.
+		// Best-effort — a recorder failure must never fail the turn.
+		if r.recorder != nil {
+			rec := LLMCallRecord{
+				Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
+				Thread:    addr.ThreadID,
+				Model:     respModel,
+				Messages:  req.Messages,
+				Response:  resp.Message,
+				Usage:     resp.Usage,
+				LatencyMS: latency.Milliseconds(),
+			}
+			if rerr := r.recorder.RecordLLMCall(ctx, rec); rerr != nil {
+				slog.WarnContext(ctx, "trace recorder failed", slog.Any("err", rerr))
+			}
+		}
+	}
 	return resp, err
 }

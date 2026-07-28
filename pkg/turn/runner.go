@@ -121,6 +121,9 @@ type Runner struct {
 	// skillRealizer materializes a loaded skill's bundle files into /skills; installed
 	// on ctx each turn for load_skill. nil → no materialization.
 	skillRealizer tools.SkillRealizerFunc
+	// recorder captures one record per successful provider call for trace/training
+	// export. nil → no recording (zero overhead); wired only when opted in.
+	recorder TurnRecorder
 
 	maxToolIterations   int
 	maxModelAttempts    int
@@ -263,6 +266,11 @@ type Config struct {
 	// it). nil → no materialization (skills load body-only). The distribution wires
 	// the source (MemoryLayer bundle files / workspace folders); oss stays agnostic.
 	SkillRealizer tools.SkillRealizerFunc
+	// TurnRecorder, when set, receives one LLMCallRecord per successful provider
+	// call (the assembled prompt + response + usage + latency) for trace/training
+	// export. nil → no recording (the default; zero overhead). Opt-in because it
+	// captures the full prompt on every call.
+	TurnRecorder TurnRecorder
 	// ProviderResolver, when set, maps the per-turn model to a distinct Provider
 	// (multi-provider config/models.yaml: a model referencing a named provider is
 	// served by that upstream). A model with no provider — or any resolution
@@ -509,6 +517,7 @@ func NewRunner(cfg Config) (*Runner, error) {
 		model:                     cfg.Model,
 		modelRegistry:             cfg.ModelRegistry,
 		skillRealizer:             cfg.SkillRealizer,
+		recorder:                  cfg.TurnRecorder,
 		modelSelector:             modelSelector,
 		providerResolver:          cfg.ProviderResolver,
 		threadModels:              map[string]string{},

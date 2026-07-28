@@ -76,6 +76,11 @@ func CompactionCount(ctx context.Context) int {
 const (
 	MetaWorldState    = "scitrera_world_state"
 	MetaContextBudget = "scitrera_context_budget"
+	// MetaUsage carries the finalized assistant message's per-turn token
+	// accounting ({model, prompt_tokens, completion_tokens, total_tokens, calls}),
+	// summed across the turn's provider calls. Present only when a provider
+	// reported usage; consumed by trace export.
+	MetaUsage = "scitrera_usage"
 )
 
 type Report struct {

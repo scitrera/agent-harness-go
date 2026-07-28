@@ -24,6 +24,15 @@ type DeltaFunc func(text string) error
 // decoding a normal JSON response (emitting the full text as one delta).
 func (c *OpenAICompatClient) ChatStream(ctx context.Context, chat ChatRequest, onDelta DeltaFunc) (ChatResponse, error) {
 	chat.Stream = true
+	// Opt-in: ask for a trailing usage-only chunk so streamed calls report token
+	// accounting (OpenAI omits usage on streamed responses unless include_usage is
+	// set). Gated because the usage chunk arrives AFTER finish_reason, so capturing
+	// it means NOT short-circuiting on finish — which would re-expose the hang on
+	// proxies that omit the trailing `[DONE]` (e.g. the MLflow AI Gateway). Enabled
+	// only against providers known to send `[DONE]`+usage (the oss direct path).
+	if c.streamUsage && chat.StreamOptions == nil {
+		chat.StreamOptions = &StreamOptions{IncludeUsage: true}
+	}
 	chat.Messages = sanitizeTranscript(chat.Messages)
 	body, err := c.encodeRequest(chat)
 	if err != nil {
@@ -80,7 +89,7 @@ func (c *OpenAICompatClient) ChatStream(ctx context.Context, chat ChatRequest, o
 		}
 		return out, nil
 	}
-	return parseSSEStream(resp.Body, onDelta, reset)
+	return parseSSEStream(resp.Body, onDelta, reset, c.streamUsage)
 }
 
 type sseToolAccumulator struct {
@@ -89,7 +98,7 @@ type sseToolAccumulator struct {
 	args strings.Builder
 }
 
-func parseSSEStream(r io.Reader, onDelta DeltaFunc, reset func()) (ChatResponse, error) {
+func parseSSEStream(r io.Reader, onDelta DeltaFunc, reset func(), wantUsage bool) (ChatResponse, error) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), 8<<20)
 
@@ -98,6 +107,8 @@ func parseSSEStream(r io.Reader, onDelta DeltaFunc, reset func()) (ChatResponse,
 	var text strings.Builder
 	tools := map[int]*sseToolAccumulator{}
 	var order []int
+	var usage Usage
+	var respModel string
 
 	for scanner.Scan() {
 		if reset != nil {
@@ -113,6 +124,8 @@ func parseSSEStream(r io.Reader, onDelta DeltaFunc, reset func()) (ChatResponse,
 		}
 		var chunk struct {
 			ID      string `json:"id"`
+			Model   string `json:"model"`
+			Usage   *Usage `json:"usage"`
 			Choices []struct {
 				// finish_reason is the OpenAI terminal signal ("stop"/"length"/
 				// "tool_calls"/...). We honor it as end-of-stream so the turn
@@ -140,6 +153,18 @@ func parseSSEStream(r io.Reader, onDelta DeltaFunc, reset func()) (ChatResponse,
 		}
 		if chunk.ID != "" {
 			id = chunk.ID
+		}
+		if chunk.Model != "" {
+			respModel = chunk.Model
+		}
+		// Usage arrives on the trailing chunk (include_usage), which carries no
+		// choices — capture it BEFORE the empty-choices skip below, then end the
+		// stream (it's the last frame before `[DONE]`).
+		if chunk.Usage != nil && chunk.Usage.TotalTokens != 0 {
+			usage = *chunk.Usage
+			if wantUsage {
+				break
+			}
 		}
 		if len(chunk.Choices) == 0 {
 			continue
@@ -174,7 +199,12 @@ func parseSSEStream(r io.Reader, onDelta DeltaFunc, reset func()) (ChatResponse,
 		// final content or tool-call argument tail). This makes the stream end
 		// deterministically on finish_reason rather than blocking on the next
 		// scanner read waiting for `[DONE]`/EOF the upstream may never send.
-		if chunk.Choices[0].FinishReason != "" {
+		// Short-circuit on the model's finish signal so the turn finalizes without
+		// blocking on a `[DONE]` the upstream may never send. When usage was
+		// requested we DON'T stop here — the usage-only chunk (captured above)
+		// arrives just after finish and ends the loop; the idle-liveness timer is
+		// the backstop.
+		if chunk.Choices[0].FinishReason != "" && !wantUsage {
 			break
 		}
 	}
@@ -214,5 +244,9 @@ func parseSSEStream(r io.Reader, onDelta DeltaFunc, reset func()) (ChatResponse,
 		}
 		parts = append(parts, part)
 	}
-	return ChatResponse{Message: protocol.ChatMessage{ID: id, Role: role, Content: parts}}, nil
+	return ChatResponse{
+		Message: protocol.ChatMessage{ID: id, Role: role, Content: parts},
+		Model:   respModel,
+		Usage:   usage,
+	}, nil
 }
