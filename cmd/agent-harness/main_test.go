@@ -21,6 +21,46 @@ type recordingSubagentRunner struct {
 	allowedTools []string
 }
 
+func TestSelectAppModeDefaultsToTUI(t *testing.T) {
+	mode, err := selectAppMode(false, false, false, false)
+	if err != nil {
+		t.Fatalf("select default mode: %v", err)
+	}
+	if mode != appModeTUI {
+		t.Fatalf("default mode = %q, want %q", mode, appModeTUI)
+	}
+}
+
+func TestSelectAppModeSupportsExplicitInterfaces(t *testing.T) {
+	tests := []struct {
+		name               string
+		cli, tui, acp, web bool
+		want               appMode
+	}{
+		{name: "cli", cli: true, want: appModeCLI},
+		{name: "tui", tui: true, want: appModeTUI},
+		{name: "acp", acp: true, want: appModeACP},
+		{name: "web", web: true, want: appModeWeb},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			mode, err := selectAppMode(test.cli, test.tui, test.acp, test.web)
+			if err != nil {
+				t.Fatalf("select mode: %v", err)
+			}
+			if mode != test.want {
+				t.Fatalf("mode = %q, want %q", mode, test.want)
+			}
+		})
+	}
+}
+
+func TestSelectAppModeRejectsConflictingInterfaces(t *testing.T) {
+	if _, err := selectAppMode(true, true, false, false); err == nil {
+		t.Fatal("expected conflicting interface modes to fail")
+	}
+}
+
 func (r *recordingSubagentRunner) RunSubagent(_ context.Context, req subagent.Request) (subagent.Result, error) {
 	r.called = true
 	r.agentType = req.AgentType

@@ -18,9 +18,10 @@ func main() {
 	baseURL := flag.String("base-url", os.Getenv("SAHARA_LLM_BASE_URL"), "OpenAI-compatible base URL")
 	model := flag.String("model", env("SAHARA_LLM_MODEL", "gpt-4o-mini"), "model id")
 	seed := flag.Bool("seed", true, "seed default workspace files when missing")
-	cliMode := flag.Bool("cli", false, "run the stdin REPL instead of the web UI")
-	tuiMode := flag.Bool("tui", false, "run the terminal UI instead of the web UI")
+	cliMode := flag.Bool("cli", false, "run the stdin REPL")
+	tuiMode := flag.Bool("tui", false, "run the terminal UI (default)")
 	acpMode := flag.Bool("acp", false, "run as an Agent Client Protocol (ACP) agent over stdio")
+	webMode := flag.Bool("web", false, "run the localhost web UI")
 	addr := flag.String("addr", env("SAHARA_WEB_ADDR", "127.0.0.1:8787"), "web UI listen address (NO auth - localhost only)")
 	noBrowser := flag.Bool("no-browser", false, "do not open a browser (web mode)")
 	exportThread := flag.String("export", "", "export thread history as JSONL to stdout and exit (a thread id, or 'all')")
@@ -53,11 +54,12 @@ func main() {
 		fmt.Fprintln(os.Stderr, "error: set --base-url or SAHARA_LLM_BASE_URL (an OpenAI-compatible endpoint)")
 		os.Exit(2)
 	}
-	if nTrue(*cliMode, *tuiMode, *acpMode) > 1 {
-		fmt.Fprintln(os.Stderr, "error: choose only one of --cli, --tui, or --acp")
+	selectedMode, err := selectAppMode(*cliMode, *tuiMode, *acpMode, *webMode)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(2)
 	}
-	if err := setupAppLogging(*workspace, *tuiMode); err != nil {
+	if err := setupAppLogging(*workspace, selectedMode == appModeTUI); err != nil {
 		fmt.Fprintln(os.Stderr, "error: setup logging:", err)
 		os.Exit(1)
 	}
@@ -79,15 +81,14 @@ func main() {
 		record:        *record,
 	}
 
-	var err error
-	switch {
-	case *cliMode:
+	switch selectedMode {
+	case appModeCLI:
 		err = runCLI(cfg)
-	case *tuiMode:
+	case appModeTUI:
 		err = runTUI(cfg)
-	case *acpMode:
+	case appModeACP:
 		err = runACP(cfg)
-	default:
+	case appModeWeb:
 		err = runWeb(cfg, *addr, !*noBrowser)
 	}
 	// Flush + stop the trace exporter before exit (os.Exit skips defers, so do it
@@ -100,6 +101,31 @@ func main() {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
+	}
+}
+
+type appMode string
+
+const (
+	appModeTUI appMode = "tui"
+	appModeCLI appMode = "cli"
+	appModeACP appMode = "acp"
+	appModeWeb appMode = "web"
+)
+
+func selectAppMode(cli, tui, acp, web bool) (appMode, error) {
+	if nTrue(cli, tui, acp, web) > 1 {
+		return "", fmt.Errorf("choose only one of --cli, --tui, --acp, or --web")
+	}
+	switch {
+	case cli:
+		return appModeCLI, nil
+	case acp:
+		return appModeACP, nil
+	case web:
+		return appModeWeb, nil
+	default:
+		return appModeTUI, nil
 	}
 }
 
