@@ -66,10 +66,12 @@ func runTUI(cfg appConfig) error {
 		Approvals:       broker,
 		Canceller:       canceller,
 		ModelStatus:     runner,
+		Commands:        runner,
 		TaskStore:       taskStore,
 		TeamStore:       teamStore,
 		AgentCatalog:    agentCatalog,
 		InitialThreadID: cfg.thread,
+		WorkspaceRoot:   cfg.workspaceRoot,
 	})
 	stop()
 	select {

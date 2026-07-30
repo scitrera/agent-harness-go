@@ -44,6 +44,26 @@ func messageText(message protocol.ChatMessage) string {
 			out.WriteString(text.Text)
 			continue
 		}
+		if image, ok := part.AsImage(); ok {
+			name := strings.TrimSpace(image.AltText)
+			if name == "" {
+				name = "image"
+			}
+			out.WriteString("\n[image: ")
+			out.WriteString(name)
+			out.WriteString("]")
+			continue
+		}
+		if file, ok := part.AsFile(); ok {
+			name := strings.TrimSpace(file.FileName)
+			if name == "" {
+				name = "file"
+			}
+			out.WriteString("\n[file: ")
+			out.WriteString(name)
+			out.WriteString("]")
+			continue
+		}
 		if approval, ok := part.AsApprovalRequest(); ok {
 			out.WriteString("\napproval ")
 			out.WriteString(approval.Tool)

@@ -15,8 +15,15 @@ func (m model) statusSummary() string {
 		fmt.Sprintf("pending approvals: %d", len(m.pendingApprovals)),
 		fmt.Sprintf("tracked tools: %d", len(m.tools)),
 		fmt.Sprintf("scroll: %.0f%%", m.viewport.ScrollPercent()*100),
-		fmt.Sprintf("dropped events: %d", m.channel.DroppedEvents()),
+		fmt.Sprintf("dropped events: %d", m.droppedEvents()),
 	}, "\n")
+}
+
+func (m model) droppedEvents() int64 {
+	if m.channel == nil {
+		return 0
+	}
+	return m.channel.DroppedEvents()
 }
 
 func (m model) approvalSummary() string {

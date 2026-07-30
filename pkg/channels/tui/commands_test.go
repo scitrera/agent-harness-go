@@ -7,8 +7,10 @@ import (
 	"testing"
 
 	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/scitrera/agent-harness-go/pkg/approval"
+	"github.com/scitrera/agent-harness-go/pkg/channel"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 	"github.com/scitrera/agent-harness-go/pkg/store"
 	"github.com/scitrera/agent-harness-go/pkg/taskstate"
@@ -116,15 +118,26 @@ func TestModelHandleSlash_clearClearsCurrentThreadText(t *testing.T) {
 
 	// When
 	next, cmd := m.handleSlash("/clear")
+	if cmd != nil {
+		t.Fatal("clear should require confirmation before emitting a command")
+	}
+	updated, ok := next.(model)
+	if !ok {
+		t.Fatalf("expected model, got %T", next)
+	}
+	if !updated.confirmation.active() {
+		t.Fatal("clear confirmation was not opened")
+	}
+	next, cmd = updated.updateKey(tea.KeyPressMsg(tea.Key{Code: 'y', Text: "y"}))
 	if cmd == nil {
-		t.Fatal("expected clear command")
+		t.Fatal("expected clear command after confirmation")
 	}
 	msg := cmd()
 	clearMsg, ok := msg.(clearThreadMsg)
 	if !ok {
 		t.Fatalf("expected clear thread message, got %T", msg)
 	}
-	updated, ok := next.(model)
+	updated, ok = next.(model)
 	if !ok {
 		t.Fatalf("expected model, got %T", next)
 	}
@@ -143,6 +156,98 @@ func TestModelHandleSlash_clearClearsCurrentThreadText(t *testing.T) {
 	}
 	if !strings.Contains(updated.viewport.View(), "cleared thread-1") {
 		t.Fatalf("viewport missing clear confirmation: %q", updated.viewport.View())
+	}
+}
+
+func TestClearDefersFirstTurnUntilClearResult(t *testing.T) {
+	ctx := context.Background()
+	stateDir := t.TempDir()
+	history := store.NewFileStore("", stateDir)
+	index, err := threadindex.NewIndex(stateDir, nil)
+	if err != nil {
+		t.Fatalf("new index: %v", err)
+	}
+	if err := index.Touch("thread-1", "old transcript"); err != nil {
+		t.Fatalf("touch thread: %v", err)
+	}
+	oldPart, err := protocol.NewTextPart("old visible line")
+	if err != nil {
+		t.Fatalf("old text part: %v", err)
+	}
+	oldRows := rowsFromHistory([]protocol.ChatMessage{{
+		ID:      "user-old",
+		Role:    protocol.RoleUser,
+		Addr:    protocol.MessageAddress{ThreadID: "thread-1", TaskID: "task-old"},
+		Content: []protocol.ContentPart{oldPart},
+	}})
+	m := model{
+		ctx:              ctx,
+		channel:          NewChannel(),
+		store:            history,
+		index:            index,
+		threadID:         "thread-1",
+		threads:          index.List(),
+		rows:             oldRows,
+		pendingApprovals: map[string]approvalRequest{},
+		tools:            map[string]toolEntry{},
+		turns:            map[string]turnActivity{},
+		renderedRows:     map[string]renderedRowCache{},
+		clearingThreads:  map[string]struct{}{},
+		viewport:         viewport.New(),
+		composer:         newComposer(),
+		tailing:          true,
+	}
+	m.resize(60, 20)
+
+	next, _ := m.handleSlash("/clear")
+	confirming := next.(model)
+	next, clearCmd := confirming.updateKey(tea.KeyPressMsg(tea.Key{Code: 'y', Text: "y"}))
+	if clearCmd == nil {
+		t.Fatal("confirmed clear should emit a clear command")
+	}
+	clearing := next.(model)
+	clearing.composer.SetValue("first question after clear")
+
+	next, prematureSend := clearing.sendCurrent()
+	if prematureSend != nil {
+		t.Fatal("first turn should wait until clear persistence completes")
+	}
+	waiting := next.(model)
+	if got := waiting.composer.Value(); got != "first question after clear" {
+		t.Fatalf("deferred composer value = %q", got)
+	}
+	if waiting.deferredSendFor != "thread-1" {
+		t.Fatalf("deferred send thread = %q", waiting.deferredSendFor)
+	}
+
+	clearResult := clearCmd().(clearThreadMsg)
+	next, sendCmd := waiting.Update(clearResult)
+	if sendCmd == nil {
+		t.Fatal("successful clear should release the deferred first turn")
+	}
+	updated := next.(model)
+	if len(updated.rows) != 3 ||
+		updated.rows[0].Kind != rowSystem ||
+		updated.rows[1].Kind != rowUser ||
+		updated.rows[2].Kind != rowThinking {
+		t.Fatalf("rows after clear + deferred send = %+v", updated.rows)
+	}
+	if got := updated.rows[1].Text; got != "first question after clear" {
+		t.Fatalf("first user row = %q", got)
+	}
+
+	updated.applyEvent(channel.Event{
+		Type:      channel.EventTokenDelta,
+		Addr:      protocol.MessageAddress{ThreadID: "thread-1", TaskID: updated.lastTaskID},
+		MessageID: "assistant-first",
+		Index:     0,
+		Delta:     "first answer",
+	})
+	if len(updated.rows) != 3 || updated.rows[1].Kind != rowUser || updated.rows[1].Text != "first question after clear" {
+		t.Fatalf("assistant stream replaced first user row: %+v", updated.rows)
+	}
+	if updated.rows[2].Kind != rowAssistant || updated.rows[2].Text != "first answer" {
+		t.Fatalf("assistant row = %+v", updated.rows[2])
 	}
 }
 

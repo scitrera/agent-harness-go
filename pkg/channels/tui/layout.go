@@ -3,9 +3,9 @@ package tui
 import (
 	"context"
 	"strings"
-	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/scitrera/agent-harness-go/pkg/channel"
 )
@@ -14,7 +14,6 @@ const (
 	statusHeight          = 1
 	defaultTerminalWidth  = 80
 	defaultTerminalHeight = 24
-	tickInterval          = time.Second
 )
 
 func (m *model) resize(width, height int) {
@@ -37,9 +36,10 @@ func (m *model) reflowSurfaces() {
 		composerHeight = minComposerHeight
 	} else {
 		m.composer.SetWidth(m.width)
-		m.composer.SetHeight(m.desiredComposerHeight())
 		composerHeight = m.composer.Height()
 	}
+	selectionSpace := m.height - composerHeight - statusHeight - drawerHeight - 1
+	m.selector.limitHeight(selectionSpace)
 	viewHeight := m.height - composerHeight - statusHeight - drawerHeight - m.selector.height()
 	if viewHeight < 1 {
 		viewHeight = 1
@@ -50,6 +50,13 @@ func (m *model) reflowSurfaces() {
 }
 
 func (m *model) drawerHeight() int {
+	if m.drawer == drawerNone {
+		return 0
+	}
+	return lipgloss.Height(m.renderDrawer())
+}
+
+func (m *model) drawerMaxHeight() int {
 	if m.drawer == drawerNone {
 		return 0
 	}
@@ -120,8 +127,4 @@ func waitEvent(ctx context.Context, events <-chan channel.Event) tea.Cmd {
 			return quitMsg{}
 		}
 	}
-}
-
-func tick() tea.Cmd {
-	return tea.Tick(tickInterval, func(t time.Time) tea.Msg { return tickMsg{At: t} })
 }

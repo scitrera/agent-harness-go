@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
@@ -21,17 +22,20 @@ const (
 )
 
 type model struct {
-	ctx          context.Context
-	channel      *Channel
-	events       <-chan channel.Event
-	store        HistoryStore
-	index        *threadindex.Index
-	approvals    approvalResolver
-	canceller    canceler
-	modelStatus  ModelStatus
-	taskStore    TaskStore
-	teamStore    TeamStore
-	agentCatalog AgentCatalog
+	ctx           context.Context
+	channel       *Channel
+	events        <-chan channel.Event
+	store         HistoryStore
+	index         *threadindex.Index
+	approvals     approvalResolver
+	canceller     canceler
+	modelStatus   ModelStatus
+	commandSource CommandProvider
+	taskStore     TaskStore
+	teamStore     TeamStore
+	agentCatalog  AgentCatalog
+	workspaceRoot string
+	cwd           string
 
 	threadID string
 	threads  []threadindex.Session
@@ -39,12 +43,24 @@ type model struct {
 
 	pendingApprovals map[string]approvalRequest
 	tools            map[string]toolEntry
+	turns            map[string]turnActivity
+	renderedRows     map[string]renderedRowCache
+	attachments      []pendingAttachment
+	thinkingFrame    int
+	thinkingTicking  bool
+	clearingThreads  map[string]struct{}
+	deferredSendFor  string
 	lastTaskID       string
 	status           string
 	drawer           drawerMode
 	drawerContent    string
 	tailing          bool
 	selector         selectionState
+	confirmation     pendingConfirmation
+	quitConfirmation pendingQuitConfirmation
+	quitToken        uint64
+	toolActiveOnly   bool
+	toolDetailID     string
 
 	viewport viewport.Model
 	composer textarea.Model
@@ -78,6 +94,10 @@ func newModel(ctx context.Context, cfg Config) (model, error) {
 	if err != nil {
 		return model{}, fmt.Errorf("load history: %w", err)
 	}
+	workspaceRoot, err := canonicalWorkspaceRoot(cfg.WorkspaceRoot)
+	if err != nil {
+		return model{}, fmt.Errorf("resolve workspace root: %w", err)
+	}
 	m := model{
 		ctx:              ctx,
 		channel:          cfg.Channel,
@@ -87,14 +107,20 @@ func newModel(ctx context.Context, cfg Config) (model, error) {
 		approvals:        cfg.Approvals,
 		canceller:        cfg.Canceller,
 		modelStatus:      cfg.ModelStatus,
+		commandSource:    cfg.Commands,
 		taskStore:        cfg.TaskStore,
 		teamStore:        cfg.TeamStore,
 		agentCatalog:     cfg.AgentCatalog,
+		workspaceRoot:    workspaceRoot,
+		cwd:              workspaceRoot,
 		threadID:         threadID,
 		threads:          threads,
 		rows:             rowsFromHistory(messages),
 		pendingApprovals: map[string]approvalRequest{},
 		tools:            map[string]toolEntry{},
+		turns:            map[string]turnActivity{},
+		renderedRows:     map[string]renderedRowCache{},
+		clearingThreads:  map[string]struct{}{},
 		tailing:          true,
 		viewport:         viewport.New(),
 		composer:         newComposer(),
@@ -126,11 +152,16 @@ func selectInitialThread(index *threadindex.Index, requested string) (string, []
 func newComposer() textarea.Model {
 	composer := textarea.New()
 	composer.Prompt = "> "
-	composer.Placeholder = "Message or /command"
+	composer.Placeholder = defaultComposerPlaceholder
 	composer.ShowLineNumbers = false
 	composer.MinHeight = minComposerHeight
 	composer.MaxHeight = maxComposerHeight
 	composer.MaxContentHeight = maxComposerContentHeight
+	composer.DynamicHeight = true
+	composer.KeyMap.InsertNewline = key.NewBinding(
+		key.WithKeys("shift+enter", "ctrl+j", "alt+enter"),
+		key.WithHelp("shift+enter", "newline"),
+	)
 	composer.SetHeight(minComposerHeight)
 	composer.SetWidth(80)
 	composer.SetVirtualCursor(false)
@@ -139,7 +170,7 @@ func newComposer() textarea.Model {
 }
 
 func (m model) Init() tea.Cmd {
-	return tea.Batch(m.composer.Focus(), waitEvent(m.ctx, m.events), tick(), setTerminalTitleCmd(m.terminalTitle()))
+	return tea.Batch(m.composer.Focus(), waitEvent(m.ctx, m.events), setTerminalTitleCmd(m.terminalTitle()))
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -148,41 +179,71 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.resize(msg.Width, msg.Height)
 		return m, nil
 	case tea.KeyPressMsg:
-		return m.updateKey(msg)
+		updated, cmd := m.updateKey(msg)
+		if msg.String() == "enter" {
+			return updated, repaint(cmd)
+		}
+		return updated, cmd
+	case tea.PasteMsg:
+		return m.updatePaste(msg)
 	case streamEventMsg:
+		rowStructure := rowStructureKey(m.rows)
 		m.applyEvent(msg.Event)
-		return m, waitEvent(m.ctx, m.events)
+		next := waitEvent(m.ctx, m.events)
+		if rowStructureKey(m.rows) != rowStructure || msg.Event.Type == channel.EventMessageFinal {
+			next = repaint(next)
+		}
+		return m, next
 	case sendResultMsg:
 		m.applySendResult(msg)
-		return m, setTerminalTitleCmd(m.terminalTitle())
+		return m, m.ensureThinkingTick(setTerminalTitleCmd(m.terminalTitle()))
+	case thinkingTickMsg:
+		if !m.advanceThinking() {
+			m.thinkingTicking = false
+			return m, nil
+		}
+		return m, thinkingTickCmd()
+	case quitConfirmationExpiredMsg:
+		m.expireQuitConfirmation(msg)
+		return m, nil
 	case historyLoadedMsg:
 		m.applyHistoryLoaded(msg)
-		return m, setTerminalTitleCmd(m.terminalTitle())
+		return m, repaint(setTerminalTitleCmd(m.terminalTitle()))
 	case threadCreatedMsg:
 		m.applyThreadCreated(msg)
-		return m, setTerminalTitleCmd(m.terminalTitle())
+		return m, repaint(setTerminalTitleCmd(m.terminalTitle()))
 	case threadDeletedMsg:
 		wasCurrent := msg.DeletedID == m.threadID
 		m.applyThreadDeleted(msg)
 		if msg.Err == nil && wasCurrent {
 			if msg.NextID != "" {
-				return m, loadHistoryCmd(m.ctx, m.store, msg.NextID)
+				return m, repaint(loadHistoryCmd(m.ctx, m.store, msg.NextID))
 			}
-			return m, createThreadCmd(m.index, "")
+			return m, repaint(createThreadCmd(m.index, ""))
 		}
-		return m, nil
+		return m, repaint(nil)
 	case threadRenamedMsg:
 		m.applyThreadRenamed(msg)
 		return m, setTerminalTitleCmd(m.terminalTitle())
 	case clearThreadMsg:
+		sendAfterClear := msg.Err == nil &&
+			m.deferredSendFor == msg.ThreadID &&
+			m.threadID == msg.ThreadID
+		if m.deferredSendFor == msg.ThreadID {
+			m.deferredSendFor = ""
+		}
 		m.applyClearThread(msg)
-		return m, nil
+		if sendAfterClear {
+			updated, cmd := m.sendCurrent()
+			return updated, repaint(cmd)
+		}
+		return m, repaint(nil)
 	case drawerLoadedMsg:
 		m.applyDrawerLoaded(msg)
 		return m, nil
-	case tickMsg:
-		m.refreshViewport()
-		return m, tick()
+	case attachmentLoadedMsg:
+		m.applyAttachmentLoaded(msg)
+		return m, nil
 	case quitMsg:
 		return m, tea.Quit
 	}
@@ -195,4 +256,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var inputCmd tea.Cmd
 	m.composer, inputCmd = m.composer.Update(msg)
 	return m, tea.Batch(cmd, inputCmd)
+}
+
+func repaint(cmd tea.Cmd) tea.Cmd {
+	return tea.Batch(cmd, tea.ClearScreen)
 }

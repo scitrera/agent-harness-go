@@ -45,11 +45,11 @@ func TestSlashSuggestionsMatchPrefixAndCompleteWithTab(t *testing.T) {
 	if got := m.selector.kind; got != selectionSlash {
 		t.Fatalf("selector kind = %v, want slash", got)
 	}
-	if got := len(m.selector.items); got != 1 {
-		t.Fatalf("suggestion count = %d, want 1: %+v", got, m.selector.items)
+	if got := len(m.selector.items); got != 2 {
+		t.Fatalf("suggestion count = %d, want 2: %+v", got, m.selector.items)
 	}
-	if got := m.selector.items[0].Value; got != "/threads" {
-		t.Fatalf("first suggestion = %q, want /threads", got)
+	if got := m.selector.items[0].Value; got != "/thread" {
+		t.Fatalf("first suggestion = %q, want /thread", got)
 	}
 
 	// When
@@ -63,11 +63,14 @@ func TestSlashSuggestionsMatchPrefixAndCompleteWithTab(t *testing.T) {
 	}
 
 	// Then
-	if got := updated.composer.Value(); got != "/threads " {
-		t.Fatalf("completed composer value = %q, want /threads ", got)
+	if got := updated.composer.Value(); got != "/thread " {
+		t.Fatalf("completed composer value = %q, want /thread ", got)
 	}
-	if updated.selector.active() {
-		t.Fatalf("suggestions should clear after completion: %+v", updated.selector.items)
+	if !updated.selector.active() {
+		t.Fatal("subcommand suggestions should open after command completion")
+	}
+	if got := updated.selector.items[0].Value; got != "/thread clear" {
+		t.Fatalf("first subcommand suggestion = %q, want /thread clear", got)
 	}
 }
 

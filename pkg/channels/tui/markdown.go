@@ -6,10 +6,7 @@ import (
 	"charm.land/glamour/v2"
 )
 
-const (
-	defaultMarkdownWidth = 80
-	minMarkdownWidth     = 20
-)
+const defaultMarkdownWidth = 80
 
 func renderAssistantMarkdown(text string, width int) string {
 	if strings.TrimSpace(text) == "" || !looksLikeMarkdown(text) {
@@ -71,9 +68,6 @@ func isOrderedListLine(line string) bool {
 func normalizeMarkdownWidth(width int) int {
 	if width <= 0 {
 		return defaultMarkdownWidth
-	}
-	if width < minMarkdownWidth {
-		return minMarkdownWidth
 	}
 	return width
 }

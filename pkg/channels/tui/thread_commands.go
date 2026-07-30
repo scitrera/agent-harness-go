@@ -120,8 +120,8 @@ func (m model) deleteThread(fields []string) (tea.Model, tea.Cmd) {
 		m.addSystem("thread not found: " + fields[2])
 		return m, nil
 	}
-	nextID := m.nextThreadAfterDelete(id)
-	return m, deleteThreadCmd(m.ctx, m.index, m.store, id, nextID)
+	m.requestConfirmation(confirmationDeleteThread, id)
+	return m, nil
 }
 
 func (m model) clearThread(fields []string) (tea.Model, tea.Cmd) {
@@ -138,7 +138,8 @@ func (m model) clearThread(fields []string) (tea.Model, tea.Cmd) {
 		m.addSystem("no thread selected")
 		return m, nil
 	}
-	return m, clearThreadCmd(m.ctx, m.store, id)
+	m.requestConfirmation(confirmationClearThread, id)
+	return m, nil
 }
 
 func (m model) renameThread(fields []string) (tea.Model, tea.Cmd) {

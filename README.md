@@ -33,22 +33,31 @@ export SAHARA_LLM_MODEL=llama3.1                        # a model id the endpoin
 go run ./cmd/agent-harness --workspace ./workspace
 ```
 
-By default it serves a browser chat UI (the **web** channel) on `127.0.0.1:8787`
-and opens a browser; pass `--tui` for the terminal UI or `--cli` to run the
-stdin REPL instead. `--base-url` and `--model` can also be passed as flags
+By default it opens the terminal UI; pass `--web` to serve the browser chat UI
+on `127.0.0.1:8787`, or `--cli` to run the stdin REPL instead. `--base-url` and
+`--model` can also be passed as flags
 (overriding the env). It seeds default
 workspace files (SOUL/AGENTS/…) on first run, persists history under
 `<workspace>/.agent-harness`, and streams replies to the active channel (SSE to
 the browser, the terminal UI, or stdout in `--cli` mode).
 
-### Web UI
+### Interfaces
 
 | Flag | Env | Default | Notes |
 |------|-----|---------|-------|
 | `--addr` | `SAHARA_WEB_ADDR` | `127.0.0.1:8787` | web UI listen address |
-| `--cli` | — | `false` | run the stdin REPL instead of the web UI |
-| `--tui` | — | `false` | run the Bubble Tea terminal UI instead of the web UI |
+| `--tui` | — | default | run the Bubble Tea terminal UI |
+| `--cli` | — | `false` | run the stdin REPL |
+| `--acp` | — | `false` | run as an ACP agent over stdio |
+| `--web` | — | `false` | run the localhost web UI |
 | `--no-browser` | — | `false` | don't auto-open a browser (web mode) |
+
+In the TUI, type `@` followed by a path and use Tab/arrow keys to complete
+workspace files or directories. Paths resolve from `/pwd`; use `/cd <path>` to
+change that virtual working directory without changing the process directory.
+Referenced images are sent inline, while other references are normalized to
+workspace-relative paths for the agent's file tools. Press `Ctrl+C` or `Ctrl+D`
+twice within one second to quit.
 
 The web server has **no authentication** and is intended for **localhost use
 only** — do not bind it beyond loopback. State-changing endpoints enforce a

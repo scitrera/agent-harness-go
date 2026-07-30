@@ -6,11 +6,13 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 )
 
 var (
 	styleUser      = lipgloss.NewStyle().Foreground(lipgloss.Color("39")).Bold(true)
 	styleAssistant = lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
+	styleThinking  = lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Italic(true)
 	styleSystem    = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
 	styleTool      = lipgloss.NewStyle().Foreground(lipgloss.Color("151"))
 	styleStatus    = lipgloss.NewStyle().Foreground(lipgloss.Color("238")).Background(lipgloss.Color("252"))
@@ -55,7 +57,25 @@ func (m model) renderSelection() string {
 		return ""
 	}
 	start, items := m.selector.visibleItems()
-	lines := make([]string, len(items))
+	lines := make([]string, 0, m.selector.height())
+	if m.selector.filtering || m.selector.query != "" {
+		filter := "  filter: " + m.selector.query
+		if m.width > 0 {
+			filter = styleSuggest.Width(m.width).Render(fitCells(filter, m.width))
+		} else {
+			filter = styleSuggest.Render(filter)
+		}
+		lines = append(lines, filter)
+	}
+	if len(items) == 0 {
+		empty := "  no matches"
+		if m.width > 0 {
+			empty = styleSuggest.Width(m.width).Render(empty)
+		} else {
+			empty = styleSuggest.Render(empty)
+		}
+		return strings.Join(append(lines, empty), "\n")
+	}
 	for offset, item := range items {
 		index := start + offset
 		marker := "  "
@@ -70,24 +90,39 @@ func (m model) renderSelection() string {
 		}
 		if m.width > 0 {
 			line = fitCells(line, m.width)
-			lines[offset] = style.Width(m.width).Render(line)
+			lines = append(lines, style.Width(m.width).Render(line))
 			continue
 		}
-		lines[offset] = style.Render(line)
+		lines = append(lines, style.Render(line))
 	}
 	return strings.Join(lines, "\n")
 }
 
-func (m model) renderRows() string {
+func (m *model) renderRows() string {
 	if len(m.rows) == 0 {
 		return styleSystem.Render("New thread. Type a message or /commands.")
+	}
+	if m.renderedRows == nil {
+		m.renderedRows = map[string]renderedRowCache{}
 	}
 	var b strings.Builder
 	for i, row := range m.rows {
 		if i > 0 {
 			b.WriteString("\n")
 		}
-		b.WriteString(m.renderRow(row))
+		key := fmt.Sprintf("%d:%s", i, row.ID)
+		cached, ok := m.renderedRows[key]
+		if !ok || cached.Kind != row.Kind || cached.Text != row.Text || cached.Streaming != row.Streaming || cached.Width != m.width {
+			cached = renderedRowCache{
+				Kind:      row.Kind,
+				Text:      row.Text,
+				Streaming: row.Streaming,
+				Width:     m.width,
+				Rendered:  m.renderRow(row),
+			}
+			m.renderedRows[key] = cached
+		}
+		b.WriteString(cached.Rendered)
 	}
 	return b.String()
 }
@@ -102,6 +137,9 @@ func (m model) renderRow(row chatRow) string {
 	case rowAssistant:
 		prefix = "assistant"
 		style = styleAssistant
+	case rowThinking:
+		prefix = "assistant"
+		style = styleThinking
 	case rowTool:
 		prefix = "tool"
 		style = styleTool
@@ -116,7 +154,17 @@ func (m model) renderRow(row chatRow) string {
 	if row.Kind == rowAssistant {
 		text = renderAssistantMarkdown(text, m.markdownWidth(prefix))
 	}
-	return style.Render(prefix+"> ") + text
+	prefixText := prefix + "> "
+	prefixWidth := lipgloss.Width(prefixText)
+	available := m.width - prefixWidth
+	if m.width <= 0 {
+		available = defaultMarkdownWidth
+	}
+	if available < 1 {
+		available = 1
+	}
+	text = wrapCells(text, available)
+	return style.Render(prefixText) + indentContinuation(text, prefixWidth)
 }
 
 func (m model) markdownWidth(prefix string) int {
@@ -124,30 +172,90 @@ func (m model) markdownWidth(prefix string) int {
 		return defaultMarkdownWidth
 	}
 	available := m.width - lipgloss.Width(prefix+"> ")
-	if available < minMarkdownWidth {
-		return minMarkdownWidth
+	if available < 1 {
+		return 1
 	}
 	return available
+}
+
+func wrapCells(text string, width int) string {
+	if width <= 0 || text == "" {
+		return text
+	}
+	wordWrapped := ansi.Wordwrap(text, width, "")
+	return ansi.Hardwrap(wordWrapped, width, true)
+}
+
+func indentContinuation(text string, width int) string {
+	if width <= 0 || !strings.Contains(text, "\n") {
+		return text
+	}
+	indent := strings.Repeat(" ", width)
+	return strings.ReplaceAll(text, "\n", "\n"+indent)
 }
 
 func (m model) renderStatus() string {
 	segments := []string{
 		"status " + m.statusText(),
-		"model " + m.activeModel(),
-		"ctx unknown",
-		fmt.Sprintf("scroll %.0f%%", m.viewport.ScrollPercent()*100),
-		"thread " + shortID(m.threadID),
-		fmt.Sprintf("approvals %d", len(m.pendingApprovals)),
-		fmt.Sprintf("tools %d", m.activeTools()),
-		fmt.Sprintf("dropped %d", m.channel.DroppedEvents()),
-		"title " + m.activeThreadTitle(),
 	}
-	line := strings.Join(segments, " | ")
+	if count := len(m.pendingApprovals); count > 0 {
+		segments = append(segments, fmt.Sprintf("approvals %d", count))
+	}
+	if count := m.activeTools(); count > 0 {
+		segments = append(segments, fmt.Sprintf("tools %d", count))
+	}
+	if count := len(m.attachments); count > 0 {
+		segments = append(segments, fmt.Sprintf("images %d", count))
+	}
+	if dropped := m.droppedEvents(); dropped > 0 {
+		segments = append(segments, fmt.Sprintf("dropped %d", dropped))
+	}
+	segments = append(segments, "model "+compactModelName(m.activeModel()))
+	thread := m.activeThreadTitle()
+	if thread == "" {
+		thread = shortID(m.threadID)
+	}
+	if thread != "" {
+		segments = append(segments, "thread "+fitCells(thread, 20))
+	}
+	if !m.viewport.AtBottom() {
+		segments = append(segments, fmt.Sprintf("scroll %.0f%%", m.viewport.ScrollPercent()*100))
+	}
+	line := fitStatusSegments(segments, m.width)
 	if m.width > 0 {
-		line = fitCells(line, m.width)
 		return styleStatus.Width(m.width).Render(line)
 	}
 	return styleStatus.Render(line)
+}
+
+func fitStatusSegments(segments []string, width int) string {
+	if width <= 0 {
+		return strings.Join(segments, " | ")
+	}
+	line := ""
+	for _, segment := range segments {
+		if line == "" {
+			line = fitCells(segment, width)
+			continue
+		}
+		candidate := line + " | " + segment
+		if lipgloss.Width(candidate) > width {
+			continue
+		}
+		line = candidate
+	}
+	return line
+}
+
+func compactModelName(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "unknown"
+	}
+	if index := strings.LastIndex(name, "/"); index >= 0 && index+1 < len(name) {
+		name = name[index+1:]
+	}
+	return fitCells(name, 24)
 }
 
 func (m model) renderDrawer() string {
@@ -158,6 +266,8 @@ func (m model) renderDrawer() string {
 		return m.fitDrawer(m.drawerContent)
 	}
 	switch m.drawer {
+	case drawerHelp:
+		return m.fitDrawer(helpText)
 	case drawerApprovals:
 		return m.fitDrawer(m.approvalSummary())
 	case drawerPermissions:
@@ -181,7 +291,7 @@ func (m model) renderDrawer() string {
 
 func (m model) fitDrawer(text string) string {
 	lines := strings.Split(strings.TrimSpace(text), "\n")
-	limit := m.drawerHeight()
+	limit := m.drawerMaxHeight()
 	if limit > 0 && len(lines) > limit {
 		lines = append(lines[:limit-1], fmt.Sprintf("... %d more", len(lines)-limit+1))
 	}

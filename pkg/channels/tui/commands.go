@@ -19,6 +19,12 @@ func (m model) handleSlash(input string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	switch fields[0] {
+	case "/help":
+		m.openHelp()
+		return m, nil
+	case "/commands":
+		m.openCommandBrowser()
+		return m, nil
 	case "/quit", "/exit":
 		return m, tea.Quit
 	case "/cancel":
@@ -27,12 +33,19 @@ func (m model) handleSlash(input string) (tea.Model, tea.Cmd) {
 	case "/status":
 		m.addSystem(m.statusSummary())
 		return m, nil
+	case "/pwd", "/cd":
+		updated, err := m.handleWorkingDirectory(fields)
+		if err != nil {
+			m.addSystem(fields[0] + ": " + err.Error())
+			return m, nil
+		}
+		return updated, nil
 	case "/clear":
 		return m.clearThread(append([]string{"/thread", "clear"}, fields[1:]...))
 	case "/thread", "/threads":
 		return m.handleThread(fields)
 	case "/approvals":
-		m.showDrawer(drawerApprovals, m.approvalSummary())
+		m.openApprovalSelector()
 		return m, nil
 	case "/permissions", "/permission":
 		return m.handlePermissions(fields)
@@ -43,8 +56,9 @@ func (m model) handleSlash(input string) (tea.Model, tea.Cmd) {
 		m.resolveApproval(fields, false)
 		return m, nil
 	case "/tools":
-		m.showDrawer(drawerTools, m.toolsSummary())
-		return m, nil
+		return m.handleTools(fields)
+	case "/attach", "/attachments":
+		return m.handleAttachments(fields)
 	case "/tasks", "/task":
 		return m.handleTasks(fields)
 	case "/team":
@@ -63,17 +77,19 @@ func (m model) enqueueCommand(text string) (tea.Model, tea.Cmd) {
 		m.addSystem("could not create task id: " + err.Error())
 		return m, nil
 	}
-	part, err := protocol.NewTextPart(text)
+	content, err := m.takeMessageContent(text)
 	if err != nil {
 		m.addSystem("could not create command message: " + err.Error())
 		return m, nil
 	}
 	addr := protocol.MessageAddress{ThreadID: m.threadID, TaskID: taskID}
-	message := protocol.ChatMessage{ID: "user-" + taskID, Role: protocol.RoleUser, Addr: addr, Content: []protocol.ContentPart{part}}
+	message := protocol.ChatMessage{ID: "user-" + taskID, Role: protocol.RoleUser, Addr: addr, Content: content}
 	m.lastTaskID = taskID
-	m.rows = append(m.rows, chatRow{Kind: rowUser, ID: message.ID, TaskID: taskID, Text: text})
+	m.markTurn(taskID, m.threadID, "queued")
+	m.rows = append(m.rows, chatRow{Kind: rowUser, ID: message.ID, TaskID: taskID, Text: messageText(message)})
+	m.addThinking(taskID)
 	m.refreshViewportToBottom()
-	return m, sendMessageCmd(m.ctx, m.channel, m.index, addr, message, text)
+	return m, sendMessageCmd(m.ctx, m.channel, m.index, addr, message, text, "", nil)
 }
 
 func (m *model) cancelActive() {
@@ -82,6 +98,8 @@ func (m *model) cancelActive() {
 		return
 	}
 	if m.canceller.Cancel(m.lastTaskID) {
+		delete(m.turns, m.lastTaskID)
+		m.removeThinking(m.lastTaskID)
 		m.addSystem("cancelled " + m.lastTaskID)
 		return
 	}
@@ -112,6 +130,7 @@ func (m *model) resolveApproval(fields []string, granted bool) {
 		return
 	}
 	delete(m.pendingApprovals, req.RequestID)
+	m.markTurn(req.TaskID, m.threadID, "thinking")
 	if granted {
 		m.addSystem("approved " + req.RequestID + " (" + scope + ")")
 		return
@@ -137,14 +156,28 @@ func (m model) nextThreadAfterDelete(id string) string {
 	return ""
 }
 
-func sendMessageCmd(ctx context.Context, ch *Channel, index *threadindex.Index, addr protocol.MessageAddress, message protocol.ChatMessage, text string) tea.Cmd {
+func sendMessageCmd(
+	ctx context.Context,
+	ch *Channel,
+	index *threadindex.Index,
+	addr protocol.MessageAddress,
+	message protocol.ChatMessage,
+	text string,
+	workspaceRoot string,
+	referencedImages []referencedImage,
+) tea.Cmd {
 	return func() tea.Msg {
+		var err error
+		message, err = appendReferencedImages(ctx, message, referencedImages, workspaceRoot)
+		if err != nil {
+			return sendResultMsg{TaskID: addr.TaskID, Err: fmt.Errorf("load image reference: %w", err)}
+		}
 		if err := index.Touch(addr.ThreadID, text); err != nil {
-			return sendResultMsg{Err: fmt.Errorf("touch thread: %w", err)}
+			return sendResultMsg{TaskID: addr.TaskID, Err: fmt.Errorf("touch thread: %w", err)}
 		}
 		if err := ch.Enqueue(ctx, channel.Inbound{Addr: addr, Message: message}); err != nil {
-			return sendResultMsg{Err: fmt.Errorf("enqueue: %w", err)}
+			return sendResultMsg{TaskID: addr.TaskID, Err: fmt.Errorf("enqueue: %w", err)}
 		}
-		return sendResultMsg{Session: threadindex.Session{ID: addr.ThreadID}}
+		return sendResultMsg{Session: threadindex.Session{ID: addr.ThreadID}, TaskID: addr.TaskID}
 	}
 }

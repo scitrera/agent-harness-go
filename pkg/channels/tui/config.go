@@ -6,6 +6,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/scitrera/agent-harness-go/pkg/approval"
+	"github.com/scitrera/agent-harness-go/pkg/commands"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 	"github.com/scitrera/agent-harness-go/pkg/subagent"
 	"github.com/scitrera/agent-harness-go/pkg/taskstate"
@@ -22,6 +23,10 @@ type HistoryStore interface {
 
 type ModelStatus interface {
 	ActiveModelName(threadID string) string
+}
+
+type CommandProvider interface {
+	AvailableCommands() []commands.Command
 }
 
 type TaskStore interface {
@@ -48,10 +53,12 @@ type Config struct {
 	Approvals       *approval.Broker
 	Canceller       *turncancel.Canceller
 	ModelStatus     ModelStatus
+	Commands        CommandProvider
 	TaskStore       TaskStore
 	TeamStore       TeamStore
 	AgentCatalog    AgentCatalog
 	InitialThreadID string
+	WorkspaceRoot   string
 }
 
 func Run(ctx context.Context, cfg Config) error {

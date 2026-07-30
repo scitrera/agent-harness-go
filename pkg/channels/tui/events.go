@@ -17,9 +17,19 @@ func (m *model) applyEvent(event channel.Event) {
 		return
 	}
 	switch event.Type {
+	case channel.EventTokenDelta,
+		channel.EventPartAppended,
+		channel.EventPartUpdated,
+		channel.EventMessageFinal,
+		channel.EventToolLifecycle,
+		channel.EventError:
+		m.removeThinking(event.Addr.TaskID)
+	}
+	switch event.Type {
 	case channel.EventMessageStarted:
-		return
+		m.markTurn(event.Addr.TaskID, event.Addr.ThreadID, "thinking")
 	case channel.EventTokenDelta:
+		m.markTurn(event.Addr.TaskID, event.Addr.ThreadID, "responding")
 		m.appendAssistantDelta(event.MessageID, event.Index, event.Delta)
 	case channel.EventPartAppended:
 		m.applyPartAppended(event)
@@ -29,9 +39,12 @@ func (m *model) applyEvent(event channel.Event) {
 		if event.Message != nil {
 			m.applyFinalMessage(*event.Message)
 		}
+		m.finishTurn(event.Addr.TaskID)
 	case channel.EventToolLifecycle:
 		m.applyToolLifecycle(event)
 	case channel.EventError:
+		delete(m.turns, event.Addr.TaskID)
+		m.status = "turn error"
 		m.addSystem("turn error")
 	}
 	m.refreshViewport()
@@ -50,7 +63,11 @@ func (m *model) applyPartAppended(event channel.Event) {
 	part := *event.Part
 	if approval, ok := part.AsApprovalRequest(); ok {
 		m.recordApproval(event.Addr.TaskID, approval.ID, approval.Tool, string(approval.Status), approval.Reason)
+		m.refreshApprovalSelector()
 		m.upsertToolishRow(approval.ID, "approval "+approval.Tool+": "+string(approval.Status))
+		if approval.Status == "" || approval.Status == "pending" {
+			m.markTurn(event.Addr.TaskID, event.Addr.ThreadID, "approval needed")
+		}
 		return
 	}
 	if text, ok := part.AsText(); ok {
@@ -85,10 +102,13 @@ func (m *model) applyPartUpdated(event channel.Event) {
 	}
 	if status == "pending" {
 		m.pendingApprovals[id] = req
+		m.refreshApprovalSelector()
 		m.upsertToolishRow(id, "approval "+req.Tool+": "+status)
 		return
 	}
 	delete(m.pendingApprovals, id)
+	m.refreshApprovalSelector()
+	m.markTurn(event.Addr.TaskID, event.Addr.ThreadID, "thinking")
 	m.upsertToolishRow(id, "approval "+req.Tool+": "+status)
 }
 
@@ -109,6 +129,14 @@ func (m *model) applyToolLifecycle(event channel.Event) {
 	if !ok {
 		return
 	}
+	switch entry.Event.Status {
+	case tools.ToolEventQueued, tools.ToolEventStarted:
+		m.markTurn(event.Addr.TaskID, event.Addr.ThreadID, "tool "+entry.Event.ToolName)
+	case tools.ToolEventFinished:
+		m.markTurn(event.Addr.TaskID, event.Addr.ThreadID, "thinking")
+	case tools.ToolEventAborted:
+		m.markTurn(event.Addr.TaskID, event.Addr.ThreadID, "tool failed")
+	}
 	line := renderToolEvent(entry.Event)
 	m.upsertToolishRow(entry.Event.CallID, line)
 }
@@ -123,6 +151,8 @@ func (m *model) recordToolEvent(event channel.Event) (toolEntry, bool) {
 	}
 	entry := toolEntry{Event: toolEvent, Seen: time.Now().UnixMilli()}
 	m.tools[toolEvent.CallID] = entry
+	m.refreshToolSelector()
+	m.refreshOpenToolDrawer(toolEvent.CallID)
 	return entry, true
 }
 

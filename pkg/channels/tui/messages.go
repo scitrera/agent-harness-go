@@ -1,8 +1,6 @@
 package tui
 
 import (
-	"time"
-
 	"github.com/scitrera/agent-harness-go/pkg/channel"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 	"github.com/scitrera/agent-harness-go/pkg/threadindex"
@@ -14,6 +12,7 @@ type streamEventMsg struct {
 
 type sendResultMsg struct {
 	Session threadindex.Session
+	TaskID  string
 	Err     error
 }
 
@@ -44,10 +43,6 @@ type clearThreadMsg struct {
 	Err      error
 }
 
-type tickMsg struct {
-	At time.Time
-}
-
 type quitMsg struct{}
 
 type drawerLoadedMsg struct {
@@ -55,4 +50,15 @@ type drawerLoadedMsg struct {
 	Text   string
 	Status string
 	Err    error
+}
+
+type attachmentLoadedMsg struct {
+	Attachment pendingAttachment
+	Err        error
+}
+
+type thinkingTickMsg struct{}
+
+type quitConfirmationExpiredMsg struct {
+	Token uint64
 }

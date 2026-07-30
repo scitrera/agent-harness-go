@@ -43,7 +43,15 @@ func (c *Channel) FetchTask(ctx context.Context) (channel.Inbound, error) {
 	}
 }
 
-func (c *Channel) PublishEvent(_ context.Context, event channel.Event) error {
+func (c *Channel) PublishEvent(ctx context.Context, event channel.Event) error {
+	if event.Type != channel.EventTokenDelta {
+		select {
+		case c.events <- event:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	select {
 	case c.events <- event:
 	default:
