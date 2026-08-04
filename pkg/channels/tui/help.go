@@ -5,6 +5,8 @@ const (
 
 	helpText = `keyboard help
 Enter send | Shift+Enter/Ctrl+J newline
+Ctrl+Left/Right jump by word
+Mouse wheel or Up/Down scroll history
 PgUp/PgDn scroll | Ctrl+PgUp/PgDn ends
 Tab/Enter complete | ↑/↓ select | / filter
 Esc close/cancel | Ctrl+C/Ctrl+D twice to quit

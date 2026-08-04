@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -8,6 +9,16 @@ import (
 
 	"charm.land/bubbles/v2/viewport"
 )
+
+type recordingDirectoryAccess struct {
+	dirs []string
+	err  error
+}
+
+func (r *recordingDirectoryAccess) GrantWorkingDirectory(dir string) error {
+	r.dirs = append(r.dirs, dir)
+	return r.err
+}
 
 func TestWorkingDirectoryCommandsStayInsideWorkspace(t *testing.T) {
 	root := t.TempDir()
@@ -55,31 +66,33 @@ func TestWorkingDirectoryCommandsStayInsideWorkspace(t *testing.T) {
 	}
 }
 
-func TestWorkingDirectoryCommandRejectsOutsideAndNonDirectoryPaths(t *testing.T) {
+func TestWorkingDirectoryCommandAllowsExplicitExternalDirectory(t *testing.T) {
 	root := t.TempDir()
 	outside := t.TempDir()
+	access := &recordingDirectoryAccess{}
 	file := filepath.Join(root, "file.txt")
 	if err := os.WriteFile(file, []byte("content"), 0o600); err != nil {
 		t.Fatalf("write file: %v", err)
 	}
 	m := model{
-		workspaceRoot: root,
-		cwd:           root,
-		viewport:      viewport.New(),
-		composer:      newComposer(),
-		tailing:       true,
+		workspaceRoot:   root,
+		cwd:             root,
+		directoryAccess: access,
+		viewport:        viewport.New(),
+		composer:        newComposer(),
+		tailing:         true,
 	}
 
 	next, _ := m.handleSlash("/cd " + outside)
 	updated := next.(model)
-	if updated.cwd != root {
-		t.Fatalf("outside /cd changed cwd to %q", updated.cwd)
+	if updated.cwd != outside {
+		t.Fatalf("external /cd cwd = %q, want %q", updated.cwd, outside)
 	}
-	if got := updated.rows[len(updated.rows)-1].Text; !strings.Contains(got, "outside the workspace") {
-		t.Fatalf("outside /cd error = %q", got)
+	if len(access.dirs) != 1 || access.dirs[0] != outside {
+		t.Fatalf("granted directories = %+v", access.dirs)
 	}
 
-	next, _ = updated.handleSlash("/cd file.txt")
+	next, _ = m.handleSlash("/cd file.txt")
 	updated = next.(model)
 	if updated.cwd != root {
 		t.Fatalf("file /cd changed cwd to %q", updated.cwd)
@@ -89,27 +102,51 @@ func TestWorkingDirectoryCommandRejectsOutsideAndNonDirectoryPaths(t *testing.T)
 	}
 }
 
-func TestWorkingDirectoryRejectsSymlinkEscape(t *testing.T) {
+func TestWorkingDirectoryAllowsExternalSymlinkTarget(t *testing.T) {
 	root := t.TempDir()
 	outside := t.TempDir()
+	access := &recordingDirectoryAccess{}
 	link := filepath.Join(root, "outside-link")
 	if err := os.Symlink(outside, link); err != nil {
 		t.Fatalf("symlink: %v", err)
 	}
 	m := model{
-		workspaceRoot: root,
-		cwd:           root,
-		viewport:      viewport.New(),
-		composer:      newComposer(),
-		tailing:       true,
+		workspaceRoot:   root,
+		cwd:             root,
+		directoryAccess: access,
+		viewport:        viewport.New(),
+		composer:        newComposer(),
+		tailing:         true,
 	}
 
 	next, _ := m.handleSlash("/cd outside-link")
 	updated := next.(model)
-	if updated.cwd != root {
-		t.Fatalf("symlink escape changed cwd to %q", updated.cwd)
+	if updated.cwd != outside {
+		t.Fatalf("symlink target cwd = %q, want %q", updated.cwd, outside)
 	}
-	if got := updated.rows[len(updated.rows)-1].Text; !strings.Contains(got, "outside the workspace") {
-		t.Fatalf("symlink escape error = %q", got)
+	if len(access.dirs) != 1 || access.dirs[0] != outside {
+		t.Fatalf("symlink target grant = %+v", access.dirs)
+	}
+}
+
+func TestWorkingDirectoryKeepsPriorCWDWhenExternalGrantFails(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	m := model{
+		workspaceRoot:   root,
+		cwd:             root,
+		directoryAccess: &recordingDirectoryAccess{err: fmt.Errorf("denied")},
+		viewport:        viewport.New(),
+		composer:        newComposer(),
+		tailing:         true,
+	}
+
+	next, _ := m.handleSlash("/cd " + outside)
+	updated := next.(model)
+	if updated.cwd != root {
+		t.Fatalf("failed grant changed cwd to %q", updated.cwd)
+	}
+	if got := updated.rows[len(updated.rows)-1].Text; !strings.Contains(got, "denied") {
+		t.Fatalf("grant failure = %q", got)
 	}
 }

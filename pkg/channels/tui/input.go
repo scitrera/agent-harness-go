@@ -8,7 +8,10 @@ import (
 
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 	"github.com/scitrera/agent-harness-go/pkg/threadindex"
+	"github.com/scitrera/agent-harness-go/pkg/tools"
 )
+
+const historyScrollLines = 3
 
 func (m model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
@@ -173,6 +176,18 @@ func (m model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.viewport.GotoBottom()
 		m.tailing = true
 		return m, nil
+	case "up":
+		if strings.TrimSpace(m.composer.Value()) == "" {
+			m.viewport.ScrollUp(historyScrollLines)
+			m.tailing = false
+			return m, nil
+		}
+	case "down":
+		if strings.TrimSpace(m.composer.Value()) == "" {
+			m.viewport.ScrollDown(historyScrollLines)
+			m.tailing = m.viewport.AtBottom()
+			return m, nil
+		}
 	}
 	var cmd tea.Cmd
 	m.composer, cmd = m.composer.Update(msg)
@@ -208,6 +223,8 @@ func (m model) sendCurrent() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	text = resolvedText
+	displayText := text
+	text = m.withWorkingDirectoryContext(text)
 	m.composer.Reset()
 	m.selector.clear()
 	m.refreshInputSurface()
@@ -223,12 +240,15 @@ func (m model) sendCurrent() (tea.Model, tea.Cmd) {
 	}
 	addr := protocol.MessageAddress{ThreadID: m.threadID, TaskID: taskID}
 	message := protocol.ChatMessage{ID: "user-" + taskID, Role: protocol.RoleUser, Addr: addr, Content: content}
+	if cwd := m.currentWorkingDirectory(); cwd != "" && cwd != m.workspaceRoot {
+		tools.StampWorkingDirectory(&message, cwd)
+	}
 	m.lastTaskID = taskID
 	m.markTurn(taskID, m.threadID, "queued")
 	m.rows = append(m.rows, chatRow{Kind: rowUser, ID: message.ID, TaskID: taskID, Text: messageText(message)})
 	m.addThinking(taskID)
 	m.refreshViewportToBottom()
-	return m, sendMessageCmd(m.ctx, m.channel, m.index, addr, message, text, m.workspaceRoot, referencedImages)
+	return m, sendMessageCmd(m.ctx, m.channel, m.index, addr, message, displayText, referencedImages)
 }
 
 func (m *model) takeMessageContent(text string) ([]protocol.ContentPart, error) {

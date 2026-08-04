@@ -89,7 +89,7 @@ func (m model) enqueueCommand(text string) (tea.Model, tea.Cmd) {
 	m.rows = append(m.rows, chatRow{Kind: rowUser, ID: message.ID, TaskID: taskID, Text: messageText(message)})
 	m.addThinking(taskID)
 	m.refreshViewportToBottom()
-	return m, sendMessageCmd(m.ctx, m.channel, m.index, addr, message, text, "", nil)
+	return m, sendMessageCmd(m.ctx, m.channel, m.index, addr, message, text, nil)
 }
 
 func (m *model) cancelActive() {
@@ -163,12 +163,11 @@ func sendMessageCmd(
 	addr protocol.MessageAddress,
 	message protocol.ChatMessage,
 	text string,
-	workspaceRoot string,
 	referencedImages []referencedImage,
 ) tea.Cmd {
 	return func() tea.Msg {
 		var err error
-		message, err = appendReferencedImages(ctx, message, referencedImages, workspaceRoot)
+		message, err = appendReferencedImages(ctx, message, referencedImages)
 		if err != nil {
 			return sendResultMsg{TaskID: addr.TaskID, Err: fmt.Errorf("load image reference: %w", err)}
 		}

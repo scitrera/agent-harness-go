@@ -33,6 +33,22 @@ func TestModelApplyEvent_whenToolLifecycleArrives(t *testing.T) {
 	}
 }
 
+func TestRenderToolEventIncludesSafeFailureReason(t *testing.T) {
+	got := renderToolEvent(tools.ToolEvent{
+		Status:       tools.ToolEventFinished,
+		ToolName:     "shell",
+		ErrorCode:    "command_failed",
+		ErrorMessage: "command executable not found",
+		Result:       tools.ResultMetadata{ExitCode: 127},
+	})
+	if !strings.Contains(got, "error=command_failed (command executable not found)") {
+		t.Fatalf("tool failure row = %q", got)
+	}
+	if !strings.Contains(got, "exit=127") {
+		t.Fatalf("tool failure row omits exit code: %q", got)
+	}
+}
+
 func TestModelApplyPartUpdated_whenApprovalResolves(t *testing.T) {
 	// Given
 	m := model{threadID: "t1", pendingApprovals: map[string]approvalRequest{"call-1": {RequestID: "call-1", TaskID: "task-1", Tool: "shell", Status: "pending"}}, viewport: viewport.New()}

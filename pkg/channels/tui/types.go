@@ -36,6 +36,17 @@ type toolEntry struct {
 	Seen  int64
 }
 
+type subagentActivity struct {
+	CallID    string
+	TaskID    string
+	ThreadID  string
+	Name      string
+	Phase     string
+	Output    string
+	Latest    string
+	StartedMS int64
+}
+
 type turnActivity struct {
 	ThreadID string
 	Phase    string

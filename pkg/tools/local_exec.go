@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/scitrera/agent-harness-go/pkg/localtools"
@@ -19,9 +20,11 @@ func shell(ctx context.Context, cfg LocalConfig, req Request) (Result, error) {
 	if err := decodeArgs(req, &args); err != nil {
 		return Result{}, err
 	}
+	args.CWD = ResolveWorkingPath(ctx, args.CWD)
+	command, commandArgs := shellCommand(args.Command, args.Args)
 	spec := localtools.CommandSpec{
-		Name:      args.Command,
-		Args:      args.Args,
+		Name:      command,
+		Args:      commandArgs,
 		CWD:       args.CWD,
 		Env:       args.Env,
 		Timeout:   durationFromMillis(args.TimeoutMS, cfg.Timeout),
@@ -44,6 +47,20 @@ func shell(ctx context.Context, cfg LocalConfig, req Request) (Result, error) {
 	return out, nil
 }
 
+func shellCommand(command string, args []string) (string, []string) {
+	if len(args) == 0 && commandNeedsInterpreter(command) {
+		return "/bin/sh", []string{"-lc", command}
+	}
+	return command, args
+}
+
+func commandNeedsInterpreter(command string) bool {
+	command = strings.TrimSpace(command)
+	return strings.IndexFunc(command, func(value rune) bool {
+		return value == ' ' || value == '\t' || value == '\n' || strings.ContainsRune("|&;<>()$`\\*?[]{}~'\"=#", value)
+	}) >= 0
+}
+
 func python(ctx context.Context, cfg LocalConfig, req Request) (Result, error) {
 	var args struct {
 		Code      string `json:"code"`
@@ -54,6 +71,7 @@ func python(ctx context.Context, cfg LocalConfig, req Request) (Result, error) {
 	if err := decodeArgs(req, &args); err != nil {
 		return Result{}, err
 	}
+	args.CWD = ResolveWorkingPath(ctx, args.CWD)
 	pythonPath := cfg.Python
 	if pythonPath == "" {
 		pythonPath = "python3"

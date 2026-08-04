@@ -181,11 +181,14 @@ type Runner struct {
 	// background spawn is unavailable and the tool falls back to synchronous).
 	// bgSem caps concurrent detached children (buffered to maxBackgroundSubagents).
 	// streamBackgroundSubagents, when set, streams a background child's activity via
-	// r.publisher keyed to the child thread id (off by default; sahara enables it).
+	// r.publisher keyed to the child thread id (off by default).
+	// streamSubagents does the same for synchronous children so an interactive
+	// parent UI can show their live status while spawn_subagent is blocking.
 	// authHandoff hands the parent OBO authority to the woken completion turn via an
 	// opaque single-use token carried on the notice (never the credential itself).
 	notifier                  channel.Enqueuer
 	bgSem                     chan struct{}
+	streamSubagents           bool
 	streamBackgroundSubagents bool
 	authHandoff               *authhandoff.Store
 
@@ -290,7 +293,8 @@ type Config struct {
 	// RetryBackoff returns the wait before transient retry attempt n (1-based).
 	// nil → an exponential default (250ms, doubling, capped at 8s). The wait is
 	// context-aware (a cancelled ctx aborts it).
-	RetryBackoff      func(attempt int) time.Duration
+	RetryBackoff func(attempt int) time.Duration
+	// MaxToolIterations caps tool-call rounds per turn. <=0 defaults to 250.
 	MaxToolIterations int
 	Streaming         bool
 	// StreamFlushInterval coalesces streamed token deltas: deltas are buffered and
@@ -425,6 +429,10 @@ type Config struct {
 	// thread to render it). Default false: background children run silently (like
 	// synchronous sub-agents). Independent of the child's durable commit either way.
 	StreamBackgroundSubagents bool
+	// StreamSubagents, when true, streams synchronous child activity via the
+	// Publisher under the child thread id. Interactive clients can associate it
+	// with the blocking parent spawn by TaskID. Default false.
+	StreamSubagents bool
 	// AuthHandoff hands the parent turn's OBO authority to the woken completion turn
 	// via a single-use token carried on the notice (the credential never rides the
 	// message). Optional; nil → a Store is created. The distribution's Authority
@@ -558,6 +566,7 @@ func NewRunner(cfg Config) (*Runner, error) {
 		attachments:               attachments,
 		notifier:                  cfg.Notifier,
 		bgSem:                     make(chan struct{}, maxBackground),
+		streamSubagents:           cfg.StreamSubagents,
 		streamBackgroundSubagents: cfg.StreamBackgroundSubagents,
 		authHandoff:               authHandoff,
 		rubric:                    cfg.Rubric,
@@ -795,6 +804,10 @@ func (r *Runner) Run(ctx context.Context, addr protocol.MessageAddress, user pro
 		return reply, nil
 	}
 	user = rewritten
+	if cwd, ok := tools.MessageWorkingDirectory(user); ok {
+		ctx = tools.WithWorkingDirectory(ctx, cwd)
+	}
+	ctx = withWorkingDirectoryPrompt(ctx)
 	// The effective user prompt for this turn is now resolved (command rewrites
 	// applied). Fire UserPromptSubmit before any model call.
 	r.notifyTurn(ctx, hooks.TurnEvent{Phase: hooks.PhaseUserPromptSubmit, Addr: addr})
@@ -1004,6 +1017,21 @@ func (r *Runner) Run(ctx context.Context, addr protocol.MessageAddress, user pro
 		}
 	}
 	return assistant, nil
+}
+
+// withWorkingDirectoryPrompt makes the per-turn cwd visible to the model as
+// well as the local tool handlers. The context is inherited by synchronous and
+// background subagents; AppendSystemPromptExtra prevents duplicate sections.
+func withWorkingDirectoryPrompt(ctx context.Context) context.Context {
+	cwd, ok := tools.WorkingDirectoryFrom(ctx)
+	if !ok {
+		return ctx
+	}
+	instruction := fmt.Sprintf(
+		"Active working directory: %q. Resolve relative local tool paths from this directory. Treat it as the current directory; do not substitute its parent or the original startup workspace. Tool sandbox permissions still govern access.",
+		cwd,
+	)
+	return contextpack.AppendSystemPromptExtra(ctx, instruction)
 }
 
 // notifyTurn fans a turn-lifecycle event out to the configured TurnObservers

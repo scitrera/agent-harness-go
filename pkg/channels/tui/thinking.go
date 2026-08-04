@@ -50,6 +50,11 @@ func (m model) hasThinking() bool {
 			return true
 		}
 	}
+	for _, activity := range m.subagents {
+		if activity.Phase == "working" {
+			return true
+		}
+	}
 	return false
 }
 
@@ -70,6 +75,11 @@ func (m *model) advanceThinking() bool {
 	for i := range m.rows {
 		if m.rows[i].Kind == rowThinking {
 			m.rows[i].Text = text
+		}
+	}
+	for callID, activity := range m.subagents {
+		if activity.Phase == "working" {
+			m.upsertToolishRow(callID, m.renderSubagentActivity(activity))
 		}
 	}
 	m.refreshViewport()

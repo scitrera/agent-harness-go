@@ -58,7 +58,7 @@ func (w *Workspace) RunCommand(ctx context.Context, spec CommandSpec) (CommandRe
 	cmd.Stderr = &out
 
 	if err := cmd.Start(); err != nil {
-		return CommandResult{}, fmt.Errorf("start command: %w", err)
+		return CommandResult{}, fmt.Errorf("%w: start command: %w", ErrCommandFailed, err)
 	}
 	pid := cmd.Process.Pid
 	err = cmd.Wait()

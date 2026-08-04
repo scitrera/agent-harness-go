@@ -21,9 +21,9 @@ import (
 	"github.com/scitrera/agent-harness-go/pkg/turn"
 )
 
-func buildRunner(cfg appConfig, pub channel.Publisher, approvals approval.Awaiter, decorator func(context.Context, protocol.MessageAddress) context.Context) (*turn.Runner, *store.FileStore, error) {
+func buildRunner(cfg appConfig, pub channel.Publisher, approvals approval.Awaiter, decorator func(context.Context, protocol.MessageAddress) context.Context) (*turn.Runner, *store.FileStore, *localtools.Workspace, error) {
 	if err := os.MkdirAll(cfg.workspaceRoot, 0o755); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if cfg.seed {
 		seedDefaults(cfg.workspaceRoot)
@@ -31,27 +31,27 @@ func buildRunner(cfg appConfig, pub channel.Publisher, approvals approval.Awaite
 
 	ws, err := localtools.NewWorkspace(cfg.workspaceRoot)
 	if err != nil {
-		return nil, nil, fmt.Errorf("workspace: %w", err)
+		return nil, nil, nil, fmt.Errorf("workspace: %w", err)
 	}
 	exa, err := localtools.NewExaClient("https://api.exa.ai/search", os.Getenv("EXA_API_KEY"), true, nil)
 	if err != nil {
-		return nil, nil, fmt.Errorf("exa: %w", err)
+		return nil, nil, nil, fmt.Errorf("exa: %w", err)
 	}
 	reg := tools.NewRegistry()
 	if err := tools.RegisterLocal(reg, tools.LocalConfig{Workspace: ws, Python: "python3", Exa: exa, Timeout: 30 * time.Second, MaxOutput: 1 << 20}); err != nil {
-		return nil, nil, fmt.Errorf("register tools: %w", err)
+		return nil, nil, nil, fmt.Errorf("register tools: %w", err)
 	}
 	subagentRef := &subagent.Ref{}
 	agentCatalog, err := agentCatalogForWorkspace(cfg.workspaceRoot)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	// A publisher that can also enqueue inbound turns (web/tui channels) lets a
 	// detached background sub-agent push its completion back to the parent thread;
 	// cli (stdout-only) cannot, so background stays disabled there.
 	notifier, allowBackground := pub.(channel.Enqueuer)
 	if err := registerReferenceSubagent(reg, subagentRef, agentCatalog, allowBackground); err != nil {
-		return nil, nil, fmt.Errorf("register subagent: %w", err)
+		return nil, nil, nil, fmt.Errorf("register subagent: %w", err)
 	}
 
 	auth := ""
@@ -63,7 +63,7 @@ func buildRunner(cfg appConfig, pub channel.Publisher, approvals approval.Awaite
 	// trace/export. (Distributions behind a proxy that omits `[DONE]` leave it off.)
 	prov, err := provider.NewOpenAICompatClient(provider.OpenAICompatConfig{BaseURL: cfg.baseURL, AuthHeader: auth, Format: provider.FormatOpenAI, StreamUsage: true})
 	if err != nil {
-		return nil, nil, fmt.Errorf("provider: %w", err)
+		return nil, nil, nil, fmt.Errorf("provider: %w", err)
 	}
 
 	fsStore := store.NewFileStore(cfg.workspaceRoot, cfg.stateDir)
@@ -73,7 +73,7 @@ func buildRunner(cfg appConfig, pub channel.Publisher, approvals approval.Awaite
 	// mechanism the sahara distribution uses; nothing about it is distribution-specific.
 	skillReg := skills.BuildRegistry(skillSpecs, cfg.workspaceRoot)
 	if err := reg.Register(skills.LoadToolName, skills.LoadTool(skillReg)); err != nil {
-		return nil, nil, fmt.Errorf("register load_skill: %w", err)
+		return nil, nil, nil, fmt.Errorf("register load_skill: %w", err)
 	}
 	cmdSpecs, _ := commands.Discover(cfg.workspaceRoot, []string{"commands", ".agent-harness-commands"})
 
@@ -89,7 +89,7 @@ func buildRunner(cfg appConfig, pub channel.Publisher, approvals approval.Awaite
 	if cfg.record != "" {
 		fr, rerr := newFileTurnRecorder(cfg.record)
 		if rerr != nil {
-			return nil, nil, fmt.Errorf("record: %w", rerr)
+			return nil, nil, nil, fmt.Errorf("record: %w", rerr)
 		}
 		recorder = fr
 	}
@@ -116,19 +116,24 @@ func buildRunner(cfg appConfig, pub channel.Publisher, approvals approval.Awaite
 		Model:        cfg.model,
 		Streaming:    true,
 		TurnRecorder: recorder,
-		Commands:  commands.New(cmdSpecs),
-		Now:       time.Now,
-		Approvals: approvals,
+		Commands:     commands.New(cmdSpecs),
+		Now:          time.Now,
+		Approvals:    approvals,
 		// Notifier wakes a fresh parent turn with a background sub-agent's completion
 		// notice; nil (cli) → background spawns fall back to synchronous.
 		Notifier: notifier,
+		// Interactive web/TUI channels can use child-thread stream events to keep the
+		// blocking spawn_subagent row live with the child's latest activity.
+		StreamSubagents: allowBackground,
+		// Detached children use the same child-thread event stream.
+		StreamBackgroundSubagents: allowBackground,
 		// ContextDecorator wraps each turn's ctx (ACP passes ac.TurnContext to route
 		// file/shell tools through the client; other channels pass nil → unchanged).
 		ContextDecorator: decorator,
 	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("runner: %w", err)
+		return nil, nil, nil, fmt.Errorf("runner: %w", err)
 	}
 	subagentRef.Set(runner)
-	return runner, fsStore, nil
+	return runner, fsStore, ws, nil
 }

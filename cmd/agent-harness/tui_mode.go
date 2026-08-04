@@ -25,7 +25,7 @@ func runTUI(cfg appConfig) error {
 
 	broker := approval.New()
 	tc := tui.NewChannel()
-	runner, fsStore, err := buildRunner(cfg, tc, broker, nil)
+	runner, fsStore, workspace, err := buildRunner(cfg, tc, broker, nil)
 	if err != nil {
 		return err
 	}
@@ -70,6 +70,7 @@ func runTUI(cfg appConfig) error {
 		TaskStore:       taskStore,
 		TeamStore:       teamStore,
 		AgentCatalog:    agentCatalog,
+		DirectoryAccess: workspace,
 		InitialThreadID: cfg.thread,
 		WorkspaceRoot:   cfg.workspaceRoot,
 	})

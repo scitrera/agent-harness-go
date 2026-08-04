@@ -7,10 +7,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 type Workspace struct {
 	root string
+	mu   sync.RWMutex
 	// readRoots are additional absolute, symlink-evaluated roots that read-only
 	// operations (ReadFile/ReadBytes/InspectFile via resolveExisting) may read
 	// from when given an ABSOLUTE path within one — e.g. image-baked system skills
@@ -63,9 +65,40 @@ func (w *Workspace) AddReadRoots(dirs ...string) error {
 			}
 			return fmt.Errorf("%w: eval read root %s: %w", ErrInvalidRoot, d, err)
 		}
-		w.readRoots = append(w.readRoots, evaluated)
+		info, err := os.Stat(evaluated)
+		if err != nil {
+			return fmt.Errorf("%w: stat read root %s: %w", ErrInvalidRoot, d, err)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("%w: read root %s is not a directory", ErrInvalidRoot, d)
+		}
+		w.mu.Lock()
+		alreadyRegistered := false
+		for _, existing := range w.readRoots {
+			if existing == evaluated {
+				alreadyRegistered = true
+				break
+			}
+		}
+		if !alreadyRegistered {
+			w.readRoots = append(w.readRoots, evaluated)
+		}
+		w.mu.Unlock()
 	}
 	return nil
+}
+
+// GrantWorkingDirectory registers a user-selected directory for read-only file
+// tools and as an allowed cwd for command execution. The structured write/edit
+// APIs remain confined to Root().
+func (w *Workspace) GrantWorkingDirectory(dir string) error {
+	return w.AddReadRoots(dir)
+}
+
+func (w *Workspace) readRootsSnapshot() []string {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return append([]string(nil), w.readRoots...)
 }
 
 // defaultReadFileMaxBytes bounds an uncapped read_file so a huge file can't OOM
@@ -212,7 +245,7 @@ func (w *Workspace) join(relPath string, allowReadRoots bool) (string, error) {
 			return clean, nil
 		}
 		if allowReadRoots {
-			for _, r := range w.readRoots {
+			for _, r := range w.readRootsSnapshot() {
 				if within(r, clean) {
 					return clean, nil
 				}
@@ -236,7 +269,7 @@ func (w *Workspace) containedInAny(absPath string) bool {
 	if w.contains(absPath) {
 		return true
 	}
-	for _, r := range w.readRoots {
+	for _, r := range w.readRootsSnapshot() {
 		if within(r, absPath) {
 			return true
 		}

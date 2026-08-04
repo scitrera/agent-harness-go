@@ -24,7 +24,8 @@ var (
 func (m model) View() tea.View {
 	view := tea.NewView(m.render())
 	view.AltScreen = true
-	view.MouseMode = tea.MouseModeCellMotion
+	// Leave mouse reporting disabled so the terminal owns drag selection and copy.
+	view.MouseMode = tea.MouseModeNone
 	if cursor := m.composer.Cursor(); cursor != nil {
 		adjusted := *cursor
 		adjusted.Position.Y += m.viewport.Height()

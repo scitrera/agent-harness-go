@@ -19,23 +19,29 @@ const (
 	minComposerHeight        = 1
 	maxComposerHeight        = 3
 	maxComposerContentHeight = 1000
+	// DEC private mode 1007 asks compatible terminals to translate wheel input
+	// into cursor Up/Down while the alternate screen is active. Unlike mouse
+	// reporting modes 1000/1002, it leaves drag selection owned by the terminal.
+	alternateScrollModeOn  = "\x1b[?1007h"
+	alternateScrollModeOff = "\x1b[?1007l"
 )
 
 type model struct {
-	ctx           context.Context
-	channel       *Channel
-	events        <-chan channel.Event
-	store         HistoryStore
-	index         *threadindex.Index
-	approvals     approvalResolver
-	canceller     canceler
-	modelStatus   ModelStatus
-	commandSource CommandProvider
-	taskStore     TaskStore
-	teamStore     TeamStore
-	agentCatalog  AgentCatalog
-	workspaceRoot string
-	cwd           string
+	ctx             context.Context
+	channel         *Channel
+	events          <-chan channel.Event
+	store           HistoryStore
+	index           *threadindex.Index
+	approvals       approvalResolver
+	canceller       canceler
+	modelStatus     ModelStatus
+	commandSource   CommandProvider
+	taskStore       TaskStore
+	teamStore       TeamStore
+	agentCatalog    AgentCatalog
+	directoryAccess DirectoryAccess
+	workspaceRoot   string
+	cwd             string
 
 	threadID string
 	threads  []threadindex.Session
@@ -43,6 +49,7 @@ type model struct {
 
 	pendingApprovals map[string]approvalRequest
 	tools            map[string]toolEntry
+	subagents        map[string]subagentActivity
 	turns            map[string]turnActivity
 	renderedRows     map[string]renderedRowCache
 	attachments      []pendingAttachment
@@ -111,6 +118,7 @@ func newModel(ctx context.Context, cfg Config) (model, error) {
 		taskStore:        cfg.TaskStore,
 		teamStore:        cfg.TeamStore,
 		agentCatalog:     cfg.AgentCatalog,
+		directoryAccess:  cfg.DirectoryAccess,
 		workspaceRoot:    workspaceRoot,
 		cwd:              workspaceRoot,
 		threadID:         threadID,
@@ -118,6 +126,7 @@ func newModel(ctx context.Context, cfg Config) (model, error) {
 		rows:             rowsFromHistory(messages),
 		pendingApprovals: map[string]approvalRequest{},
 		tools:            map[string]toolEntry{},
+		subagents:        map[string]subagentActivity{},
 		turns:            map[string]turnActivity{},
 		renderedRows:     map[string]renderedRowCache{},
 		clearingThreads:  map[string]struct{}{},
@@ -162,6 +171,8 @@ func newComposer() textarea.Model {
 		key.WithKeys("shift+enter", "ctrl+j", "alt+enter"),
 		key.WithHelp("shift+enter", "newline"),
 	)
+	composer.KeyMap.WordBackward.SetKeys("alt+left", "alt+b", "ctrl+left")
+	composer.KeyMap.WordForward.SetKeys("alt+right", "alt+f", "ctrl+right")
 	composer.SetHeight(minComposerHeight)
 	composer.SetWidth(80)
 	composer.SetVirtualCursor(false)
@@ -170,7 +181,7 @@ func newComposer() textarea.Model {
 }
 
 func (m model) Init() tea.Cmd {
-	return tea.Batch(m.composer.Focus(), waitEvent(m.ctx, m.events), setTerminalTitleCmd(m.terminalTitle()))
+	return tea.Batch(m.composer.Focus(), waitEvent(m.ctx, m.events), setTerminalTitleCmd(m.terminalTitle()), tea.Raw(alternateScrollModeOn))
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -193,7 +204,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if rowStructureKey(m.rows) != rowStructure || msg.Event.Type == channel.EventMessageFinal {
 			next = repaint(next)
 		}
-		return m, next
+		return m, m.ensureThinkingTick(next)
 	case sendResultMsg:
 		m.applySendResult(msg)
 		return m, m.ensureThinkingTick(setTerminalTitleCmd(m.terminalTitle()))

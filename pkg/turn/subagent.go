@@ -45,9 +45,11 @@ func (r *Runner) RunSubagent(ctx context.Context, req subagent.Request) (_ subag
 	ctx, span := telemetry.StartSubagent(ctx, req.Depth)
 	defer telemetry.Finish(span, &err)
 	childThreadID, resume := resolveChildThread(req)
-	// nil publisher => the streamer is a no-op, so a synchronous sub-agent does not
-	// emit stream events to the user-facing channel (it is internal to the tool call).
-	return r.runSubagentOn(ctx, req, childThreadID, resume, nil)
+	var publisher channel.Publisher
+	if r.streamSubagents {
+		publisher = r.publisher
+	}
+	return r.runSubagentOn(ctx, req, childThreadID, resume, publisher)
 }
 
 // resolveChildThread resolves the child sub-agent thread id: resume an existing
@@ -78,6 +80,7 @@ func resolveChildThread(req subagent.Request) (childThreadID string, resume bool
 // OBO carried through, cross-thread back-ref + spawn meta on new child threads, the
 // optional thread-registrar declaration, and the durable commit of task+assistant.
 func (r *Runner) runSubagentOn(ctx context.Context, req subagent.Request, childThreadID string, resume bool, publisher channel.Publisher) (subagent.Result, error) {
+	ctx = withWorkingDirectoryPrompt(ctx)
 	parentThread := req.Parent.ThreadID
 	addr := req.Parent
 	addr.ThreadID = childThreadID
@@ -117,6 +120,9 @@ func (r *Runner) runSubagentOn(ctx context.Context, req subagent.Request, childT
 	// call) and the runner's publisher for a streamed background sub-agent (keyed to
 	// the child thread id, so a client can subscribe to that thread to render it).
 	streamer := newTurnStreamer(publisher, addr, streamMessageID(addr), r.now, r.streamFlush)
+	if err := streamer.start(ctx); err != nil {
+		return subagent.Result{}, fmt.Errorf("subagent publish start: %w", err)
+	}
 	// Discover tools relevant to the subagent's task, then apply catalog policy.
 	tt := filterSubagentTools(r.assembleTurnTools(ctx, addr, userMsg), req)
 	// req.Model (from spawn_subagent's model arg) is an explicit override; with it
@@ -128,7 +134,14 @@ func (r *Runner) runSubagentOn(ctx context.Context, req subagent.Request, childT
 	approvers := subagentApprovers(req)
 	assistant, err := r.runProviderLoop(ctx, session, addr, userMsg, bootstrap, streamer, nil, subModel, approvers, tt)
 	if err != nil {
+		if publisher != nil {
+			_ = publisher.PublishEvent(ctx, channel.Event{Type: channel.EventError, Addr: addr})
+		}
 		return subagent.Result{}, err
+	}
+	assistant, err = streamer.finalize(ctx, assistant)
+	if err != nil {
+		return subagent.Result{}, fmt.Errorf("subagent publish final: %w", err)
 	}
 	// New child thread: DECLARE it (with its parent) via the optional thread
 	// registry seam BEFORE the commit below auto-materializes it. A backend with

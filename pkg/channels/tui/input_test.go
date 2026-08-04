@@ -133,3 +133,32 @@ func TestViewCursorAccountsForSlashSuggestions(t *testing.T) {
 		t.Fatalf("cursor row = %d, want %d", got, want)
 	}
 }
+
+func TestEmptyComposerArrowEventsScrollHistoryByLines(t *testing.T) {
+	m := model{viewport: viewport.New(), composer: newComposer(), tailing: true}
+	m.viewport.SetWidth(40)
+	m.viewport.SetHeight(3)
+	m.viewport.SetContent(strings.Join([]string{
+		"one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+	}, "\n"))
+	m.viewport.GotoBottom()
+	bottom := m.viewport.YOffset()
+
+	next, _ := m.updateKey(tea.KeyPressMsg(tea.Key{Code: tea.KeyUp}))
+	updated := next.(model)
+	if got := updated.viewport.YOffset(); got != bottom-historyScrollLines {
+		t.Fatalf("up scroll offset = %d, want %d", got, bottom-historyScrollLines)
+	}
+	if updated.tailing {
+		t.Fatal("scrolling up should stop tailing")
+	}
+
+	next, _ = updated.updateKey(tea.KeyPressMsg(tea.Key{Code: tea.KeyDown}))
+	updated = next.(model)
+	if got := updated.viewport.YOffset(); got != bottom {
+		t.Fatalf("down scroll offset = %d, want bottom %d", got, bottom)
+	}
+	if !updated.tailing {
+		t.Fatal("scrolling to bottom should resume tailing")
+	}
+}

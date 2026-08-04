@@ -20,7 +20,7 @@ func runWeb(cfg appConfig, addr string, openBrowser bool) error {
 	defer stop()
 
 	wc := web.NewChannel()
-	runner, fsStore, err := buildRunner(cfg, wc, nil, nil)
+	runner, fsStore, _, err := buildRunner(cfg, wc, nil, nil)
 	if err != nil {
 		return err
 	}

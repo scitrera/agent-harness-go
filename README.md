@@ -52,12 +52,19 @@ the browser, the terminal UI, or stdout in `--cli` mode).
 | `--web` | — | `false` | run the localhost web UI |
 | `--no-browser` | — | `false` | don't auto-open a browser (web mode) |
 
-In the TUI, type `@` followed by a path and use Tab/arrow keys to complete
-workspace files or directories. Paths resolve from `/pwd`; use `/cd <path>` to
-change that virtual working directory without changing the process directory.
-Referenced images are sent inline, while other references are normalized to
-workspace-relative paths for the agent's file tools. Press `Ctrl+C` or `Ctrl+D`
-twice within one second to quit.
+In the TUI, type `@` followed by a path and use Tab/arrow keys to complete files
+or directories. Paths resolve from `/pwd`; use `/cd <path>` to change that
+virtual working directory without changing the process directory. An explicit
+`/cd` may leave the original workspace: the selected directory becomes an
+additional read/inspect/shell root for the live agent, while persistence,
+skills, and `write_file`/`edit_file` remain rooted in the original workspace.
+Referenced images are sent inline; other references are normalized to
+workspace-relative or absolute granted paths. Press `Ctrl+C` or `Ctrl+D` twice
+within one second to quit. `Ctrl+Left`/`Ctrl+Right` move the composer by words;
+mouse reporting stays disabled so the terminal can perform native text
+selection and copying. The mouse wheel scrolls transcript history in compatible
+terminals without changing that selection behavior; Up/Down provide the same
+three-line scrolling while the composer is empty.
 
 The web server has **no authentication** and is intended for **localhost use
 only** — do not bind it beyond loopback. State-changing endpoints enforce a

@@ -186,6 +186,58 @@ func Test_Registry_Invoke_preserves_shell_failure_metadata(t *testing.T) {
 	}
 }
 
+func Test_Registry_Invoke_shellCommandLineExecutesThroughInterpreter(t *testing.T) {
+	ws, err := localtools.NewWorkspace(t.TempDir())
+	if err != nil {
+		t.Fatalf("workspace: %v", err)
+	}
+	reg := NewRegistry()
+	if err := RegisterLocal(reg, LocalConfig{Workspace: ws, MaxOutput: 64}); err != nil {
+		t.Fatalf("register local tools: %v", err)
+	}
+
+	result, err := reg.Invoke(context.Background(), Request{
+		CallID:    "shell-command-line",
+		Name:      "shell",
+		Arguments: json.RawMessage(`{"command":"printf hello | tr a-z A-Z"}`),
+	})
+	if err != nil {
+		t.Fatalf("invoke shell command line: %v", err)
+	}
+	if !jsonContains(result.Payload, "HELLO") {
+		t.Fatalf("shell command-line payload = %s", result.Payload)
+	}
+}
+
+func Test_Registry_Invoke_missingExecutableReportsUsefulSafeError(t *testing.T) {
+	ws, err := localtools.NewWorkspace(t.TempDir())
+	if err != nil {
+		t.Fatalf("workspace: %v", err)
+	}
+	sink := &recordingToolEventSink{}
+	reg := NewRegistry()
+	reg.SetEventSink(sink)
+	if err := RegisterLocal(reg, LocalConfig{Workspace: ws}); err != nil {
+		t.Fatalf("register local tools: %v", err)
+	}
+
+	_, err = reg.Invoke(context.Background(), Request{
+		CallID:    "missing-executable",
+		Name:      "shell",
+		Arguments: json.RawMessage(`{"command":"definitely-not-an-installed-command"}`),
+	})
+	if err == nil {
+		t.Fatal("missing executable should fail")
+	}
+	if len(sink.events) != 2 {
+		t.Fatalf("tool events = %+v", sink.events)
+	}
+	failed := sink.events[1]
+	if failed.ErrorCode != "command_failed" || failed.ErrorMessage != "command executable not found" {
+		t.Fatalf("safe executable error = code %q message %q", failed.ErrorCode, failed.ErrorMessage)
+	}
+}
+
 func Test_Registry_Invoke_preserves_python_timeout_metadata(t *testing.T) {
 	// Given
 	ctx := context.Background()

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"os"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -46,6 +47,12 @@ type AgentCatalog interface {
 	Get(ctx context.Context, typ subagent.AgentType) (subagent.Definition, error)
 }
 
+// DirectoryAccess grants model tools access to an explicit user-selected
+// working directory outside the original workspace.
+type DirectoryAccess interface {
+	GrantWorkingDirectory(dir string) error
+}
+
 type Config struct {
 	Channel         *Channel
 	Store           HistoryStore
@@ -57,11 +64,13 @@ type Config struct {
 	TaskStore       TaskStore
 	TeamStore       TeamStore
 	AgentCatalog    AgentCatalog
+	DirectoryAccess DirectoryAccess
 	InitialThreadID string
 	WorkspaceRoot   string
 }
 
 func Run(ctx context.Context, cfg Config) error {
+	defer func() { _, _ = os.Stdout.WriteString(alternateScrollModeOff) }()
 	model, err := newModel(ctx, cfg)
 	if err != nil {
 		return err

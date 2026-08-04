@@ -28,7 +28,7 @@ func runACP(cfg appConfig) error {
 	broker := approval.New()
 	// ac.TurnContext routes the harness file/shell tools through the ACP client's
 	// fs/terminal capabilities when the client advertised them.
-	runner, _, err := buildRunner(cfg, ac, broker, ac.TurnContext)
+	runner, _, _, err := buildRunner(cfg, ac, broker, ac.TurnContext)
 	if err != nil {
 		return err
 	}

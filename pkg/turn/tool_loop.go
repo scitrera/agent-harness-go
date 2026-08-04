@@ -16,7 +16,7 @@ import (
 	"github.com/scitrera/agent-harness-go/pkg/tools"
 )
 
-const defaultMaxToolIterations = 4
+const defaultMaxToolIterations = 250
 
 type toolIterationLimitKey struct{}
 

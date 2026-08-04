@@ -41,7 +41,7 @@ func messageText(message protocol.ChatMessage) string {
 	var out strings.Builder
 	for _, part := range message.Content {
 		if text, ok := part.AsText(); ok {
-			out.WriteString(text.Text)
+			out.WriteString(stripWorkingDirectoryContext(text.Text))
 			continue
 		}
 		if image, ok := part.AsImage(); ok {
@@ -145,7 +145,9 @@ func isToolLifecycleText(text, toolName string) bool {
 	if toolName == "" {
 		return false
 	}
-	return strings.HasPrefix(strings.TrimSpace(text), "tool "+toolName+": ")
+	text = strings.TrimSpace(text)
+	return strings.HasPrefix(text, "tool "+toolName+": ") ||
+		(toolName == "spawn_subagent" && strings.HasPrefix(text, "Subagent "))
 }
 
 func toolRowFromPart(message protocol.ChatMessage, part protocol.ContentPart) (chatRow, bool) {

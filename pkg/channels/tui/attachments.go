@@ -36,8 +36,13 @@ func (m model) handleAttachments(fields []string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	path := trimMatchingQuotes(strings.Join(fields[1:], " "))
+	target, err := m.resolveAttachmentTarget(path)
+	if err != nil {
+		m.addSystem("attach failed: " + err.Error())
+		return m, nil
+	}
 	m.status = "loading attachment"
-	return m, loadAttachmentCmd(m.ctx, m.workspaceRoot, m.cwd, path)
+	return m, loadAttachmentCmd(m.ctx, target)
 }
 
 func (m model) updatePaste(msg tea.PasteMsg) (tea.Model, tea.Cmd) {
@@ -47,7 +52,7 @@ func (m model) updatePaste(msg tea.PasteMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.status = "loading attachment"
-		return m, loadAttachmentCmd(m.ctx, m.workspaceRoot, m.cwd, path)
+		return m, loadAttachmentCmd(m.ctx, path)
 	}
 	var cmd tea.Cmd
 	m.composer, cmd = m.composer.Update(msg)
@@ -65,7 +70,7 @@ func (m model) pastedImagePath(content string) (string, bool) {
 	default:
 		return "", false
 	}
-	_, target, err := resolveWorkspacePath(m.workspaceRoot, m.cwd, requested)
+	target, err := m.resolveAttachmentTarget(requested)
 	if err != nil {
 		return "", false
 	}
@@ -73,7 +78,18 @@ func (m model) pastedImagePath(content string) (string, bool) {
 	if err != nil || !info.Mode().IsRegular() {
 		return "", false
 	}
-	return requested, true
+	return target, true
+}
+
+func (m model) resolveAttachmentTarget(requested string) (string, error) {
+	target, err := resolveWorkingPath(m.currentWorkingDirectory(), requested)
+	if err != nil {
+		return "", err
+	}
+	if err := m.grantExternalDirectory(filepath.Dir(target)); err != nil {
+		return "", err
+	}
+	return target, nil
 }
 
 func (m *model) applyAttachmentLoaded(msg attachmentLoadedMsg) {
@@ -125,7 +141,7 @@ func (m *model) updateAttachmentPlaceholder() {
 
 func (m model) attachmentSummary() string {
 	if len(m.attachments) == 0 {
-		return "attachments\nnone queued\nusage: /attach <workspace-image-path>"
+		return "attachments\nnone queued\nusage: /attach <image-path>"
 	}
 	lines := []string{"queued attachments"}
 	for _, attachment := range m.attachments {
@@ -135,9 +151,9 @@ func (m model) attachmentSummary() string {
 	return strings.Join(lines, "\n")
 }
 
-func loadAttachmentCmd(ctx context.Context, workspaceRoot, cwd, requestedPath string) tea.Cmd {
+func loadAttachmentCmd(ctx context.Context, target string) tea.Cmd {
 	return func() tea.Msg {
-		attachment, err := loadWorkspaceImageFrom(ctx, workspaceRoot, cwd, requestedPath)
+		attachment, err := loadResolvedImage(ctx, target, target)
 		return attachmentLoadedMsg{Attachment: attachment, Err: err}
 	}
 }
@@ -152,6 +168,17 @@ func loadWorkspaceImageFrom(ctx context.Context, workspaceRoot, cwd, requestedPa
 	}
 	root, target, err := resolveWorkspacePath(workspaceRoot, cwd, requestedPath)
 	if err != nil {
+		return pendingAttachment{}, err
+	}
+	displayPath, relativeErr := filepath.Rel(root, target)
+	if relativeErr != nil {
+		displayPath = target
+	}
+	return loadResolvedImage(ctx, target, displayPath)
+}
+
+func loadResolvedImage(ctx context.Context, target, displayPath string) (pendingAttachment, error) {
+	if err := ctx.Err(); err != nil {
 		return pendingAttachment{}, err
 	}
 	info, err := os.Stat(target)
@@ -173,8 +200,7 @@ func loadWorkspaceImageFrom(ctx context.Context, workspaceRoot, cwd, requestedPa
 	}
 	mimeType := http.DetectContentType(data)
 	if !strings.HasPrefix(mimeType, "image/") {
-		relative, _ := filepath.Rel(root, target)
-		return pendingAttachment{}, fmt.Errorf("%s is %s; only images are supported", relative, mimeType)
+		return pendingAttachment{}, fmt.Errorf("%s is %s; only images are supported", displayPath, mimeType)
 	}
 	name := filepath.Base(target)
 	part, err := protocol.NewImagePart(protocol.ImagePart{

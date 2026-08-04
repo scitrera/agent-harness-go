@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -226,5 +227,58 @@ func Test_Workspace_AddReadRoots_skips_missing(t *testing.T) {
 	ws := newTestWorkspace(t)
 	if err := ws.AddReadRoots(filepath.Join(t.TempDir(), "does-not-exist")); err != nil {
 		t.Fatalf("a missing read root should be skipped, not error: %v", err)
+	}
+}
+
+func Test_Workspace_AddReadRoots_isConcurrentAndIdempotent(t *testing.T) {
+	ctx := context.Background()
+	ws := newTestWorkspace(t)
+	ext := t.TempDir()
+	file := filepath.Join(ext, "external.txt")
+	if err := os.WriteFile(file, []byte("external"), 0o600); err != nil {
+		t.Fatalf("write external file: %v", err)
+	}
+	if err := ws.AddReadRoots(ext); err != nil {
+		t.Fatalf("initial read root: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	for range 20 {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			if err := ws.AddReadRoots(ext); err != nil {
+				t.Errorf("add read root: %v", err)
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			if _, err := ws.ReadFile(ctx, file, 0); err != nil {
+				t.Errorf("read external file: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+	if got := len(ws.readRootsSnapshot()); got != 1 {
+		t.Fatalf("registered read roots = %d, want 1", got)
+	}
+}
+
+func Test_Workspace_RunCommand_allows_registered_external_cwd(t *testing.T) {
+	ws := newTestWorkspace(t)
+	external := t.TempDir()
+	if err := ws.AddReadRoots(external); err != nil {
+		t.Fatalf("add external cwd: %v", err)
+	}
+
+	result, err := ws.RunCommand(context.Background(), CommandSpec{
+		Name: "pwd",
+		CWD:  external,
+	})
+	if err != nil {
+		t.Fatalf("run in external cwd: %v", err)
+	}
+	if got := strings.TrimSpace(result.Output); got != external {
+		t.Fatalf("command cwd = %q, want %q", got, external)
 	}
 }

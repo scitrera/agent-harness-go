@@ -78,6 +78,34 @@ func resolveWorkspacePath(workspaceRoot, cwd, requestedPath string) (root string
 	return root, target, nil
 }
 
+func resolveWorkingPath(cwd, requestedPath string) (string, error) {
+	cwd = strings.TrimSpace(cwd)
+	if cwd == "" {
+		return "", fmt.Errorf("working directory is not configured")
+	}
+	base, err := filepath.Abs(cwd)
+	if err != nil {
+		return "", err
+	}
+	base, err = filepath.EvalSymlinks(base)
+	if err != nil {
+		return "", err
+	}
+	requestedPath = strings.TrimSpace(requestedPath)
+	if requestedPath == "" {
+		requestedPath = "."
+	}
+	target := requestedPath
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(base, target)
+	}
+	target, err = filepath.Abs(target)
+	if err != nil {
+		return "", err
+	}
+	return filepath.EvalSymlinks(target)
+}
+
 func ensurePathWithinWorkspace(root, target string) error {
 	relative, err := filepath.Rel(root, target)
 	if err != nil {
@@ -100,6 +128,30 @@ func workspaceRelativePath(root, target string) (string, error) {
 	return filepath.ToSlash(relative), nil
 }
 
+func pathWithinWorkspace(root, target string) bool {
+	return root != "" && ensurePathWithinWorkspace(root, target) == nil
+}
+
+func (m model) currentWorkingDirectory() string {
+	if m.cwd != "" {
+		return m.cwd
+	}
+	return m.workspaceRoot
+}
+
+func (m model) grantExternalDirectory(target string) error {
+	if pathWithinWorkspace(m.workspaceRoot, target) {
+		return nil
+	}
+	if m.directoryAccess == nil {
+		return fmt.Errorf("external working-directory access is not configured")
+	}
+	if err := m.directoryAccess.GrantWorkingDirectory(target); err != nil {
+		return fmt.Errorf("grant external working directory: %w", err)
+	}
+	return nil
+}
+
 func (m model) handleWorkingDirectory(fields []string) (model, error) {
 	if len(fields) == 0 {
 		return m, nil
@@ -118,7 +170,7 @@ func (m model) handleWorkingDirectory(fields []string) (model, error) {
 		} else {
 			requested = m.workspaceRoot
 		}
-		_, target, err := resolveWorkspacePath(m.workspaceRoot, m.cwd, requested)
+		target, err := resolveWorkingPath(m.cwd, requested)
 		if err != nil {
 			return m, err
 		}
@@ -128,6 +180,9 @@ func (m model) handleWorkingDirectory(fields []string) (model, error) {
 		}
 		if !info.IsDir() {
 			return m, fmt.Errorf("%s is not a directory", requested)
+		}
+		if err := m.grantExternalDirectory(target); err != nil {
+			return m, err
 		}
 		m.cwd = target
 		m.addSystem("cwd " + m.cwd)

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"os/exec"
 	"time"
 
 	"github.com/scitrera/agent-harness-go/pkg/localtools"
@@ -104,7 +105,11 @@ func SafeToolError(err error) (string, string) {
 	case errors.Is(err, ErrToolRequiresApproval):
 		return "approval_required", "tool approval required"
 	case errors.Is(err, localtools.ErrCommandFailed):
-		return "command_failed", "command failed"
+		var executableError *exec.Error
+		if errors.As(err, &executableError) {
+			return "command_failed", "command executable not found"
+		}
+		return "command_failed", "command exited unsuccessfully"
 	case errors.Is(err, localtools.ErrPathOutsideRoot):
 		return "path_outside_workspace", "path outside workspace"
 	case errors.Is(err, localtools.ErrOldTextNotFound):

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"unicode/utf8"
 
@@ -13,8 +14,8 @@ import (
 )
 
 type referencedImage struct {
-	WorkspacePath string
-	Size          int64
+	Path string
+	Size int64
 }
 
 type atReferenceSpan struct {
@@ -39,26 +40,37 @@ func (m model) resolveAtReferences(text string) (string, []referencedImage, erro
 	imageBytes := m.attachmentBytes()
 	imageCount := len(m.attachments)
 	for _, span := range spans {
-		root, target, resolveErr := resolveReferencePath(m.workspaceRoot, m.cwd, span.path)
+		target, resolveErr := resolveReferencePath(m.currentWorkingDirectory(), span.path)
 		if resolveErr != nil {
 			return "", nil, fmt.Errorf("@%s: %w", span.path, resolveErr)
 		}
-		relative, relativeErr := workspaceRelativePath(root, target)
-		if relativeErr != nil {
-			return "", nil, fmt.Errorf("@%s: %w", span.path, relativeErr)
-		}
-		rewritten.WriteString(text[cursor:span.start])
-		rewritten.WriteString(formatAtReference(relative))
-		cursor = span.end
-
 		info, statErr := os.Stat(target)
 		if statErr != nil {
 			return "", nil, fmt.Errorf("@%s: %w", span.path, statErr)
 		}
+		accessRoot := target
+		if !info.IsDir() {
+			accessRoot = filepath.Dir(target)
+		}
+		if grantErr := m.grantExternalDirectory(accessRoot); grantErr != nil {
+			return "", nil, fmt.Errorf("@%s: %w", span.path, grantErr)
+		}
+		displayPath := filepath.ToSlash(target)
+		if pathWithinWorkspace(m.workspaceRoot, target) {
+			relative, relativeErr := workspaceRelativePath(m.workspaceRoot, target)
+			if relativeErr != nil {
+				return "", nil, fmt.Errorf("@%s: %w", span.path, relativeErr)
+			}
+			displayPath = relative
+		}
+		rewritten.WriteString(text[cursor:span.start])
+		rewritten.WriteString(formatAtReference(displayPath))
+		cursor = span.end
+
 		if !info.Mode().IsRegular() || !fileIsImage(target) {
 			continue
 		}
-		if _, duplicate := seenImages[relative]; duplicate {
+		if _, duplicate := seenImages[target]; duplicate {
 			continue
 		}
 		imageCount++
@@ -72,23 +84,23 @@ func (m model) resolveAtReferences(text string) (string, []referencedImage, erro
 		if imageBytes > maxTotalAttachmentBytes {
 			return "", nil, fmt.Errorf("referenced and queued images exceed the %d byte total limit", maxTotalAttachmentBytes)
 		}
-		seenImages[relative] = struct{}{}
-		images = append(images, referencedImage{WorkspacePath: relative, Size: info.Size()})
+		seenImages[target] = struct{}{}
+		images = append(images, referencedImage{Path: target, Size: info.Size()})
 	}
 	rewritten.WriteString(text[cursor:])
 	return rewritten.String(), images, nil
 }
 
-func resolveReferencePath(workspaceRoot, cwd, requested string) (string, string, error) {
-	root, target, err := resolveWorkspacePath(workspaceRoot, cwd, requested)
+func resolveReferencePath(cwd, requested string) (string, error) {
+	target, err := resolveWorkingPath(cwd, requested)
 	if err == nil {
-		return root, target, nil
+		return target, nil
 	}
 	trimmed := strings.TrimRight(requested, ".,;:!?)]}")
 	if trimmed == "" || trimmed == requested {
-		return "", "", err
+		return "", err
 	}
-	return resolveWorkspacePath(workspaceRoot, cwd, trimmed)
+	return resolveWorkingPath(cwd, trimmed)
 }
 
 func parseAtReferenceSpans(text string) ([]atReferenceSpan, error) {
@@ -166,16 +178,11 @@ func fileIsImage(path string) bool {
 	return strings.HasPrefix(http.DetectContentType(head[:read]), "image/")
 }
 
-func appendReferencedImages(ctx context.Context, message protocol.ChatMessage, ctxImages []referencedImage, workspaceRoot string) (protocol.ChatMessage, error) {
+func appendReferencedImages(ctx context.Context, message protocol.ChatMessage, ctxImages []referencedImage) (protocol.ChatMessage, error) {
 	for _, image := range ctxImages {
-		attachment, err := loadWorkspaceImageFrom(
-			ctx,
-			workspaceRoot,
-			workspaceRoot,
-			image.WorkspacePath,
-		)
+		attachment, err := loadResolvedImage(ctx, image.Path, image.Path)
 		if err != nil {
-			return message, fmt.Errorf("@%s: %w", image.WorkspacePath, err)
+			return message, fmt.Errorf("@%s: %w", image.Path, err)
 		}
 		message.Content = append(message.Content, attachment.Part)
 	}

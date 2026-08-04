@@ -118,6 +118,37 @@ func TestUpdateKey_homeMovesComposerCursorInsteadOfScrollback(t *testing.T) {
 	}
 }
 
+func TestViewLeavesMouseSelectionToTerminal(t *testing.T) {
+	m := model{channel: NewChannel(), viewport: viewport.New(), composer: newComposer(), tailing: true}
+	m.resize(60, 20)
+
+	if got := m.View().MouseMode; got != tea.MouseModeNone {
+		t.Fatalf("mouse mode = %v, want terminal-owned selection", got)
+	}
+}
+
+func TestUpdateKey_ctrlLeftAndRightMoveByWord(t *testing.T) {
+	m := model{channel: NewChannel(), viewport: viewport.New(), composer: newComposer(), tailing: true}
+	m.resize(60, 20)
+	m.composer.SetValue("alpha bravo charlie")
+
+	next, _ := m.updateKey(tea.KeyPressMsg(tea.Key{Code: tea.KeyLeft, Mod: tea.ModCtrl}))
+	updated := next.(model)
+	next, _ = updated.updateKey(tea.KeyPressMsg(tea.Key{Code: 'x', Text: "X"}))
+	updated = next.(model)
+	if got := updated.composer.Value(); got != "alpha bravo Xcharlie" {
+		t.Fatalf("Ctrl+Left insertion point = %q", got)
+	}
+
+	next, _ = updated.updateKey(tea.KeyPressMsg(tea.Key{Code: tea.KeyRight, Mod: tea.ModCtrl}))
+	updated = next.(model)
+	next, _ = updated.updateKey(tea.KeyPressMsg(tea.Key{Code: '!', Text: "!"}))
+	updated = next.(model)
+	if got := updated.composer.Value(); got != "alpha bravo Xcharlie!" {
+		t.Fatalf("Ctrl+Right insertion point = %q", got)
+	}
+}
+
 func TestUpdateKey_shiftEnterInsertsComposerNewline(t *testing.T) {
 	m := model{channel: NewChannel(), viewport: viewport.New(), composer: newComposer(), tailing: true}
 	m.resize(60, 20)

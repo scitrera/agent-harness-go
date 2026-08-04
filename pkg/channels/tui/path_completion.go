@@ -123,7 +123,8 @@ func isPathSpace(value rune) bool {
 }
 
 func (m model) matchingPathSuggestions(completion pathCompletionContext) []selectionItem {
-	if m.workspaceRoot == "" || m.cwd == "" {
+	workingDirectory := m.currentWorkingDirectory()
+	if workingDirectory == "" {
 		return nil
 	}
 	directoryPart, namePrefix := filepath.Split(filepath.FromSlash(completion.rawPath))
@@ -131,7 +132,7 @@ func (m model) matchingPathSuggestions(completion pathCompletionContext) []selec
 	if directoryRequest == "" {
 		directoryRequest = "."
 	}
-	_, directory, err := resolveWorkspacePath(m.workspaceRoot, m.cwd, directoryRequest)
+	directory, err := resolveWorkingPath(workingDirectory, directoryRequest)
 	if err != nil {
 		return nil
 	}
@@ -205,6 +206,6 @@ func (m model) pathInputHasExactTarget() bool {
 	if !ok || strings.TrimSpace(completion.rawPath) == "" {
 		return false
 	}
-	_, _, err := resolveWorkspacePath(m.workspaceRoot, m.cwd, completion.rawPath)
+	_, err := resolveWorkingPath(m.currentWorkingDirectory(), completion.rawPath)
 	return err == nil
 }

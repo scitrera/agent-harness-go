@@ -28,7 +28,7 @@ func (m model) activeTurnStatus() string {
 	if len(m.turns) == 0 {
 		return "ready"
 	}
-	priorities := []string{"approval needed", "tool failed", "tool", "responding", "thinking", "queued"}
+	priorities := []string{"approval needed", "tool failed", "subagent working", "tool", "responding", "thinking", "queued"}
 	queued := 0
 	for _, activity := range m.turns {
 		if !m.activityOnCurrentThread(activity) {

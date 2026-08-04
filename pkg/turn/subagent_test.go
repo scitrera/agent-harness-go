@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/scitrera/agent-harness-go/pkg/bootstrap"
+	"github.com/scitrera/agent-harness-go/pkg/channel"
 	"github.com/scitrera/agent-harness-go/pkg/contextpack"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 	"github.com/scitrera/agent-harness-go/pkg/provider"
@@ -35,6 +37,66 @@ func Test_Runner_RunSubagent_returns_final_text(t *testing.T) {
 	}
 	if res.Text != "assistant response" {
 		t.Fatalf("expected sub-agent final text, got %q", res.Text)
+	}
+}
+
+func Test_Runner_RunSubagent_streamsChildActivityWhenEnabled(t *testing.T) {
+	part, err := protocol.NewTextPart("live child update")
+	if err != nil {
+		t.Fatalf("text part: %v", err)
+	}
+	childProvider := &streamingScriptedProvider{
+		scriptedProvider: scriptedProvider{responses: []provider.ChatResponse{{
+			Message: protocol.ChatMessage{ID: "child-final", Role: protocol.RoleAssistant, Content: []protocol.ContentPart{part}},
+		}}},
+		streamText: []string{"live child update"},
+	}
+	publisher := &fakePublisher{}
+	runner, err := NewRunner(Config{
+		Store:           &fakeStore{},
+		Loader:          fakeLoader{},
+		Provider:        childProvider,
+		Publisher:       publisher,
+		Assembler:       contextpack.NewAssembler(contextpack.Config{MaxHistoryMessages: 8}),
+		Streaming:       true,
+		StreamSubagents: true,
+	})
+	if err != nil {
+		t.Fatalf("runner: %v", err)
+	}
+
+	wantCWD := "/selected/project"
+	ctx := tools.WithWorkingDirectory(context.Background(), wantCWD)
+	res, err := runner.RunSubagent(ctx, subagent.Request{
+		Task:   "review it",
+		Depth:  1,
+		Parent: protocol.MessageAddress{ThreadID: "parent", TaskID: "task-parent"},
+	})
+	if err != nil {
+		t.Fatalf("run subagent: %v", err)
+	}
+	if res.Text != "live child update" {
+		t.Fatalf("result = %q", res.Text)
+	}
+	if len(childProvider.requests) == 0 || !requestTextContains(childProvider.requests[0], "Active working directory: \""+wantCWD+"\"") {
+		t.Fatalf("inherited cwd missing from child request: %#v", childProvider.requests)
+	}
+	var started, delta, finished bool
+	for _, event := range publisher.events {
+		if !strings.HasPrefix(event.Addr.ThreadID, "parent::sub::") || event.Addr.TaskID != "task-parent" {
+			t.Fatalf("child event address = %+v", event.Addr)
+		}
+		switch event.Type {
+		case channel.EventMessageStarted:
+			started = true
+		case channel.EventTokenDelta:
+			delta = strings.Contains(event.Delta, "live child update")
+		case channel.EventMessageFinal:
+			finished = true
+		}
+	}
+	if !started || !delta || !finished {
+		t.Fatalf("child stream lifecycle started=%v delta=%v finished=%v events=%+v", started, delta, finished, publisher.events)
 	}
 }
 

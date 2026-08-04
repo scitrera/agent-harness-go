@@ -2,7 +2,10 @@ package turn
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"path/filepath"
 	"testing"
 
 	"github.com/scitrera/agent-harness-go/pkg/bootstrap"
@@ -10,6 +13,7 @@ import (
 	"github.com/scitrera/agent-harness-go/pkg/contextpack"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 	"github.com/scitrera/agent-harness-go/pkg/provider"
+	"github.com/scitrera/agent-harness-go/pkg/tools"
 )
 
 type fakeStore struct {
@@ -66,6 +70,67 @@ type fakePublisher struct {
 func (p *fakePublisher) PublishEvent(_ context.Context, event channel.Event) error {
 	p.events = append(p.events, event)
 	return nil
+}
+
+func Test_Runner_Run_carriesMessageWorkingDirectoryIntoTools(t *testing.T) {
+	var seenCWD string
+	registry := tools.NewRegistry()
+	if err := registry.Register("probe_cwd", tools.HandlerFunc(func(ctx context.Context, req tools.Request) (tools.Result, error) {
+		seenCWD, _ = tools.WorkingDirectoryFrom(ctx)
+		return tools.NewJSONResult(req.CallID, req.Name, json.RawMessage(`{"ok":true}`))
+	})); err != nil {
+		t.Fatalf("register probe: %v", err)
+	}
+	call, err := protocol.NewToolCallPart(protocol.ToolInvokeEnvelope{CallID: "call-cwd", Name: "probe_cwd"})
+	if err != nil {
+		t.Fatalf("tool call: %v", err)
+	}
+	final, err := protocol.NewTextPart("done")
+	if err != nil {
+		t.Fatalf("final text: %v", err)
+	}
+	provider := &scriptedProvider{responses: []provider.ChatResponse{
+		{Message: protocol.ChatMessage{ID: "assistant-tool", Role: protocol.RoleAssistant, Content: []protocol.ContentPart{call}}},
+		{Message: protocol.ChatMessage{ID: "assistant-final", Role: protocol.RoleAssistant, Content: []protocol.ContentPart{final}}},
+	}}
+	runner, err := NewRunner(Config{
+		Store:     &fakeStore{},
+		Loader:    fakeLoader{},
+		Registry:  registry,
+		Provider:  provider,
+		Assembler: contextpack.NewAssembler(contextpack.Config{}),
+	})
+	if err != nil {
+		t.Fatalf("new runner: %v", err)
+	}
+	user := protocol.ChatMessage{ID: "user-cwd", Role: protocol.RoleUser}
+	wantCWD := filepath.Join(t.TempDir(), "code")
+	tools.StampWorkingDirectory(&user, wantCWD)
+
+	if _, err := runner.Run(context.Background(), protocol.MessageAddress{ThreadID: "thread-1", TaskID: "task-1"}, user); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if seenCWD != wantCWD {
+		t.Fatalf("tool cwd = %q, want %q", seenCWD, wantCWD)
+	}
+	if len(provider.requests) == 0 || !requestTextContains(provider.requests[0], "Active working directory: "+fmt.Sprintf("%q", wantCWD)) {
+		t.Fatalf("selected cwd missing from model request: %#v", provider.requests)
+	}
+}
+
+func Test_NewRunner_defaultsMaxToolIterationsTo250(t *testing.T) {
+	runner, err := NewRunner(Config{
+		Store:     &fakeStore{},
+		Loader:    fakeLoader{},
+		Provider:  &fakeProvider{},
+		Assembler: contextpack.NewAssembler(contextpack.Config{}),
+	})
+	if err != nil {
+		t.Fatalf("new runner: %v", err)
+	}
+	if runner.maxToolIterations != 250 {
+		t.Fatalf("max tool iterations = %d, want 250", runner.maxToolIterations)
+	}
 }
 
 func Test_Runner_Run_dedups_host_precommitted_user_turn(t *testing.T) {

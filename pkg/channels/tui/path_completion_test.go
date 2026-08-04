@@ -127,3 +127,27 @@ func TestAtPathCompletionIsRelativeToVirtualCWD(t *testing.T) {
 		t.Fatalf("cwd-relative completion value = %q", got)
 	}
 }
+
+func TestPathCompletionWorksFromExternalWorkingDirectory(t *testing.T) {
+	root := t.TempDir()
+	external := t.TempDir()
+	if err := os.WriteFile(filepath.Join(external, "outside.txt"), []byte("outside"), 0o600); err != nil {
+		t.Fatalf("write external file: %v", err)
+	}
+	m := model{
+		workspaceRoot: root,
+		cwd:           external,
+		viewport:      viewport.New(),
+		composer:      newComposer(),
+		tailing:       true,
+	}
+	m.composer.SetValue("Read @out")
+	m.refreshInputSurface()
+
+	if m.selector.kind != selectionPath || len(m.selector.items) != 1 {
+		t.Fatalf("external suggestions = kind %v items %+v", m.selector.kind, m.selector.items)
+	}
+	if got := m.selector.items[0].Value; got != "Read @outside.txt " {
+		t.Fatalf("external completion value = %q", got)
+	}
+}

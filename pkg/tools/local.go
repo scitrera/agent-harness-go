@@ -61,13 +61,13 @@ func RegisterLocal(reg *Registry, cfg LocalConfig) error {
 func localDescriptors() []Descriptor {
 	schema := func(s string) json.RawMessage { return json.RawMessage(s) }
 	return []Descriptor{
-		{Name: "read_file", Description: "Read a UTF-8 text file from the workspace. Optionally return only a 1-indexed inclusive line range via start_line/end_line; when a range is given the output is line-number prefixed.", Parameters: schema(`{"type":"object","properties":{"path":{"type":"string","description":"Workspace-relative path"},"max_bytes":{"type":"integer","description":"Optional max bytes to read"},"start_line":{"type":"integer","description":"Optional 1-indexed first line to return (inclusive); enables line-number-prefixed output"},"end_line":{"type":"integer","description":"Optional 1-indexed last line to return (inclusive); defaults to end of file"}},"required":["path"]}`)},
-		{Name: "write_file", Description: "Create or overwrite a workspace file with the given content.", Parameters: schema(`{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}`)},
-		{Name: "edit_file", Description: "Replace an exact substring in a workspace file (old_text must occur exactly once).", Parameters: schema(`{"type":"object","properties":{"path":{"type":"string"},"old_text":{"type":"string"},"new_text":{"type":"string"}},"required":["path","old_text","new_text"]}`)},
-		{Name: "list_dir", Description: "List entries in a workspace directory.", Parameters: schema(`{"type":"object","properties":{"path":{"type":"string","description":"Workspace-relative directory; empty for root"}}}`)},
-		{Name: "inspect_file", Description: "Return metadata (type, size, hash, image dimensions) and a workspace:// reference for a file without inlining its bytes.", Parameters: schema(`{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}`)},
-		{Name: "shell", Description: "Run a bounded shell command inside the sandbox workspace.", Parameters: schema(`{"type":"object","properties":{"command":{"type":"string"},"args":{"type":"array","items":{"type":"string"}},"cwd":{"type":"string"},"timeout_ms":{"type":"integer"},"max_output":{"type":"integer"}},"required":["command"]}`)},
-		{Name: "python", Description: "Execute a Python snippet in the sandbox for calculation/analysis; returns stdout.", Parameters: schema(`{"type":"object","properties":{"code":{"type":"string"},"cwd":{"type":"string"},"timeout_ms":{"type":"integer"},"max_output":{"type":"integer"}},"required":["code"]}`)},
+		{Name: "read_file", Description: "Read a UTF-8 text file relative to the active working directory, or by absolute path within the workspace/an explicitly granted directory. Optionally return only a 1-indexed inclusive line range via start_line/end_line; when a range is given the output is line-number prefixed.", Parameters: schema(`{"type":"object","properties":{"path":{"type":"string","description":"Path relative to the active working directory, or an absolute allowed path"},"max_bytes":{"type":"integer","description":"Optional max bytes to read"},"start_line":{"type":"integer","description":"Optional 1-indexed first line to return (inclusive); enables line-number-prefixed output"},"end_line":{"type":"integer","description":"Optional 1-indexed last line to return (inclusive); defaults to end of file"}},"required":["path"]}`)},
+		{Name: "write_file", Description: "Create or overwrite a file relative to the active working directory; writes remain confined to the original workspace.", Parameters: schema(`{"type":"object","properties":{"path":{"type":"string","description":"Path relative to the active working directory, or an absolute path inside the original workspace"},"content":{"type":"string"}},"required":["path","content"]}`)},
+		{Name: "edit_file", Description: "Replace an exact substring in a file relative to the active working directory (old_text must occur exactly once); writes remain confined to the original workspace.", Parameters: schema(`{"type":"object","properties":{"path":{"type":"string","description":"Path relative to the active working directory, or an absolute path inside the original workspace"},"old_text":{"type":"string"},"new_text":{"type":"string"}},"required":["path","old_text","new_text"]}`)},
+		{Name: "list_dir", Description: "List entries relative to the active working directory or in an absolute allowed directory.", Parameters: schema(`{"type":"object","properties":{"path":{"type":"string","description":"Directory relative to the active working directory; empty means the active working directory"}}}`)},
+		{Name: "inspect_file", Description: "Return metadata (type, size, hash, image dimensions) and a workspace:// reference for a file relative to the active working directory or at an absolute allowed path without inlining its bytes.", Parameters: schema(`{"type":"object","properties":{"path":{"type":"string","description":"Path relative to the active working directory, or an absolute allowed path"}},"required":["path"]}`)},
+		{Name: "shell", Description: "Run a bounded command line in the active working directory or an explicitly selected cwd. Put a complete shell command line in command, or provide a single executable in command with a separate args array.", Parameters: schema(`{"type":"object","properties":{"command":{"type":"string","description":"Complete shell command line, or executable name when args is provided"},"args":{"type":"array","items":{"type":"string"}},"cwd":{"type":"string","description":"Optional directory relative to the active working directory, or an absolute allowed directory; omitted means the active working directory"},"timeout_ms":{"type":"integer"},"max_output":{"type":"integer"}},"required":["command"]}`)},
+		{Name: "python", Description: "Execute a Python snippet in the active working directory or an explicitly selected cwd; returns stdout.", Parameters: schema(`{"type":"object","properties":{"code":{"type":"string"},"cwd":{"type":"string","description":"Optional directory relative to the active working directory, or an absolute allowed directory; omitted means the active working directory"},"timeout_ms":{"type":"integer"},"max_output":{"type":"integer"}},"required":["code"]}`)},
 		{Name: "web_search", Description: "Search the web (Exa) and return matching results.", Parameters: schema(`{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}`)},
 	}
 }
@@ -82,6 +82,7 @@ func readFile(ctx context.Context, cfg LocalConfig, req Request) (Result, error)
 	if err := decodeArgs(req, &args); err != nil {
 		return Result{}, err
 	}
+	args.Path = ResolveWorkingPath(ctx, args.Path)
 	// A ctx-carried FileDelegate (e.g. the ACP client's fs/read_text_file) wins
 	// over the local workspace when present.
 	var text string
@@ -140,6 +141,7 @@ func writeFile(ctx context.Context, cfg LocalConfig, req Request) (Result, error
 	if err := decodeArgs(req, &args); err != nil {
 		return Result{}, err
 	}
+	args.Path = ResolveWorkingPath(ctx, args.Path)
 	// Delegate the write to a ctx-carried FileDelegate (ACP fs/write_text_file)
 	// when present, else the local workspace. FileChanges metadata is preserved
 	// either way.
@@ -167,6 +169,7 @@ func editFile(ctx context.Context, cfg LocalConfig, req Request) (Result, error)
 	if err := decodeArgs(req, &args); err != nil {
 		return Result{}, err
 	}
+	args.Path = ResolveWorkingPath(ctx, args.Path)
 	// Delegate the edit to a ctx-carried FileDelegate (ACP read+replace+write via
 	// the client) when present, else the local workspace.
 	if d := FileDelegateFrom(ctx); d != nil {
@@ -193,6 +196,7 @@ func listDir(ctx context.Context, cfg LocalConfig, req Request) (Result, error) 
 	if err := decodeArgs(req, &args); err != nil {
 		return Result{}, err
 	}
+	args.Path = ResolveWorkingPath(ctx, args.Path)
 	entries, err := cfg.Workspace.ListDir(ctx, args.Path)
 	if err != nil {
 		return Result{}, err
@@ -209,6 +213,7 @@ func inspectFile(ctx context.Context, cfg LocalConfig, req Request) (Result, err
 	if err := decodeArgs(req, &args); err != nil {
 		return Result{}, err
 	}
+	args.Path = ResolveWorkingPath(ctx, args.Path)
 	info, err := cfg.Workspace.InspectFile(ctx, args.Path)
 	if err != nil {
 		return Result{}, err

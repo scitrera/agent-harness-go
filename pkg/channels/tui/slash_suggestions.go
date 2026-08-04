@@ -18,7 +18,7 @@ var localSlashCommandSuggestions = []selectionItem{
 	{Value: "/cancel", Label: "/cancel", Description: "Cancel active task"},
 	{Value: "/clear", Label: "/clear", Description: "Clear current thread"},
 	{Value: "/tools", Label: "/tools", Description: "Inspect tool activity"},
-	{Value: "/attach", Label: "/attach", Description: "Attach a workspace image"},
+	{Value: "/attach", Label: "/attach", Description: "Attach an image from the working directory"},
 	{Value: "/attachments", Label: "/attachments", Description: "Show queued images"},
 	{Value: "/tasks", Label: "/tasks", Description: "Manage task state"},
 	{Value: "/task", Label: "/task", Description: "Manage task state"},

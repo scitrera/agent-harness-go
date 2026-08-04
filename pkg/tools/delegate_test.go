@@ -143,3 +143,24 @@ func TestCommandDelegateOverridesShell(t *testing.T) {
 		t.Fatalf("shell output = %q, want delegated-output", out.Output)
 	}
 }
+
+func TestShellCommandLineUsesInterpreterWhenArgsAreOmitted(t *testing.T) {
+	reg, _ := delegateTestRegistry(t)
+	fake := &fakeCommandDelegate{res: localtools.CommandResult{ExitCode: 0, Output: "interpreted"}}
+	ctx := WithCommandDelegate(context.Background(), fake)
+
+	_, err := reg.Invoke(ctx, Request{
+		CallID:    "c1",
+		Name:      "shell",
+		Arguments: json.RawMessage(`{"command":"printf hello | tr a-z A-Z","cwd":"/tmp"}`),
+	})
+	if err != nil {
+		t.Fatalf("shell command-line invoke: %v", err)
+	}
+	if fake.spec.Name != "/bin/sh" || len(fake.spec.Args) != 2 || fake.spec.Args[0] != "-lc" || fake.spec.Args[1] != "printf hello | tr a-z A-Z" {
+		t.Fatalf("interpreted command spec = %+v", fake.spec)
+	}
+	if fake.spec.CWD != "/tmp" {
+		t.Fatalf("interpreted command cwd = %q", fake.spec.CWD)
+	}
+}

@@ -51,9 +51,14 @@ func (m *model) applyEvent(event channel.Event) {
 }
 
 func (m *model) applyBackgroundEvent(event channel.Event) {
+	var childTool *tools.ToolEvent
 	if event.Type == channel.EventToolLifecycle {
-		m.recordToolEvent(event)
+		if entry, ok := m.recordToolEvent(event); ok {
+			childTool = &entry.Event
+		}
 	}
+	m.applySubagentChildEvent(event, childTool)
+	m.refreshViewport()
 }
 
 func (m *model) applyPartAppended(event channel.Event) {
@@ -80,6 +85,10 @@ func (m *model) applyPartAppended(event channel.Event) {
 	}
 	if result, ok := part.AsToolResult(); ok {
 		m.upsertToolPartRow(result.CallID, toolResultText(result), result.Name)
+		return
+	}
+	if sub, ok := part.AsSubagent(); ok {
+		m.applySubagentPart(event.Addr.TaskID, sub)
 	}
 }
 
@@ -131,13 +140,20 @@ func (m *model) applyToolLifecycle(event channel.Event) {
 	}
 	switch entry.Event.Status {
 	case tools.ToolEventQueued, tools.ToolEventStarted:
-		m.markTurn(event.Addr.TaskID, event.Addr.ThreadID, "tool "+entry.Event.ToolName)
+		phase := "tool " + entry.Event.ToolName
+		if entry.Event.ToolName == tools.SubagentToolName {
+			phase = "subagent working"
+		}
+		m.markTurn(event.Addr.TaskID, event.Addr.ThreadID, phase)
 	case tools.ToolEventFinished:
 		m.markTurn(event.Addr.TaskID, event.Addr.ThreadID, "thinking")
 	case tools.ToolEventAborted:
 		m.markTurn(event.Addr.TaskID, event.Addr.ThreadID, "tool failed")
 	}
 	line := renderToolEvent(entry.Event)
+	if entry.Event.ToolName == tools.SubagentToolName {
+		line = m.applySubagentLifecycle(event.Addr.TaskID, entry.Event)
+	}
 	m.upsertToolishRow(entry.Event.CallID, line)
 }
 
@@ -240,6 +256,10 @@ func (m *model) applyFinalMessage(message protocol.ChatMessage) {
 		}
 		if approval, ok := part.AsApprovalRequest(); ok {
 			m.ensureToolishRow(approval.ID, approvalText(approval.Tool, string(approval.Status)))
+			continue
+		}
+		if sub, ok := part.AsSubagent(); ok {
+			m.applySubagentPart(message.Addr.TaskID, sub)
 		}
 	}
 }
@@ -256,7 +276,14 @@ func renderToolEvent(event tools.ToolEvent) string {
 		parts = append(parts, "approval="+event.ApprovalDecision)
 	}
 	if event.ErrorCode != "" {
-		parts = append(parts, "error="+event.ErrorCode)
+		errorText := "error=" + event.ErrorCode
+		if event.ErrorMessage != "" {
+			errorText += " (" + event.ErrorMessage + ")"
+		}
+		parts = append(parts, errorText)
+	}
+	if event.Result.ExitCode != 0 {
+		parts = append(parts, fmt.Sprintf("exit=%d", event.Result.ExitCode))
 	}
 	if len(event.Result.FileChanges) > 0 {
 		parts = append(parts, fmt.Sprintf("files=%d", len(event.Result.FileChanges)))
