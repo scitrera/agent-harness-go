@@ -209,7 +209,7 @@ func (c *OpenAICompatClient) Chat(ctx context.Context, chat ChatRequest) (ChatRe
 	if err != nil {
 		return ChatResponse{}, classifyTransport(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
 	if err != nil {
 		return ChatResponse{}, fmt.Errorf("read chat response: %w", err)

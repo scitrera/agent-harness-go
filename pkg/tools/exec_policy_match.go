@@ -18,7 +18,7 @@ func (p *CommandPolicy) DecideCommand(req CommandRequest) CommandDecision {
 		EnvKeys:          envKeys(req.Env, nil),
 	}
 	if len(req.Argv) == 0 {
-		base.Decision.Reason = "command argv is empty"
+		base.Reason = "command argv is empty"
 		return base
 	}
 

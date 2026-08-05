@@ -95,7 +95,7 @@ func TestModelApplyEvent_keepsAssistantResponseBelowTopLineBeforeResize(t *testi
 	if view.Cursor == nil {
 		t.Fatal("composer cursor should still be exported")
 	}
-	if view.Cursor.Position.Y == 0 {
+	if view.Cursor.Y == 0 {
 		t.Fatalf("cursor on top row will make terminal output overwrite transcript: %+v", view.Cursor.Position)
 	}
 }

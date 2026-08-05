@@ -66,7 +66,7 @@ func (s *LocalTranscriptStore) AppendSegment(ctx context.Context, segment Transc
 	if err != nil {
 		return fmt.Errorf("open transcript: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	raw, err := json.Marshal(segment)
 	if err != nil {
 		return fmt.Errorf("encode transcript segment: %w", err)
@@ -94,7 +94,7 @@ func (s *LocalTranscriptStore) Recover(ctx context.Context, localHistory []proto
 	if err != nil {
 		return RecoveryResult{}, fmt.Errorf("open transcript: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	var messages []protocol.ChatMessage
 	var state WorldState

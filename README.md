@@ -79,6 +79,29 @@ hygiene, provider error classification, in-process sub-agents, OpenClaw-style
 slash commands, filesystem skills, MCP client, OpenTelemetry spans, and an
 optional in-process scheduler for proactive work.
 
+## Releases
+
+`versions.yaml` is the single source of truth for this repo's version, its CI,
+and its release artifacts; the files under `.github/workflows/` are generated
+from it by [scitrera-repo-tools](https://github.com/scitrera/repo-tools) and
+carry a "do not edit by hand" header for that reason.
+
+```bash
+python scripts/update-versions.py --check    # versions.yaml vs. the tree
+python scripts/generate-ci-gha.py            # workflows vs. versions.yaml
+python scripts/generate-ci-gha.py --force    # apply after editing versions.yaml
+```
+
+Pushing a `vX.Y.Z` tag runs the Go tests, cross-compiles `agent-harness` for
+linux/amd64, linux/arm64, windows/amd64, windows/arm64 and darwin/arm64, and
+attaches the archives plus a `checksums.txt` to the GitHub release. Each archive
+carries the binary, `LICENSE`, `NOTICE` and this file; Windows ships as `.zip`
+and everything else as `.tar.gz`. `agent-harness --version` reports the release
+version and the commit it was built from.
+
+Bump the version in `versions.yaml`, run `python scripts/update-versions.py` to
+propagate it into `pkg/version/version.go`, then tag.
+
 ## Status
 
 Extracted from a working internal runtime. APIs may shift before a tagged

@@ -143,8 +143,8 @@ func Test_Runner_Run_approval_renders_adjacent_to_its_tool_call(t *testing.T) {
 		MaxToolIterations: 2,
 		// "once" scope: each call re-prompts (no session/always grant recorded), so
 		// both call-1 and call-2 emit their own approval_request.
-		Approvals:         fakeAwaiter{decision: approval.Decision{Granted: true, Scope: "once"}},
-		ApprovalGranter:   policy,
+		Approvals:       fakeAwaiter{decision: approval.Decision{Granted: true, Scope: "once"}},
+		ApprovalGranter: policy,
 	})
 	if err != nil {
 		t.Fatalf("runner: %v", err)
@@ -163,12 +163,12 @@ func Test_Runner_Run_approval_renders_adjacent_to_its_tool_call(t *testing.T) {
 		t.Fatalf("missing expected parts in %v", seq)
 	}
 	// Each approval sits right after its own call …
-	if !(tc1 < ap1) || !(tc2 < ap2) {
+	if tc1 >= ap1 || tc2 >= ap2 {
 		t.Fatalf("approval must follow its own tool_call: %v", seq)
 	}
 	// … and call-1's approval must precede call-2 (the regression: approvals were
 	// emitted after the whole tool_call batch, so ap1 landed after tc2).
-	if !(ap1 < tc2) {
+	if ap1 >= tc2 {
 		t.Fatalf("call-1 approval must render before call-2's tool_call, got order %v", seq)
 	}
 }

@@ -66,7 +66,7 @@ func (c *OpenAICompatClient) ChatStream(ctx context.Context, chat ChatRequest, o
 	if err != nil {
 		return ChatResponse{}, classifyTransport(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
 		return ChatResponse{}, httpError(resp.StatusCode, string(data))

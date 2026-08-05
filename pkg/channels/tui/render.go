@@ -28,12 +28,12 @@ func (m model) View() tea.View {
 	view.MouseMode = tea.MouseModeNone
 	if cursor := m.composer.Cursor(); cursor != nil {
 		adjusted := *cursor
-		adjusted.Position.Y += m.viewport.Height()
+		adjusted.Y += m.viewport.Height()
 		if drawer := m.renderDrawer(); drawer != "" {
-			adjusted.Position.Y += lipgloss.Height(drawer)
+			adjusted.Y += lipgloss.Height(drawer)
 		}
 		if selection := m.renderSelection(); selection != "" {
-			adjusted.Position.Y += lipgloss.Height(selection)
+			adjusted.Y += lipgloss.Height(selection)
 		}
 		view.Cursor = &adjusted
 	}

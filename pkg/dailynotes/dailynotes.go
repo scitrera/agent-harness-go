@@ -97,7 +97,7 @@ func readCapped(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	buf := make([]byte, maxFileBytes)
 	n, err := f.Read(buf)
 	if err != nil && n == 0 {

@@ -1,0 +1,71 @@
+# Authoritative versions for the agent-harness-go OSS distribution.
+# Run: sync-versions            to apply
+# Run: sync-versions --check    to verify (CI-friendly)
+#
+# One module, one artifact: `github.com/scitrera/agent-harness-go` lives at the
+# repo root and its release is the `agent-harness` command rather than a library
+# anyone imports. A single `vX.Y.Z` tag therefore drives the whole release, and
+# there are no nested modules whose per-module tags need reconciling.
+
+agent-harness-go: 0.0.1
+
+# NOTE: no `go_toolchain` and no `preferred_versions.go` block, deliberately.
+# Both of those rewrite go.mod — the `go` directive and the require pins
+# respectively — and for a single-module repo go.mod already *is* the pin.
+# Declaring them here would create a second source of truth that drifts
+# silently against the one the compiler actually reads.
+
+project_rules:
+  agent-harness-go:
+    # Declares which directory holds the module for the Go CI lane. Rewrites
+    # nothing; without it, a repo with no in-repo `gomod_require` rules has
+    # nothing identifying its module and CI never sees it.
+    - { type: gomod,      path: go.mod }
+    - { type: go_version, path: pkg/version/version.go }
+
+# GitHub Actions generation. Run: generate-ci-gha [--check|--force]
+ci:
+  # Pinned deliberately: a bare `scitrera-repo-tools` floats to the newest
+  # release, so a change to the generator would surface as workflow drift on an
+  # unrelated PR. `ci.go.binaries` below requires >= 0.1.25.
+  repo_tools_source: "scitrera-repo-tools==0.1.25"
+  # `main` is the only branch. `push_branches` is left unset, which means it
+  # follows this list — so a PR from a feature branch fires only the
+  # pull_request event and a post-merge push to main fires only the push event.
+  # No commit is ever checked twice.
+  test_branches: [ main ]
+  # The release binaries are attached to the tag's GitHub release.
+  github_release: true
+  go:
+    # The latest patch of the pinned minor rather than the exact `go 1.25.12`
+    # in go.mod: patch releases are security fixes and the published binaries
+    # should carry them. The floor matters too — go.mod's directive is what
+    # keeps GO-2026-5856 (crypto/tls, fixed in go1.25.12) out of a local build.
+    go_version: "1.25"
+    # Clean as of adoption. The rule *selection* is pinned in .golangci.yml
+    # rather than left to the linter's defaults, which move between releases;
+    # that file also documents the one check we deliberately turned off.
+    lint: golangci-lint
+    # On, with an empty govulncheck_ignore: the six advisories that were
+    # reachable at adoption all had upstream fixes, so they were resolved by
+    # bumping rather than waived. Keep it that way — an entry in
+    # govulncheck_ignore is for accepted risk with no fix available, and
+    # waiving a fixable advisory is how the list stops meaning anything.
+    # Only *reachable* findings gate the build, so an advisory in a module we
+    # merely require will not redden a PR.
+    enable_govulncheck: true
+    binaries:
+      - name: agent-harness
+        package: ./cmd/agent-harness
+        # $COMMIT is exported by the generated build step. The version itself
+        # is not stamped: it lives in pkg/version, which sync-versions keeps
+        # equal to the `agent-harness-go` value above, so a `go build` from a
+        # checkout reports the same version the release does.
+        ldflags: "-s -w -X github.com/scitrera/agent-harness-go/pkg/version.Commit=$COMMIT"
+        platforms:
+          - linux/amd64
+          - linux/arm64
+          - windows/amd64
+          - windows/arm64
+          - darwin/arm64
+        extra_files: [ LICENSE, NOTICE, README.md ]

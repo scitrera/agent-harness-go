@@ -34,20 +34,20 @@ func (p *Publisher) PublishEvent(_ context.Context, e channel.Event) error {
 	case channel.EventTokenDelta:
 		if e.Delta != "" {
 			p.sawDelta = true
-			fmt.Fprint(p.w, e.Delta)
+			_, _ = fmt.Fprint(p.w, e.Delta)
 		}
 	case channel.EventPartAppended:
 		if e.Part != nil {
 			if tc, ok := e.Part.AsToolCall(); ok {
 				p.sawToolCall = true
-				fmt.Fprintf(p.w, "\n  · %s(%s)\n", tc.Name, string(protocol.ArgsToRaw(tc.Args)))
+				_, _ = fmt.Fprintf(p.w, "\n  · %s(%s)\n", tc.Name, string(protocol.ArgsToRaw(tc.Args)))
 			}
 		}
 	case channel.EventMessageFinal:
 		if !p.sawDelta && e.Message != nil {
-			fmt.Fprint(p.w, messageText(*e.Message))
+			_, _ = fmt.Fprint(p.w, messageText(*e.Message))
 		}
-		fmt.Fprintln(p.w)
+		_, _ = fmt.Fprintln(p.w)
 	}
 	return nil
 }

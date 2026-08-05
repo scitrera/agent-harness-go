@@ -1,0 +1,33 @@
+# golangci-lint configuration. The linter version CI runs is pinned in
+# versions.yaml (ci.go.golangci_version); this file pins the *rules*, which move
+# independently — an upgrade that changes the default selection would otherwise
+# redden a PR that changed nothing.
+version: "2"
+
+issues:
+  # Report everything. The defaults (50 per linter, 3 per distinct message) hide
+  # duplicates, so a run can look clean while the same mistake is still present
+  # in a dozen other files — you only find out by fixing the three it showed.
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
+linters:
+  settings:
+    staticcheck:
+      # golangci-lint's default selection, minus one check. Spelled out rather
+      # than left implicit so the set cannot shift under a linter upgrade.
+      checks:
+        - all
+        - -ST1000
+        - -ST1003
+        - -ST1016
+        - -ST1020
+        - -ST1021
+        - -ST1022
+        # S1016 suggests replacing `cancelParams{SessionID: ns.SessionID}` with
+        # the conversion `cancelParams(ns)`, because the two structs happen to
+        # share a shape today. They are separate ACP wire schemas that evolve
+        # independently, and the conversion silently stops compiling — or worse,
+        # starts carrying the wrong field — the moment either one gains a member.
+        # Naming the field is the point, not boilerplate.
+        - -S1016

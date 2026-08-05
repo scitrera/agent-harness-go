@@ -8,8 +8,9 @@ import (
 	"os/exec"
 	"sort"
 	"sync"
-	"syscall"
 	"time"
+
+	"github.com/scitrera/agent-harness-go/pkg/procgroup"
 )
 
 type Clock func() time.Time
@@ -151,7 +152,7 @@ func (m *Manager) stateFor(ctx context.Context, name string) (*serverState, erro
 
 func (m *Manager) startLocked(ctx context.Context, state *serverState) (ServerStatus, error) {
 	cmd := exec.CommandContext(ctx, state.cfg.Command, state.cfg.Args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.SysProcAttr = procgroup.Attr()
 	if len(state.cfg.Env) > 0 {
 		cmd.Env = append(os.Environ(), state.cfg.Env...)
 	}
@@ -195,8 +196,8 @@ func (m *Manager) stopLocked(ctx context.Context, state *serverState) error {
 		state.clearProcessLocked()
 		return nil
 	}
-	pid := state.cmd.Process.Pid
-	_ = syscall.Kill(-pid, syscall.SIGTERM)
+	proc := state.cmd.Process
+	_ = procgroup.Terminate(proc)
 	timer := time.NewTimer(2 * time.Second)
 	defer timer.Stop()
 	select {
@@ -204,7 +205,7 @@ func (m *Manager) stopLocked(ctx context.Context, state *serverState) error {
 		state.clearProcessLocked()
 		return nil
 	case <-timer.C:
-		_ = syscall.Kill(-pid, syscall.SIGKILL)
+		_ = procgroup.Kill(proc)
 		<-state.done
 		state.clearProcessLocked()
 		return nil

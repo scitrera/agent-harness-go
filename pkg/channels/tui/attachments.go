@@ -213,10 +213,3 @@ func loadResolvedImage(ctx context.Context, target, displayPath string) (pending
 	}
 	return pendingAttachment{Name: name, Mime: mimeType, Size: info.Size(), Part: part}, nil
 }
-
-func resolveWorkspaceAttachmentPath(workspaceRoot, requestedPath string) (root string, target string, err error) {
-	if requestedPath == "" {
-		return "", "", fmt.Errorf("usage: /attach <workspace-image-path>")
-	}
-	return resolveWorkspacePath(workspaceRoot, workspaceRoot, requestedPath)
-}

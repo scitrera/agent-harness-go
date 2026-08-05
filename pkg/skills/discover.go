@@ -158,7 +158,7 @@ func readCapped(path string) (content string, overCap bool, err error) {
 	if err != nil {
 		return "", false, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	if info, statErr := f.Stat(); statErr == nil && info.Size() > maxSkillBytes {
 		overCap = true
 	}

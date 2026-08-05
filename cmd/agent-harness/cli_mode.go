@@ -38,7 +38,7 @@ func runCLI(cfg appConfig) error {
 			return err
 		}
 		user := protocol.ChatMessage{ID: fmt.Sprintf("user-%d", turnNo), Role: protocol.RoleUser, Addr: addr, Content: []protocol.ContentPart{part}}
-		fmt.Fprint(os.Stdout, "\nassistant> ")
+		_, _ = fmt.Fprint(os.Stdout, "\nassistant> ")
 		if _, err := runner.Run(ctx, addr, user); err != nil {
 			fmt.Fprintf(os.Stderr, "\nturn error: %v\n", err)
 		}

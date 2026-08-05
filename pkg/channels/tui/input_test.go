@@ -129,7 +129,7 @@ func TestViewCursorAccountsForSlashSuggestions(t *testing.T) {
 	if view.Cursor == nil {
 		t.Fatal("composer cursor should be exported")
 	}
-	if got, want := view.Cursor.Position.Y, m.viewport.Height()+m.selector.height(); got != want {
+	if got, want := view.Cursor.Y, m.viewport.Height()+m.selector.height(); got != want {
 		t.Fatalf("cursor row = %d, want %d", got, want)
 	}
 }

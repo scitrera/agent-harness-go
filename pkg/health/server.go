@@ -30,7 +30,7 @@ func (s Server) Run(ctx context.Context, ready ReadyFunc) error {
 	if err != nil {
 		return fmt.Errorf("listen health: %w", err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 
 	server := &http.Server{
 		Handler:           mux,

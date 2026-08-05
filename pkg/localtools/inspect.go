@@ -46,7 +46,7 @@ func (w *Workspace) InspectFile(ctx context.Context, relPath string) (FileInfo, 
 	if err != nil {
 		return FileInfo{}, fmt.Errorf("open %s: %w", relPath, err)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	head := make([]byte, 512)
 	n, readErr := io.ReadFull(file, head)
 	if readErr != nil && readErr != io.EOF && readErr != io.ErrUnexpectedEOF {

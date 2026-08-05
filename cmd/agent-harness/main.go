@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/scitrera/agent-harness-go/pkg/telemetry/otlpexport"
+	"github.com/scitrera/agent-harness-go/pkg/version"
 )
 
 func main() {
@@ -27,17 +28,25 @@ func main() {
 	exportThread := flag.String("export", "", "export thread history as JSONL to stdout and exit (a thread id, or 'all')")
 	exportFormat := flag.String("export-format", "openai", "export schema: openai (chat SFT) | trace (lossless spec messages)")
 	record := flag.String("record", "", "record each LLM call (assembled prompt + response + usage) as JSONL to this path; off by default")
+	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Usage = func() {
-		fmt.Fprintf(flag.CommandLine.Output(), "Usage: agent-harness [flags]\n\nFlags:\n")
+		_, _ = fmt.Fprintf(flag.CommandLine.Output(), "Usage: agent-harness [flags]\n\nFlags:\n")
 		flag.VisitAll(func(f *flag.Flag) {
 			def := ""
 			if f.DefValue != "" {
 				def = fmt.Sprintf(" (default %q)", f.DefValue)
 			}
-			fmt.Fprintf(flag.CommandLine.Output(), "  --%-12s %s%s\n", f.Name, f.Usage, def)
+			_, _ = fmt.Fprintf(flag.CommandLine.Output(), "  --%-12s %s%s\n", f.Name, f.Usage, def)
 		})
 	}
 	flag.Parse()
+
+	// Before every other mode check: a released binary must be able to report
+	// what it is without a provider endpoint or a workspace.
+	if *showVersion {
+		fmt.Printf("agent-harness %s\n", version.String())
+		return
+	}
 
 	// Export mode reads local state only (no provider needed): dump thread history
 	// as JSONL and exit, before the base-url requirement below.

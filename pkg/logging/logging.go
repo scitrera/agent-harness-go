@@ -17,7 +17,7 @@ type Config struct {
 }
 
 func Setup(cfg Config) error {
-	var writer io.Writer = os.Stderr
+	var writer io.Writer
 	destination := strings.ToLower(strings.TrimSpace(cfg.Destination))
 	switch destination {
 	case "file", "both":

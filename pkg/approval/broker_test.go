@@ -19,10 +19,7 @@ func Test_Broker_Await_resolves(t *testing.T) {
 	}()
 	// Give the goroutine a moment to register, then resolve.
 	deadline := time.After(time.Second)
-	for {
-		if b.Resolve("task1", "appr_1", Decision{Granted: true, Scope: "session"}) {
-			break
-		}
+	for !b.Resolve("task1", "appr_1", Decision{Granted: true, Scope: "session"}) {
 		select {
 		case <-deadline:
 			t.Fatal("Resolve never found the waiter")

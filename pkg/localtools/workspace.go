@@ -122,7 +122,7 @@ func (w *Workspace) ReadFile(ctx context.Context, relPath string, maxBytes int64
 	if err != nil {
 		return "", fmt.Errorf("read %s: %w", relPath, err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	// Bound the read: never pull more than the cap into memory. os.ReadFile would
 	// read the whole file first, so max_bytes gave no OOM protection. Text reads
 	// truncate to the cap (unlike ReadBytes, which errors — a truncated binary is
@@ -150,7 +150,7 @@ func (w *Workspace) ReadBytes(ctx context.Context, relPath string, maxBytes int6
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", relPath, err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	var rdr io.Reader = f
 	if maxBytes > 0 {
 		rdr = io.LimitReader(f, maxBytes+1)

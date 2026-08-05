@@ -225,7 +225,7 @@ func TestStreamEmitsPublishedEvent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stream connect: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("stream status = %d", resp.StatusCode)
 	}

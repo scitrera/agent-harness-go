@@ -169,7 +169,7 @@ func fileIsImage(path string) bool {
 	if err != nil {
 		return false
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	head := make([]byte, 512)
 	read, err := io.ReadFull(file, head)
 	if err != nil && err != io.ErrUnexpectedEOF {

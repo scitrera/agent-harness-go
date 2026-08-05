@@ -164,7 +164,7 @@ func (m model) handleWorkingDirectory(fields []string) (model, error) {
 		m.addSystem(m.cwd)
 		return m, nil
 	case "/cd":
-		requested := "."
+		var requested string
 		if len(fields) > 1 {
 			requested = trimMatchingQuotes(strings.Join(fields[1:], " "))
 		} else {

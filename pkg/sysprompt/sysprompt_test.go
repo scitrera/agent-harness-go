@@ -41,7 +41,7 @@ func TestBuildOrdersAndFramesBootstrap(t *testing.T) {
 	if agents < 0 || soul < 0 || notes < 0 {
 		t.Fatalf("missing framed files: %s", text)
 	}
-	if !(agents < soul && soul < notes) {
+	if agents >= soul || soul >= notes {
 		t.Fatalf("precedence wrong: AGENTS=%d SOUL=%d NOTES=%d", agents, soul, notes)
 	}
 	if !strings.Contains(text, "persona and tone") {

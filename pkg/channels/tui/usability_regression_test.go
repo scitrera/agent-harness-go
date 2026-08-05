@@ -154,11 +154,9 @@ func TestUpdateKey_shiftEnterInsertsComposerNewline(t *testing.T) {
 	m.resize(60, 20)
 	m.composer.SetValue("first")
 
-	next, cmd := m.updateKey(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter, Mod: tea.ModShift}))
-	if cmd == nil {
-		// A textarea cursor command is allowed to be nil depending on cursor mode;
-		// the value assertion below is the behavior contract.
-	}
+	// The returned cursor command is allowed to be nil depending on cursor mode,
+	// so it is deliberately not asserted; the composer value below is the contract.
+	next, _ := m.updateKey(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter, Mod: tea.ModShift}))
 	updated := next.(model)
 
 	if got := updated.composer.Value(); got != "first\n" {

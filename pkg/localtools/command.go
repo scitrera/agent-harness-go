@@ -6,8 +6,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"syscall"
 	"time"
+
+	"github.com/scitrera/agent-harness-go/pkg/procgroup"
 )
 
 type CommandSpec struct {
@@ -50,7 +51,7 @@ func (w *Workspace) RunCommand(ctx context.Context, spec CommandSpec) (CommandRe
 	cmd := exec.CommandContext(runCtx, spec.Name, spec.Args...)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), spec.Env...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.SysProcAttr = procgroup.Attr()
 
 	var out limitedBuffer
 	out.limit = spec.MaxOutput
@@ -63,7 +64,7 @@ func (w *Workspace) RunCommand(ctx context.Context, spec CommandSpec) (CommandRe
 	pid := cmd.Process.Pid
 	err = cmd.Wait()
 	if runCtx.Err() == context.DeadlineExceeded {
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		_ = procgroup.Kill(cmd.Process)
 		return CommandResult{ExitCode: -1, Output: out.String(), OutputBytes: out.Total(), OutputTruncated: out.Truncated(), PID: pid}, fmt.Errorf("%w: timeout", ErrCommandFailed)
 	}
 	code := cmd.ProcessState.ExitCode()

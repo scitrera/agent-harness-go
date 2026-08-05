@@ -17,12 +17,12 @@ func sseServer(t *testing.T, chunks []string) *httptest.Server {
 		w.WriteHeader(http.StatusOK)
 		flusher, _ := w.(http.Flusher)
 		for _, c := range chunks {
-			fmt.Fprintf(w, "data: %s\n\n", c)
+			_, _ = fmt.Fprintf(w, "data: %s\n\n", c)
 			if flusher != nil {
 				flusher.Flush()
 			}
 		}
-		fmt.Fprint(w, "data: [DONE]\n\n")
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
 	}))
 }
 
@@ -154,7 +154,7 @@ func TestChatStreamTerminatesOnFinishReasonWithoutDONE(t *testing.T) {
 			`{"id":"a1","choices":[{"finish_reason":null,"delta":{"role":"assistant","content":"Hi"}}]}`,
 			`{"choices":[{"finish_reason":"stop","delta":{"content":null}}]}`,
 		} {
-			fmt.Fprintf(w, "data: %s\n\n", c)
+			_, _ = fmt.Fprintf(w, "data: %s\n\n", c)
 			if flusher != nil {
 				flusher.Flush()
 			}
@@ -200,7 +200,7 @@ func TestChatStreamTerminatesOnFinishReasonWithoutDONE(t *testing.T) {
 func TestChatStreamFallsBackToJSON(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("content-type", "application/json")
-		fmt.Fprint(w, `{"id":"a1","choices":[{"message":{"role":"assistant","content":"non-stream"}}]}`)
+		_, _ = fmt.Fprint(w, `{"id":"a1","choices":[{"message":{"role":"assistant","content":"non-stream"}}]}`)
 	}))
 	defer srv.Close()
 

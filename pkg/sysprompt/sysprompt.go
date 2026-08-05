@@ -620,7 +620,7 @@ func skillSection(skills []SkillSummary, useLoadTool bool, hidden int) string {
 	// Signal that the listing is a relevance-filtered subset, not the whole catalog,
 	// so the model knows more skills exist beyond the ones shown.
 	if hidden > 0 {
-		b.WriteString(fmt.Sprintf("\n(+%d more skill(s) available but not shown — filtered by relevance to the current request.)", hidden))
+		_, _ = fmt.Fprintf(&b, "\n(+%d more skill(s) available but not shown — filtered by relevance to the current request.)", hidden)
 	}
 	return strings.TrimRight(b.String(), "\n")
 }

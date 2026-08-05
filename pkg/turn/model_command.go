@@ -92,7 +92,7 @@ func (r *Runner) modelListText(addr protocol.MessageAddress) string {
 			b.WriteString(")")
 		}
 	}
-	b.WriteString(fmt.Sprintf("\n\nActive: %s. Switch with /model <name>.", active))
+	_, _ = fmt.Fprintf(&b, "\n\nActive: %s. Switch with /model <name>.", active)
 	return b.String()
 }
 

@@ -13,6 +13,8 @@ test.env
 *.test
 *.out
 /bin/
+# Where the release workflow stages cross-compiled archives.
+/dist/
 *.swp
 *.swo
 .idea/
