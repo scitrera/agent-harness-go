@@ -1,0 +1,268 @@
+package aether
+
+import (
+	"context"
+	"encoding/json"
+	"testing"
+	"time"
+
+	sdk "github.com/scitrera/aether/sdk/go/aether"
+	spec "github.com/scitrera/ecosystem-messaging-spec/go"
+
+	"github.com/scitrera/agent-harness-go/pkg/approval"
+	"github.com/scitrera/agent-harness-go/pkg/channel"
+	"github.com/scitrera/agent-harness-go/pkg/protocol"
+	"github.com/scitrera/agent-harness-go/pkg/turncancel"
+)
+
+// newTestChannel builds a channel with the egress seam captured. New() does not
+// dial, so no gateway is needed.
+func newTestChannel(t *testing.T) (*Channel, *[]sentMessage) {
+	t.Helper()
+	c, err := New(Config{ServerAddr: "127.0.0.1:1", Workspace: "default", Specifier: "test"})
+	if err != nil {
+		t.Fatalf("new channel: %v", err)
+	}
+	sent := &[]sentMessage{}
+	c.sendMessage = func(topic string, payload []byte) error {
+		*sent = append(*sent, sentMessage{Topic: topic, Payload: payload})
+		return nil
+	}
+	return c, sent
+}
+
+type sentMessage struct {
+	Topic   string
+	Payload []byte
+}
+
+func userTurn(t *testing.T, addr protocol.MessageAddress, text string) []byte {
+	t.Helper()
+	part, err := protocol.NewTextPart(text)
+	if err != nil {
+		t.Fatalf("text part: %v", err)
+	}
+	body, err := json.Marshal(protocol.ChatMessage{
+		ID:      "user-1",
+		Role:    protocol.RoleUser,
+		Addr:    addr,
+		Content: []protocol.ContentPart{part},
+	})
+	if err != nil {
+		t.Fatalf("marshal turn: %v", err)
+	}
+	return body
+}
+
+// controlPayload builds a control message the way it actually arrives on the
+// wire — raw JSON — since the spec's exported constructors cannot express a
+// control part carrying request_id + scope.
+func controlPayload(t *testing.T, addr protocol.MessageAddress, part map[string]any) []byte {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{
+		"id":      "ctrl-1",
+		"role":    "user",
+		"addr":    addr,
+		"content": []any{part},
+	})
+	if err != nil {
+		t.Fatalf("marshal control: %v", err)
+	}
+	return body
+}
+
+// A turn arriving with no task id is normal in oss (frontends need not mint
+// Aether tasks). It must still be accepted, with an id minted locally so cancel
+// and approval correlation have something to key on.
+func TestOnMessageMintsTaskIDForTaskLessTurn(t *testing.T) {
+	c, _ := newTestChannel(t)
+	ctx := context.Background()
+
+	payload := userTurn(t, protocol.MessageAddress{ThreadID: "thread-1"}, "hello")
+	if err := c.onMessage(ctx, &sdk.Message{Payload: payload, SourceTopic: "us::drew::w1"}); err != nil {
+		t.Fatalf("onMessage: %v", err)
+	}
+
+	in, err := c.FetchTask(ctx)
+	if err != nil {
+		t.Fatalf("FetchTask: %v", err)
+	}
+	if in.Addr.TaskID == "" {
+		t.Fatal("task-less turn was not given a task id")
+	}
+	if in.Message.Addr.TaskID != in.Addr.TaskID {
+		t.Fatalf("message addr task %q != inbound addr task %q", in.Message.Addr.TaskID, in.Addr.TaskID)
+	}
+}
+
+// Stream events go back to the topic the turn arrived from — "reply to where it
+// came from" — not to a task lane.
+func TestPublishEventRepliesToOriginatingTopic(t *testing.T) {
+	c, sent := newTestChannel(t)
+	ctx := context.Background()
+
+	addr := protocol.MessageAddress{ThreadID: "thread-1", TaskID: "task-1", WorkspaceID: "default"}
+	payload := userTurn(t, addr, "hello")
+	if err := c.onMessage(ctx, &sdk.Message{Payload: payload, SourceTopic: "us::drew::w1"}); err != nil {
+		t.Fatalf("onMessage: %v", err)
+	}
+	if _, err := c.FetchTask(ctx); err != nil {
+		t.Fatalf("FetchTask: %v", err)
+	}
+
+	err := c.PublishEvent(ctx, channel.Event{
+		Type:      channel.EventTokenDelta,
+		Addr:      addr,
+		MessageID: "assistant-1",
+		Delta:     "hi",
+	})
+	if err != nil {
+		t.Fatalf("PublishEvent: %v", err)
+	}
+	if len(*sent) != 1 {
+		t.Fatalf("sent %d messages, want 1", len(*sent))
+	}
+	if got := (*sent)[0].Topic; got != "us::drew::w1" {
+		t.Fatalf("reply topic = %q, want us::drew::w1", got)
+	}
+	var envelope map[string]any
+	if err := json.Unmarshal((*sent)[0].Payload, &envelope); err != nil {
+		t.Fatalf("decode envelope: %v", err)
+	}
+	options, ok := envelope["options"].(map[string]any)
+	if !ok {
+		t.Fatalf("envelope has no options: %v", envelope)
+	}
+	if options["thread_id"] != "thread-1" {
+		t.Fatalf("envelope thread_id = %v, want thread-1", options["thread_id"])
+	}
+	if _, ok := options["chat_stream_event"]; !ok {
+		t.Fatal("envelope carries no chat_stream_event")
+	}
+}
+
+// With no recorded originator and no user in the address there is nowhere to
+// send: the event is dropped rather than misrouted.
+func TestPublishEventWithoutReplyTargetIsDropped(t *testing.T) {
+	c, sent := newTestChannel(t)
+
+	err := c.PublishEvent(context.Background(), channel.Event{
+		Type:      channel.EventTokenDelta,
+		Addr:      protocol.MessageAddress{ThreadID: "thread-1", TaskID: "unknown"},
+		MessageID: "assistant-1",
+		Delta:     "hi",
+	})
+	if err != nil {
+		t.Fatalf("PublishEvent: %v", err)
+	}
+	if len(*sent) != 0 {
+		t.Fatalf("sent %d messages, want 0", len(*sent))
+	}
+}
+
+// The reply target is released when the turn finalizes, so a long-lived worker
+// does not accumulate one entry per turn.
+func TestReplyTargetReleasedOnFinal(t *testing.T) {
+	c, _ := newTestChannel(t)
+	ctx := context.Background()
+
+	addr := protocol.MessageAddress{ThreadID: "thread-1", TaskID: "task-1", WorkspaceID: "default"}
+	if err := c.onMessage(ctx, &sdk.Message{Payload: userTurn(t, addr, "hi"), SourceTopic: "us::drew::w1"}); err != nil {
+		t.Fatalf("onMessage: %v", err)
+	}
+	if _, err := c.FetchTask(ctx); err != nil {
+		t.Fatalf("FetchTask: %v", err)
+	}
+	final := protocol.ChatMessage{ID: "assistant-1", Role: protocol.RoleAssistant, Addr: addr}
+	if err := c.PublishEvent(ctx, channel.Event{Type: channel.EventMessageFinal, Addr: addr, Message: &final}); err != nil {
+		t.Fatalf("PublishEvent: %v", err)
+	}
+	c.mu.Lock()
+	remaining := len(c.replyTo)
+	c.mu.Unlock()
+	if remaining != 0 {
+		t.Fatalf("replyTo still holds %d entries after finalize", remaining)
+	}
+}
+
+// A control message is applied, not delivered as a turn.
+func TestControlCancelIsNotDeliveredAsATurn(t *testing.T) {
+	c, _ := newTestChannel(t)
+	tc := turncancel.New()
+	c.SetCanceller(tc)
+	ctx := context.Background()
+
+	turnCtx, release := tc.Begin(context.Background(), "task-9")
+	defer release()
+
+	body := controlPayload(t, protocol.MessageAddress{ThreadID: "thread-1", TaskID: "task-9"},
+		map[string]any{"type": "control", "kind": spec.ControlCancel, "task_id": "task-9"})
+	if err := c.onMessage(ctx, &sdk.Message{Payload: body, SourceTopic: "us::drew::w1"}); err != nil {
+		t.Fatalf("onMessage: %v", err)
+	}
+
+	select {
+	case <-turnCtx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("cancel control did not cancel the in-flight turn")
+	}
+	select {
+	case in := <-c.tasks:
+		t.Fatalf("control was delivered as a turn: %+v", in)
+	default:
+	}
+}
+
+// Approve/deny controls resolve the turn's pending approval prompt.
+func TestControlApproveResolvesPendingApproval(t *testing.T) {
+	c, _ := newTestChannel(t)
+	broker := approval.New()
+	c.SetApprovalBroker(broker)
+
+	decided := make(chan approval.Decision, 1)
+	go func() {
+		d, err := broker.Await(context.Background(), "task-5", "req-1")
+		if err == nil {
+			decided <- d
+		}
+	}()
+	// Let the awaiter register before resolving.
+	time.Sleep(50 * time.Millisecond)
+
+	body := controlPayload(t, protocol.MessageAddress{ThreadID: "thread-1", TaskID: "task-5"},
+		map[string]any{"type": "control", "kind": spec.ControlApprove, "request_id": "req-1", "scope": "once"})
+	if err := c.onMessage(context.Background(), &sdk.Message{Payload: body}); err != nil {
+		t.Fatalf("onMessage: %v", err)
+	}
+
+	select {
+	case d := <-decided:
+		if !d.Granted || d.Scope != "once" {
+			t.Fatalf("decision = %+v, want granted once", d)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("approve control did not resolve the pending approval")
+	}
+}
+
+// Non-wire events (tool lifecycle, errors) are not published: tool activity
+// reaches clients as part_appended.
+func TestNonWireEventsAreNotPublished(t *testing.T) {
+	c, sent := newTestChannel(t)
+	ctx := context.Background()
+	addr := protocol.MessageAddress{ThreadID: "thread-1", TaskID: "task-1"}
+	if err := c.onMessage(ctx, &sdk.Message{Payload: userTurn(t, addr, "hi"), SourceTopic: "us::drew::w1"}); err != nil {
+		t.Fatalf("onMessage: %v", err)
+	}
+	if _, err := c.FetchTask(ctx); err != nil {
+		t.Fatalf("FetchTask: %v", err)
+	}
+	for _, kind := range []channel.EventType{channel.EventToolLifecycle, channel.EventError, channel.EventToolResult} {
+		if err := c.PublishEvent(ctx, channel.Event{Type: kind, Addr: addr}); err != nil {
+			t.Fatalf("PublishEvent(%s): %v", kind, err)
+		}
+	}
+	if len(*sent) != 0 {
+		t.Fatalf("sent %d messages for non-wire events, want 0", len(*sent))
+	}
+}

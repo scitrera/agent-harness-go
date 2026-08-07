@@ -23,6 +23,12 @@ func main() {
 	tuiMode := flag.Bool("tui", false, "run the terminal UI (default)")
 	acpMode := flag.Bool("acp", false, "run as an Agent Client Protocol (ACP) agent over stdio")
 	webMode := flag.Bool("web", false, "run the localhost web UI")
+	serveMode := flag.Bool("serve", false, "run as a headless agent worker reachable over Aether (requires --aether)")
+	aetherAddr := flag.String("aether", os.Getenv("AETHER_ADDR"), "Aether gateway address, e.g. 127.0.0.1:50051")
+	aetherWorkspace := flag.String("aether-workspace", env("AETHER_WORKSPACE", "default"), "Aether workspace to join")
+	aetherSpecifier := flag.String("aether-specifier", os.Getenv("AETHER_SPECIFIER"), "Aether agent-topic specifier (distinguishes instances)")
+	aetherTLS := flag.Bool("aether-tls", false, "use TLS for the Aether connection")
+	aetherTLSInsecure := flag.Bool("aether-tls-insecure", false, "skip Aether TLS certificate verification (testing only)")
 	addr := flag.String("addr", env("SAHARA_WEB_ADDR", "127.0.0.1:8787"), "web UI listen address (NO auth - localhost only)")
 	noBrowser := flag.Bool("no-browser", false, "do not open a browser (web mode)")
 	exportThread := flag.String("export", "", "export thread history as JSONL to stdout and exit (a thread id, or 'all')")
@@ -63,9 +69,13 @@ func main() {
 		fmt.Fprintln(os.Stderr, "error: set --base-url or SAHARA_LLM_BASE_URL (an OpenAI-compatible endpoint)")
 		os.Exit(2)
 	}
-	selectedMode, err := selectAppMode(*cliMode, *tuiMode, *acpMode, *webMode)
+	selectedMode, err := selectAppMode(*cliMode, *tuiMode, *acpMode, *webMode, *serveMode)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(2)
+	}
+	if selectedMode == appModeServe && *aetherAddr == "" {
+		fmt.Fprintln(os.Stderr, "error: --serve needs an Aether gateway: set --aether or AETHER_ADDR")
 		os.Exit(2)
 	}
 	if err := setupAppLogging(*workspace, selectedMode == appModeTUI); err != nil {
@@ -88,6 +98,15 @@ func main() {
 		model:         *model,
 		seed:          *seed,
 		record:        *record,
+
+		aetherAddr:        *aetherAddr,
+		aetherWorkspace:   *aetherWorkspace,
+		aetherSpecifier:   *aetherSpecifier,
+		aetherTLS:         *aetherTLS,
+		aetherTLSInsecure: *aetherTLSInsecure,
+	}
+	if selectedMode == appModeServe {
+		cfg.streamFlush = aetherStreamFlush
 	}
 
 	switch selectedMode {
@@ -99,6 +118,8 @@ func main() {
 		err = runACP(cfg)
 	case appModeWeb:
 		err = runWeb(cfg, *addr, !*noBrowser)
+	case appModeServe:
+		err = runServe(cfg)
 	}
 	// Flush + stop the trace exporter before exit (os.Exit skips defers, so do it
 	// explicitly). Bounded so a stuck collector can't hang shutdown.
@@ -116,15 +137,16 @@ func main() {
 type appMode string
 
 const (
-	appModeTUI appMode = "tui"
-	appModeCLI appMode = "cli"
-	appModeACP appMode = "acp"
-	appModeWeb appMode = "web"
+	appModeTUI   appMode = "tui"
+	appModeCLI   appMode = "cli"
+	appModeACP   appMode = "acp"
+	appModeWeb   appMode = "web"
+	appModeServe appMode = "serve"
 )
 
-func selectAppMode(cli, tui, acp, web bool) (appMode, error) {
-	if nTrue(cli, tui, acp, web) > 1 {
-		return "", fmt.Errorf("choose only one of --cli, --tui, --acp, or --web")
+func selectAppMode(cli, tui, acp, web, serve bool) (appMode, error) {
+	if nTrue(cli, tui, acp, web, serve) > 1 {
+		return "", fmt.Errorf("choose only one of --cli, --tui, --acp, --web, or --serve")
 	}
 	switch {
 	case cli:
@@ -133,6 +155,8 @@ func selectAppMode(cli, tui, acp, web bool) (appMode, error) {
 		return appModeACP, nil
 	case web:
 		return appModeWeb, nil
+	case serve:
+		return appModeServe, nil
 	default:
 		return appModeTUI, nil
 	}

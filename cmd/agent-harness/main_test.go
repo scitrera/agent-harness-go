@@ -22,7 +22,7 @@ type recordingSubagentRunner struct {
 }
 
 func TestSelectAppModeDefaultsToTUI(t *testing.T) {
-	mode, err := selectAppMode(false, false, false, false)
+	mode, err := selectAppMode(false, false, false, false, false)
 	if err != nil {
 		t.Fatalf("select default mode: %v", err)
 	}
@@ -33,18 +33,19 @@ func TestSelectAppModeDefaultsToTUI(t *testing.T) {
 
 func TestSelectAppModeSupportsExplicitInterfaces(t *testing.T) {
 	tests := []struct {
-		name               string
-		cli, tui, acp, web bool
-		want               appMode
+		name                      string
+		cli, tui, acp, web, serve bool
+		want                      appMode
 	}{
 		{name: "cli", cli: true, want: appModeCLI},
 		{name: "tui", tui: true, want: appModeTUI},
 		{name: "acp", acp: true, want: appModeACP},
 		{name: "web", web: true, want: appModeWeb},
+		{name: "serve", serve: true, want: appModeServe},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			mode, err := selectAppMode(test.cli, test.tui, test.acp, test.web)
+			mode, err := selectAppMode(test.cli, test.tui, test.acp, test.web, test.serve)
 			if err != nil {
 				t.Fatalf("select mode: %v", err)
 			}
@@ -56,7 +57,7 @@ func TestSelectAppModeSupportsExplicitInterfaces(t *testing.T) {
 }
 
 func TestSelectAppModeRejectsConflictingInterfaces(t *testing.T) {
-	if _, err := selectAppMode(true, true, false, false); err == nil {
+	if _, err := selectAppMode(true, true, false, false, false); err == nil {
 		t.Fatal("expected conflicting interface modes to fail")
 	}
 }

@@ -113,12 +113,15 @@ func buildRunner(cfg appConfig, pub channel.Publisher, approvals approval.Awaite
 			Model:              cfg.model,
 			Now:                time.Now,
 		}),
-		Model:        cfg.model,
-		Streaming:    true,
-		TurnRecorder: recorder,
-		Commands:     commands.New(cmdSpecs),
-		Now:          time.Now,
-		Approvals:    approvals,
+		Model:     cfg.model,
+		Streaming: true,
+		// Bound the token-delta message rate on transports that pay per message
+		// (Aether); 0 on the in-process channels streams every delta.
+		StreamFlushInterval: cfg.streamFlush,
+		TurnRecorder:        recorder,
+		Commands:            commands.New(cmdSpecs),
+		Now:                 time.Now,
+		Approvals:           approvals,
 		// Notifier wakes a fresh parent turn with a background sub-agent's completion
 		// notice; nil (cli) → background spawns fall back to synchronous.
 		Notifier: notifier,
