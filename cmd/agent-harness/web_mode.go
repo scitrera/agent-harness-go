@@ -20,10 +20,16 @@ func runWeb(cfg appConfig, addr string, openBrowser bool) error {
 	defer stop()
 
 	wc := web.NewChannel()
-	runner, fsStore, _, err := buildRunner(cfg, wc, nil, nil)
+	st, err := openStores(ctx, cfg)
 	if err != nil {
 		return err
 	}
+	runner, _, err := buildRunner(cfg, st, wc, nil, nil)
+	if err != nil {
+		return err
+	}
+	// The web server still takes the concrete filesystem types, so it keeps
+	// local transcripts even when MemoryLayer is configured.
 	sessions, err := threadindex.NewIndex(cfg.stateDir, time.Now)
 	if err != nil {
 		return fmt.Errorf("sessions: %w", err)
@@ -35,7 +41,7 @@ func runWeb(cfg appConfig, addr string, openBrowser bool) error {
 	}
 	rt.SetCanceller(canceller)
 
-	srv := web.New(wc, fsStore, sessions, canceller)
+	srv := web.New(wc, st.files, sessions, canceller)
 	httpSrv := &http.Server{Addr: addr, Handler: srv.Handler()}
 
 	done := make(chan struct{})

@@ -15,7 +15,6 @@ import (
 	"github.com/scitrera/agent-harness-go/pkg/runtime"
 	"github.com/scitrera/agent-harness-go/pkg/store"
 	"github.com/scitrera/agent-harness-go/pkg/team"
-	"github.com/scitrera/agent-harness-go/pkg/threadindex"
 	"github.com/scitrera/agent-harness-go/pkg/turncancel"
 )
 
@@ -25,13 +24,13 @@ func runTUI(cfg appConfig) error {
 
 	broker := approval.New()
 	tc := tui.NewChannel()
-	runner, fsStore, workspace, err := buildRunner(cfg, tc, broker, nil)
+	st, err := openStores(ctx, cfg)
 	if err != nil {
 		return err
 	}
-	index, err := threadindex.NewIndex(cfg.stateDir, time.Now)
+	runner, workspace, err := buildRunner(cfg, st, tc, broker, nil)
 	if err != nil {
-		return fmt.Errorf("threads: %w", err)
+		return err
 	}
 	agentCatalog, err := agentCatalogForWorkspace(cfg.workspaceRoot)
 	if err != nil {
@@ -61,8 +60,8 @@ func runTUI(cfg appConfig) error {
 	)
 	runErr := tui.Run(ctx, tui.Config{
 		Channel:         tc,
-		Store:           fsStore,
-		Index:           index,
+		Store:           st.history,
+		Index:           st.threads,
 		Approvals:       broker,
 		Canceller:       canceller,
 		ModelStatus:     runner,

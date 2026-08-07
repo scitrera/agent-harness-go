@@ -32,6 +32,8 @@ func main() {
 	aetherWindow := flag.String("aether-window", os.Getenv("AETHER_WINDOW"), "client window id; defaults to a fresh id per process")
 	aetherTLS := flag.Bool("aether-tls", false, "use TLS for the Aether connection")
 	aetherTLSInsecure := flag.Bool("aether-tls-insecure", false, "skip Aether TLS certificate verification (testing only)")
+	memorylayerURL := flag.String("memorylayer", os.Getenv("MEMORYLAYER_BASE_URL"), "MemoryLayer server URL; stores threads + transcripts there instead of on local disk")
+	memorylayerWorkspace := flag.String("memorylayer-workspace", env("MEMORYLAYER_WORKSPACE", "default"), "MemoryLayer workspace")
 	addr := flag.String("addr", env("SAHARA_WEB_ADDR", "127.0.0.1:8787"), "web UI listen address (NO auth - localhost only)")
 	noBrowser := flag.Bool("no-browser", false, "do not open a browser (web mode)")
 	exportThread := flag.String("export", "", "export thread history as JSONL to stdout and exit (a thread id, or 'all')")
@@ -111,6 +113,10 @@ func main() {
 		aetherTLSInsecure: *aetherTLSInsecure,
 		aetherUser:        *aetherUser,
 		aetherWindow:      resolveWindowID(*aetherWindow),
+
+		memorylayerURL:       *memorylayerURL,
+		memorylayerKey:       os.Getenv("MEMORYLAYER_API_KEY"),
+		memorylayerWorkspace: *memorylayerWorkspace,
 	}
 	if selectedMode == appModeServe || selectedMode == appModeStandalone {
 		cfg.streamFlush = aetherStreamFlush

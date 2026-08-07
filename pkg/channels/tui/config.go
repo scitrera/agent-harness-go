@@ -80,7 +80,7 @@ type DirectoryAccess interface {
 type Config struct {
 	Channel         ChannelSurface
 	Store           HistoryStore
-	Index           *threadindex.Index
+	Index           threadindex.Store
 	Approvals       ApprovalResolver
 	Canceller       Canceller
 	ModelStatus     ModelStatus

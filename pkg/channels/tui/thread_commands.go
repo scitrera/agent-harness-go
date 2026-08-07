@@ -170,7 +170,7 @@ func loadHistoryCmd(ctx context.Context, store HistoryStore, threadID string) te
 	}
 }
 
-func createThreadCmd(index *threadindex.Index, title string) tea.Cmd {
+func createThreadCmd(index threadindex.Store, title string) tea.Cmd {
 	return func() tea.Msg {
 		session, err := index.Create()
 		if err != nil {
@@ -191,7 +191,7 @@ func createThreadCmd(index *threadindex.Index, title string) tea.Cmd {
 	}
 }
 
-func deleteThreadCmd(ctx context.Context, index *threadindex.Index, store HistoryStore, id string, nextID string) tea.Cmd {
+func deleteThreadCmd(ctx context.Context, index threadindex.Store, store HistoryStore, id string, nextID string) tea.Cmd {
 	return func() tea.Msg {
 		if err := index.Delete(id); err != nil {
 			return threadDeletedMsg{DeletedID: id, NextID: nextID, Err: fmt.Errorf("delete index: %w", err)}
@@ -210,7 +210,7 @@ func clearThreadCmd(ctx context.Context, store HistoryStore, id string) tea.Cmd 
 	}
 }
 
-func renameThreadCmd(index *threadindex.Index, id string, title string) tea.Cmd {
+func renameThreadCmd(index threadindex.Store, id string, title string) tea.Cmd {
 	return func() tea.Msg {
 		err := index.Rename(id, title)
 		return threadRenamedMsg{ThreadID: id, Err: err}

@@ -36,7 +36,11 @@ func runServe(cfg appConfig) error {
 		return err
 	}
 
-	runner, fsStore, _, err := buildRunner(cfg, ch, broker, nil)
+	st, err := openStores(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	runner, _, err := buildRunner(cfg, st, ch, broker, nil)
 	if err != nil {
 		return err
 	}
@@ -46,7 +50,7 @@ func runServe(cfg appConfig) error {
 	// A `clear` control drops the thread's persisted transcript, so a client-side
 	// clear is not resurrected from local history on the next turn.
 	ch.SetThreadClearer(func(threadID string) error {
-		return fsStore.DeleteHistory(context.Background(), threadID)
+		return st.history.DeleteHistory(context.Background(), threadID)
 	})
 
 	rt, err := runtime.NewRunner(ch, runner)
@@ -60,8 +64,8 @@ func runServe(cfg appConfig) error {
 	}
 	defer func() { _ = ch.Close() }()
 
-	fmt.Fprintf(os.Stderr, "agent-harness | model=%s endpoint=%s - serving on aether %s as %s\n",
-		cfg.model, cfg.baseURL, cfg.aetherAddr, ch.Topic())
+	fmt.Fprintf(os.Stderr, "agent-harness | model=%s endpoint=%s - serving on aether %s as %s (history: %s)\n",
+		cfg.model, cfg.baseURL, cfg.aetherAddr, ch.Topic(), historyLabel(cfg))
 
 	if _, err := rt.RunLoop(ctx, runtime.LoopConfig{Concurrency: 8}); err != nil && ctx.Err() == nil {
 		return fmt.Errorf("run loop: %w", err)

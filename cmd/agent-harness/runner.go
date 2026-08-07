@@ -15,15 +15,14 @@ import (
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 	"github.com/scitrera/agent-harness-go/pkg/provider"
 	"github.com/scitrera/agent-harness-go/pkg/skills"
-	"github.com/scitrera/agent-harness-go/pkg/store"
 	"github.com/scitrera/agent-harness-go/pkg/subagent"
 	"github.com/scitrera/agent-harness-go/pkg/tools"
 	"github.com/scitrera/agent-harness-go/pkg/turn"
 )
 
-func buildRunner(cfg appConfig, pub channel.Publisher, approvals approval.Awaiter, decorator func(context.Context, protocol.MessageAddress) context.Context) (*turn.Runner, *store.FileStore, *localtools.Workspace, error) {
+func buildRunner(cfg appConfig, st stores, pub channel.Publisher, approvals approval.Awaiter, decorator func(context.Context, protocol.MessageAddress) context.Context) (*turn.Runner, *localtools.Workspace, error) {
 	if err := os.MkdirAll(cfg.workspaceRoot, 0o755); err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 	if cfg.seed {
 		seedDefaults(cfg.workspaceRoot)
@@ -31,27 +30,27 @@ func buildRunner(cfg appConfig, pub channel.Publisher, approvals approval.Awaite
 
 	ws, err := localtools.NewWorkspace(cfg.workspaceRoot)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("workspace: %w", err)
+		return nil, nil, fmt.Errorf("workspace: %w", err)
 	}
 	exa, err := localtools.NewExaClient("https://api.exa.ai/search", os.Getenv("EXA_API_KEY"), true, nil)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("exa: %w", err)
+		return nil, nil, fmt.Errorf("exa: %w", err)
 	}
 	reg := tools.NewRegistry()
 	if err := tools.RegisterLocal(reg, tools.LocalConfig{Workspace: ws, Python: "python3", Exa: exa, Timeout: 30 * time.Second, MaxOutput: 1 << 20}); err != nil {
-		return nil, nil, nil, fmt.Errorf("register tools: %w", err)
+		return nil, nil, fmt.Errorf("register tools: %w", err)
 	}
 	subagentRef := &subagent.Ref{}
 	agentCatalog, err := agentCatalogForWorkspace(cfg.workspaceRoot)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 	// A publisher that can also enqueue inbound turns (web/tui channels) lets a
 	// detached background sub-agent push its completion back to the parent thread;
 	// cli (stdout-only) cannot, so background stays disabled there.
 	notifier, allowBackground := pub.(channel.Enqueuer)
 	if err := registerReferenceSubagent(reg, subagentRef, agentCatalog, allowBackground); err != nil {
-		return nil, nil, nil, fmt.Errorf("register subagent: %w", err)
+		return nil, nil, fmt.Errorf("register subagent: %w", err)
 	}
 
 	auth := ""
@@ -63,17 +62,16 @@ func buildRunner(cfg appConfig, pub channel.Publisher, approvals approval.Awaite
 	// trace/export. (Distributions behind a proxy that omits `[DONE]` leave it off.)
 	prov, err := provider.NewOpenAICompatClient(provider.OpenAICompatConfig{BaseURL: cfg.baseURL, AuthHeader: auth, Format: provider.FormatOpenAI, StreamUsage: true})
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("provider: %w", err)
+		return nil, nil, fmt.Errorf("provider: %w", err)
 	}
 
-	fsStore := store.NewFileStore(cfg.workspaceRoot, cfg.stateDir)
 	skillSpecs, skillWarnings, _ := skills.DiscoverWithWarnings(cfg.workspaceRoot, []string{"skills", ".agent-harness-skills"})
 	// Register load_skill so the model loads a skill by name — resolving its file
 	// and any prerequisite skills — instead of read_file'ing the path. The same
 	// mechanism the sahara distribution uses; nothing about it is distribution-specific.
 	skillReg := skills.BuildRegistry(skillSpecs, cfg.workspaceRoot)
 	if err := reg.Register(skills.LoadToolName, skills.LoadTool(skillReg)); err != nil {
-		return nil, nil, nil, fmt.Errorf("register load_skill: %w", err)
+		return nil, nil, fmt.Errorf("register load_skill: %w", err)
 	}
 	cmdSpecs, _ := commands.Discover(cfg.workspaceRoot, []string{"commands", ".agent-harness-commands"})
 
@@ -89,14 +87,16 @@ func buildRunner(cfg appConfig, pub channel.Publisher, approvals approval.Awaite
 	if cfg.record != "" {
 		fr, rerr := newFileTurnRecorder(cfg.record)
 		if rerr != nil {
-			return nil, nil, nil, fmt.Errorf("record: %w", rerr)
+			return nil, nil, fmt.Errorf("record: %w", rerr)
 		}
 		recorder = fr
 	}
 
 	runner, err := turn.NewRunner(turn.Config{
-		Store:     fsStore,
-		Loader:    fsStore,
+		// Transcripts may live remotely (MemoryLayer); workspace bootstrap
+		// documents are always local files.
+		Store:     st.history,
+		Loader:    st.files,
 		Registry:  reg,
 		Provider:  prov,
 		Publisher: pub,
@@ -135,8 +135,8 @@ func buildRunner(cfg appConfig, pub channel.Publisher, approvals approval.Awaite
 		ContextDecorator: decorator,
 	})
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("runner: %w", err)
+		return nil, nil, fmt.Errorf("runner: %w", err)
 	}
 	subagentRef.Set(runner)
-	return runner, fsStore, ws, nil
+	return runner, ws, nil
 }

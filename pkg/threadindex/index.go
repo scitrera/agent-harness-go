@@ -18,12 +18,29 @@ import (
 
 const defaultTitle = "New chat"
 
+var _ Store = (*Index)(nil)
+
 // Session is a chat thread's display metadata for switchers.
 type Session struct {
 	ID      string `json:"id"`
 	Title   string `json:"title"`
 	Created int64  `json:"created"`
 	Updated int64  `json:"updated"`
+}
+
+// Store is the thread registry a UI needs: list the threads, make one, and
+// keep its display metadata current. Index is the filesystem implementation;
+// a backend that owns threads durably (e.g. MemoryLayer) implements the same
+// surface so the UI can be pointed at either.
+//
+// List returns a snapshot and is called from render paths, so an implementation
+// must not block on a network round trip inside it.
+type Store interface {
+	List() []Session
+	Create() (Session, error)
+	Touch(id, firstUserText string) error
+	Rename(id, titleText string) error
+	Delete(id string) error
 }
 
 // Index is a JSON-file-backed registry of chat sessions.

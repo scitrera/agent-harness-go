@@ -30,7 +30,7 @@ type model struct {
 	channel         ChannelSurface
 	events          <-chan channel.Event
 	store           HistoryStore
-	index           *threadindex.Index
+	index           threadindex.Store
 	approvals       ApprovalResolver
 	canceller       Canceller
 	modelStatus     ModelStatus
@@ -130,7 +130,7 @@ func newModel(ctx context.Context, cfg Config) (model, error) {
 	return m, nil
 }
 
-func selectInitialThread(index *threadindex.Index, requested string) (string, []threadindex.Session, error) {
+func selectInitialThread(index threadindex.Store, requested string) (string, []threadindex.Session, error) {
 	requested = strings.TrimSpace(requested)
 	if requested != "" {
 		if err := index.Touch(requested, ""); err != nil {

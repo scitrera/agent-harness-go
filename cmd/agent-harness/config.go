@@ -39,6 +39,11 @@ type appConfig struct {
 	aetherUser   string
 	aetherWindow string
 
+	// MemoryLayer. Empty memorylayerURL keeps transcripts on local disk.
+	memorylayerURL       string
+	memorylayerKey       string
+	memorylayerWorkspace string
+
 	// streamFlush is the token-delta coalescing interval handed to the turn
 	// runner; 0 streams every delta.
 	streamFlush time.Duration

@@ -7,13 +7,11 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
-	"time"
 
 	aetherchan "github.com/scitrera/agent-harness-go/pkg/channels/aether"
 	"github.com/scitrera/agent-harness-go/pkg/channels/tui"
 	"github.com/scitrera/agent-harness-go/pkg/store"
 	"github.com/scitrera/agent-harness-go/pkg/team"
-	"github.com/scitrera/agent-harness-go/pkg/threadindex"
 )
 
 // remoteModelStatus reports the model for the status line when there is no local
@@ -46,15 +44,16 @@ func runTUIClient(cfg appConfig) error {
 		return err
 	}
 
-	// The agent owns the authoritative transcript; this local store is the
-	// projection of what this client witnessed, so a restart or thread switch
-	// still renders something. Phase 3 (shared MemoryLayer history) replaces it.
-	projection := store.NewFileStore(cfg.workspaceRoot, cfg.stateDir)
-	client.SetHistoryProjection(projection)
-
-	index, err := threadindex.NewIndex(cfg.stateDir, time.Now)
+	st, err := openStores(ctx, cfg)
 	if err != nil {
-		return fmt.Errorf("threads: %w", err)
+		return err
+	}
+	// With MemoryLayer the agent and every client read the same transcript, so
+	// the client needs no projection of its own. On local files it does: the
+	// agent owns the authoritative copy, and without this a restart or a thread
+	// switch renders a blank conversation.
+	if !st.remote {
+		client.SetHistoryProjection(st.history)
 	}
 	agentCatalog, err := agentCatalogForWorkspace(cfg.workspaceRoot)
 	if err != nil {
@@ -66,12 +65,13 @@ func runTUIClient(cfg appConfig) error {
 	}
 	defer func() { _ = client.Close() }()
 
-	fmt.Fprintf(os.Stderr, "agent-harness | connected to %s via aether %s\n", client.AgentTopic(), cfg.aetherAddr)
+	fmt.Fprintf(os.Stderr, "agent-harness | connected to %s via aether %s (history: %s)\n",
+		client.AgentTopic(), cfg.aetherAddr, historyLabel(cfg))
 
 	return tui.Run(ctx, tui.Config{
 		Channel:   client,
-		Store:     projection,
-		Index:     index,
+		Store:     st.history,
+		Index:     st.threads,
 		Approvals: client,
 		Canceller: client,
 		// No local runner to ask, so the status line shows the configured model

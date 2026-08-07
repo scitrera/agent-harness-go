@@ -52,7 +52,11 @@ func runAetherStandalone(cfg appConfig) error {
 	if err != nil {
 		return err
 	}
-	runner, fsStore, _, err := buildRunner(cfg, worker, broker, nil)
+	st, err := openStores(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	runner, _, err := buildRunner(cfg, st, worker, broker, nil)
 	if err != nil {
 		return err
 	}
@@ -60,7 +64,7 @@ func runAetherStandalone(cfg appConfig) error {
 	worker.SetCanceller(canceller)
 	worker.SetApprovalBroker(broker)
 	worker.SetThreadClearer(func(threadID string) error {
-		return fsStore.DeleteHistory(context.Background(), threadID)
+		return st.history.DeleteHistory(context.Background(), threadID)
 	})
 	rt, err := runtime.NewRunner(worker, runner)
 	if err != nil {

@@ -13,7 +13,11 @@ import (
 
 func runCLI(cfg appConfig) error {
 	ctx := context.Background()
-	runner, _, _, err := buildRunner(cfg, cli.NewPublisher(os.Stdout), nil, nil)
+	st, err := openStores(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	runner, _, err := buildRunner(cfg, st, cli.NewPublisher(os.Stdout), nil, nil)
 	if err != nil {
 		return err
 	}

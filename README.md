@@ -54,6 +54,7 @@ the browser, the terminal UI, or stdout in `--cli` mode).
 | `--serve` | — | `false` | run as a headless agent worker over Aether |
 | `--aether` | `AETHER_ADDR` | — | Aether gateway address, e.g. `127.0.0.1:50051` |
 | `--aether-standalone` | — | `false` | run the worker and the terminal UI in one process |
+| `--memorylayer` | `MEMORYLAYER_BASE_URL` | — | store threads + transcripts in MemoryLayer instead of on disk |
 
 ### Over Aether
 
@@ -73,9 +74,18 @@ gateway — when you want the real transport without two terminals. A local
 `aetherlite --dev` gateway accepts unauthenticated connections, so no token
 setup is needed to try it.
 
-Each client keeps a local copy of the conversation it witnessed; the agent holds
-the authoritative transcript, so a second client attaching mid-conversation sees
-only what arrives after it connects.
+By default each client keeps a local copy of the conversation it witnessed, so a
+second client attaching mid-conversation sees only what arrives after it
+connects. Point both the worker and its clients at a shared MemoryLayer to give
+them one conversation instead:
+
+```bash
+agent-harness --serve --aether 127.0.0.1:50051 --memorylayer http://127.0.0.1:61001 --base-url $SAHARA_LLM_BASE_URL
+agent-harness --tui   --aether 127.0.0.1:50051 --memorylayer http://127.0.0.1:61001
+```
+
+The workspace (`--memorylayer-workspace`, default `default`) is created on first
+use if MemoryLayer does not have it.
 
 In the TUI, type `@` followed by a path and use Tab/arrow keys to complete files
 or directories. Paths resolve from `/pwd`; use `/cd <path>` to change that
