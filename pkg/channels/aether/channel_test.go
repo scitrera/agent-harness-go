@@ -36,6 +36,11 @@ type sentMessage struct {
 	Payload []byte
 }
 
+// testMessage wraps a payload as it would arrive from the gateway.
+func testMessage(payload []byte) *sdk.Message {
+	return &sdk.Message{Payload: payload}
+}
+
 func userTurn(t *testing.T, addr protocol.MessageAddress, text string) []byte {
 	t.Helper()
 	part, err := protocol.NewTextPart(text)

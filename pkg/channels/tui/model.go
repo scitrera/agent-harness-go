@@ -10,7 +10,6 @@ import (
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/scitrera/agent-harness-go/pkg/approval"
 	"github.com/scitrera/agent-harness-go/pkg/channel"
 	"github.com/scitrera/agent-harness-go/pkg/threadindex"
 )
@@ -28,12 +27,12 @@ const (
 
 type model struct {
 	ctx             context.Context
-	channel         *Channel
+	channel         ChannelSurface
 	events          <-chan channel.Event
 	store           HistoryStore
 	index           *threadindex.Index
-	approvals       approvalResolver
-	canceller       canceler
+	approvals       ApprovalResolver
+	canceller       Canceller
 	modelStatus     ModelStatus
 	commandSource   CommandProvider
 	taskStore       TaskStore
@@ -73,14 +72,6 @@ type model struct {
 	composer textarea.Model
 	width    int
 	height   int
-}
-
-type approvalResolver interface {
-	Resolve(taskID, requestID string, d approval.Decision) bool
-}
-
-type canceler interface {
-	Cancel(taskID string) bool
 }
 
 func newModel(ctx context.Context, cfg Config) (model, error) {

@@ -51,6 +51,31 @@ the browser, the terminal UI, or stdout in `--cli` mode).
 | `--acp` | — | `false` | run as an ACP agent over stdio |
 | `--web` | — | `false` | run the localhost web UI |
 | `--no-browser` | — | `false` | don't auto-open a browser (web mode) |
+| `--serve` | — | `false` | run as a headless agent worker over Aether |
+| `--aether` | `AETHER_ADDR` | — | Aether gateway address, e.g. `127.0.0.1:50051` |
+| `--aether-standalone` | — | `false` | run the worker and the terminal UI in one process |
+
+### Over Aether
+
+The harness can put an Aether gateway between the UI and the agent, so several
+frontends — on several machines — drive one agent:
+
+```bash
+# the agent worker (needs a provider endpoint)
+agent-harness --serve --aether 127.0.0.1:50051 --base-url $SAHARA_LLM_BASE_URL
+
+# a terminal UI attached to it (needs no provider of its own)
+agent-harness --tui --aether 127.0.0.1:50051
+```
+
+`--aether-standalone` runs both halves in one process — still talking over the
+gateway — when you want the real transport without two terminals. A local
+`aetherlite --dev` gateway accepts unauthenticated connections, so no token
+setup is needed to try it.
+
+Each client keeps a local copy of the conversation it witnessed; the agent holds
+the authoritative transcript, so a second client attaching mid-conversation sees
+only what arrives after it connects.
 
 In the TUI, type `@` followed by a path and use Tab/arrow keys to complete files
 or directories. Paths resolve from `/pwd`; use `/cd <path>` to change that

@@ -158,7 +158,7 @@ func (m model) nextThreadAfterDelete(id string) string {
 
 func sendMessageCmd(
 	ctx context.Context,
-	ch *Channel,
+	ch ChannelSurface,
 	index *threadindex.Index,
 	addr protocol.MessageAddress,
 	message protocol.ChatMessage,

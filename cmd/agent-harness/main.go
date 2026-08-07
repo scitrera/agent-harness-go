@@ -24,9 +24,12 @@ func main() {
 	acpMode := flag.Bool("acp", false, "run as an Agent Client Protocol (ACP) agent over stdio")
 	webMode := flag.Bool("web", false, "run the localhost web UI")
 	serveMode := flag.Bool("serve", false, "run as a headless agent worker reachable over Aether (requires --aether)")
+	standalone := flag.Bool("aether-standalone", false, "run the agent worker and the terminal UI in one process, both over Aether (requires --aether)")
 	aetherAddr := flag.String("aether", os.Getenv("AETHER_ADDR"), "Aether gateway address, e.g. 127.0.0.1:50051")
 	aetherWorkspace := flag.String("aether-workspace", env("AETHER_WORKSPACE", "default"), "Aether workspace to join")
 	aetherSpecifier := flag.String("aether-specifier", os.Getenv("AETHER_SPECIFIER"), "Aether agent-topic specifier (distinguishes instances)")
+	aetherUser := flag.String("aether-user", env("AETHER_USER", defaultAetherUser()), "client user id (Aether client modes)")
+	aetherWindow := flag.String("aether-window", os.Getenv("AETHER_WINDOW"), "client window id; defaults to a fresh id per process")
 	aetherTLS := flag.Bool("aether-tls", false, "use TLS for the Aether connection")
 	aetherTLSInsecure := flag.Bool("aether-tls-insecure", false, "skip Aether TLS certificate verification (testing only)")
 	addr := flag.String("addr", env("SAHARA_WEB_ADDR", "127.0.0.1:8787"), "web UI listen address (NO auth - localhost only)")
@@ -65,17 +68,19 @@ func main() {
 		return
 	}
 
-	if *baseURL == "" {
-		fmt.Fprintln(os.Stderr, "error: set --base-url or SAHARA_LLM_BASE_URL (an OpenAI-compatible endpoint)")
-		os.Exit(2)
-	}
-	selectedMode, err := selectAppMode(*cliMode, *tuiMode, *acpMode, *webMode, *serveMode)
+	selectedMode, err := selectAppMode(*cliMode, *tuiMode, *acpMode, *webMode, *serveMode, *standalone)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(2)
 	}
-	if selectedMode == appModeServe && *aetherAddr == "" {
-		fmt.Fprintln(os.Stderr, "error: --serve needs an Aether gateway: set --aether or AETHER_ADDR")
+	if selectedMode.needsAether() && *aetherAddr == "" {
+		fmt.Fprintf(os.Stderr, "error: --%s needs an Aether gateway: set --aether or AETHER_ADDR\n", selectedMode)
+		os.Exit(2)
+	}
+	// A pure client drives someone else's agent, so it needs no provider of its
+	// own; every other mode runs turns locally and does.
+	if *baseURL == "" && selectedMode.runsTurnsLocally(*aetherAddr) {
+		fmt.Fprintln(os.Stderr, "error: set --base-url or SAHARA_LLM_BASE_URL (an OpenAI-compatible endpoint)")
 		os.Exit(2)
 	}
 	if err := setupAppLogging(*workspace, selectedMode == appModeTUI); err != nil {
@@ -104,8 +109,10 @@ func main() {
 		aetherSpecifier:   *aetherSpecifier,
 		aetherTLS:         *aetherTLS,
 		aetherTLSInsecure: *aetherTLSInsecure,
+		aetherUser:        *aetherUser,
+		aetherWindow:      resolveWindowID(*aetherWindow),
 	}
-	if selectedMode == appModeServe {
+	if selectedMode == appModeServe || selectedMode == appModeStandalone {
 		cfg.streamFlush = aetherStreamFlush
 	}
 
@@ -113,13 +120,19 @@ func main() {
 	case appModeCLI:
 		err = runCLI(cfg)
 	case appModeTUI:
-		err = runTUI(cfg)
+		if cfg.aetherAddr != "" {
+			err = runTUIClient(cfg)
+		} else {
+			err = runTUI(cfg)
+		}
 	case appModeACP:
 		err = runACP(cfg)
 	case appModeWeb:
 		err = runWeb(cfg, *addr, !*noBrowser)
 	case appModeServe:
 		err = runServe(cfg)
+	case appModeStandalone:
+		err = runAetherStandalone(cfg)
 	}
 	// Flush + stop the trace exporter before exit (os.Exit skips defers, so do it
 	// explicitly). Bounded so a stuck collector can't hang shutdown.
@@ -137,16 +150,31 @@ func main() {
 type appMode string
 
 const (
-	appModeTUI   appMode = "tui"
-	appModeCLI   appMode = "cli"
-	appModeACP   appMode = "acp"
-	appModeWeb   appMode = "web"
-	appModeServe appMode = "serve"
+	appModeTUI        appMode = "tui"
+	appModeCLI        appMode = "cli"
+	appModeACP        appMode = "acp"
+	appModeWeb        appMode = "web"
+	appModeServe      appMode = "serve"
+	appModeStandalone appMode = "aether-standalone"
 )
 
-func selectAppMode(cli, tui, acp, web, serve bool) (appMode, error) {
-	if nTrue(cli, tui, acp, web, serve) > 1 {
-		return "", fmt.Errorf("choose only one of --cli, --tui, --acp, --web, or --serve")
+// needsAether reports whether the mode is meaningless without a gateway.
+func (m appMode) needsAether() bool {
+	return m == appModeServe || m == appModeStandalone
+}
+
+// runsTurnsLocally reports whether this process executes turns itself (and so
+// needs a provider endpoint). Only a UI attached to a remote agent does not.
+func (m appMode) runsTurnsLocally(aetherAddr string) bool {
+	if m == appModeTUI && aetherAddr != "" {
+		return false
+	}
+	return true
+}
+
+func selectAppMode(cli, tui, acp, web, serve, standalone bool) (appMode, error) {
+	if nTrue(cli, tui, acp, web, serve, standalone) > 1 {
+		return "", fmt.Errorf("choose only one of --cli, --tui, --acp, --web, --serve, or --aether-standalone")
 	}
 	switch {
 	case cli:
@@ -157,6 +185,8 @@ func selectAppMode(cli, tui, acp, web, serve bool) (appMode, error) {
 		return appModeWeb, nil
 	case serve:
 		return appModeServe, nil
+	case standalone:
+		return appModeStandalone, nil
 	default:
 		return appModeTUI, nil
 	}

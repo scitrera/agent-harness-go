@@ -1,0 +1,86 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"syscall"
+	"time"
+
+	aetherchan "github.com/scitrera/agent-harness-go/pkg/channels/aether"
+	"github.com/scitrera/agent-harness-go/pkg/channels/tui"
+	"github.com/scitrera/agent-harness-go/pkg/store"
+	"github.com/scitrera/agent-harness-go/pkg/team"
+	"github.com/scitrera/agent-harness-go/pkg/threadindex"
+)
+
+// remoteModelStatus reports the model for the status line when there is no local
+// runner to ask. The agent picks the real model; this is the client's best
+// guess, which is why it is only a label.
+type remoteModelStatus struct{ model string }
+
+func (r remoteModelStatus) ActiveModelName(string) string { return r.model }
+
+// runTUIClient runs the terminal UI against an agent reached over Aether. The
+// UI is unchanged: it talks to the same channel surface, only the other half of
+// that channel is a gateway hop away instead of an in-process runner.
+func runTUIClient(cfg appConfig) error {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	client, err := aetherchan.NewClient(aetherchan.ClientConfig{
+		ServerAddr:            cfg.aetherAddr,
+		Workspace:             cfg.aetherWorkspace,
+		AgentSpecifier:        cfg.aetherSpecifier,
+		UserID:                cfg.aetherUser,
+		WindowID:              cfg.aetherWindow,
+		APIKey:                os.Getenv("AETHER_API_KEY"),
+		Token:                 os.Getenv("AETHER_TOKEN"),
+		Tenant:                os.Getenv("AETHER_TENANT"),
+		TLSEnabled:            cfg.aetherTLS,
+		TLSInsecureSkipVerify: cfg.aetherTLSInsecure,
+	})
+	if err != nil {
+		return err
+	}
+
+	// The agent owns the authoritative transcript; this local store is the
+	// projection of what this client witnessed, so a restart or thread switch
+	// still renders something. Phase 3 (shared MemoryLayer history) replaces it.
+	projection := store.NewFileStore(cfg.workspaceRoot, cfg.stateDir)
+	client.SetHistoryProjection(projection)
+
+	index, err := threadindex.NewIndex(cfg.stateDir, time.Now)
+	if err != nil {
+		return fmt.Errorf("threads: %w", err)
+	}
+	agentCatalog, err := agentCatalogForWorkspace(cfg.workspaceRoot)
+	if err != nil {
+		return err
+	}
+
+	if err := client.Start(ctx); err != nil {
+		return err
+	}
+	defer func() { _ = client.Close() }()
+
+	fmt.Fprintf(os.Stderr, "agent-harness | connected to %s via aether %s\n", client.AgentTopic(), cfg.aetherAddr)
+
+	return tui.Run(ctx, tui.Config{
+		Channel:   client,
+		Store:     projection,
+		Index:     index,
+		Approvals: client,
+		Canceller: client,
+		// No local runner to ask, so the status line shows the configured model
+		// and the command palette offers only the UI's own commands.
+		ModelStatus:     remoteModelStatus{model: cfg.model},
+		TaskStore:       store.NewTaskStateStore(cfg.stateDir),
+		TeamStore:       team.NewFileGraphStore(filepath.Join(cfg.stateDir, "team", "graph.json")),
+		AgentCatalog:    agentCatalog,
+		InitialThreadID: cfg.thread,
+		WorkspaceRoot:   cfg.workspaceRoot,
+	})
+}

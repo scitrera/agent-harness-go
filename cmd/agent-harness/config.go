@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"time"
+
+	"github.com/scitrera/agent-harness-go/pkg/ids"
 )
 
 const shutdownTimeout = 5 * time.Second
@@ -32,10 +34,41 @@ type appConfig struct {
 	aetherSpecifier   string
 	aetherTLS         bool
 	aetherTLSInsecure bool
+	// Client-session identity. WindowID distinguishes two frontends run by the
+	// same user; it is what the agent addresses its replies to.
+	aetherUser   string
+	aetherWindow string
 
 	// streamFlush is the token-delta coalescing interval handed to the turn
 	// runner; 0 streams every delta.
 	streamFlush time.Duration
+}
+
+// defaultAetherUser names the human driving a client session. It is a routing
+// label, not a credential — the gateway decides what the connection may do.
+func defaultAetherUser() string {
+	if u := os.Getenv("USER"); u != "" {
+		return u
+	}
+	if host, err := os.Hostname(); err == nil && host != "" {
+		return host
+	}
+	return "user"
+}
+
+// resolveWindowID keeps an explicitly configured window id, otherwise mints a
+// fresh one per process. Two frontends run by the same user must not share a
+// window id: it is the address the agent replies to, so a collision sends one
+// session's stream to the other.
+func resolveWindowID(configured string) string {
+	if configured != "" {
+		return configured
+	}
+	id, err := ids.New("win-")
+	if err != nil {
+		return fmt.Sprintf("win-%d", os.Getpid())
+	}
+	return id
 }
 
 // sourceAgent labels this process on outbound Aether envelopes. Falls back to

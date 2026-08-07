@@ -7,19 +7,43 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/scitrera/agent-harness-go/pkg/approval"
+	"github.com/scitrera/agent-harness-go/pkg/channel"
 	"github.com/scitrera/agent-harness-go/pkg/commands"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 	"github.com/scitrera/agent-harness-go/pkg/subagent"
 	"github.com/scitrera/agent-harness-go/pkg/taskstate"
 	"github.com/scitrera/agent-harness-go/pkg/team"
 	"github.com/scitrera/agent-harness-go/pkg/threadindex"
-	"github.com/scitrera/agent-harness-go/pkg/turncancel"
 )
 
 type HistoryStore interface {
 	LoadHistory(ctx context.Context, threadID string) ([]protocol.ChatMessage, error)
 	SaveHistory(ctx context.Context, threadID string, messages []protocol.ChatMessage) error
 	DeleteHistory(ctx context.Context, threadID string) error
+}
+
+// ChannelSurface is what the UI needs from its transport: submit a turn, read
+// the resulting stream events, and report what was shed under load. The
+// in-process Channel satisfies it, and so does a remote transport whose other
+// half runs in another process — which is how the same UI drives either a
+// local runner or an agent reached over Aether.
+type ChannelSurface interface {
+	Enqueue(ctx context.Context, in channel.Inbound) error
+	Events() <-chan channel.Event
+	DroppedEvents() int64
+}
+
+// ApprovalResolver settles a pending tool-approval prompt. Locally that is the
+// approval broker; over a remote transport it sends an approve/deny control to
+// the agent holding the prompt.
+type ApprovalResolver interface {
+	Resolve(taskID, requestID string, d approval.Decision) bool
+}
+
+// Canceller aborts an in-flight turn — the local turn canceller, or a control
+// message to the agent running it.
+type Canceller interface {
+	Cancel(taskID string) bool
 }
 
 type ModelStatus interface {
@@ -54,11 +78,11 @@ type DirectoryAccess interface {
 }
 
 type Config struct {
-	Channel         *Channel
+	Channel         ChannelSurface
 	Store           HistoryStore
 	Index           *threadindex.Index
-	Approvals       *approval.Broker
-	Canceller       *turncancel.Canceller
+	Approvals       ApprovalResolver
+	Canceller       Canceller
 	ModelStatus     ModelStatus
 	Commands        CommandProvider
 	TaskStore       TaskStore
