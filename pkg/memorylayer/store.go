@@ -10,6 +10,7 @@ import (
 
 	spec "github.com/scitrera/ecosystem-messaging-spec/go"
 
+	"github.com/scitrera/agent-harness-go/pkg/harness"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 	"github.com/scitrera/agent-harness-go/pkg/threadindex"
 )
@@ -17,6 +18,11 @@ import (
 var errNotFound = errors.New("memorylayer: not found")
 
 const defaultTitle = "New chat"
+
+var (
+	_ harness.WorkspaceHistoryStore = (*Store)(nil)
+	_ threadindex.WorkspaceStore    = (*Store)(nil)
+)
 
 // Store keeps chat threads and transcripts in MemoryLayer. It satisfies both
 // the history-store seam (LoadHistory/SaveHistory/DeleteHistory) and the
@@ -31,11 +37,24 @@ type Store struct {
 	// MemoryLayer's message API appends while the harness's SaveHistory hands
 	// over the whole transcript each turn. Without the diff every turn would
 	// re-append the entire history.
-	appended map[string]map[string]bool
+	appended map[workspaceThreadRef]map[string]bool
 	// threads caches the thread list. List() is called from UI render paths
 	// that cannot block on a network round trip, so it serves this snapshot and
 	// mutations refresh it.
-	threads map[string]threadindex.Session
+	threads map[string]map[string]threadindex.Session
+	// ensured avoids a workspace existence round trip on every transcript save.
+	ensured map[string]bool
+	lanes   map[workspaceThreadRef]*workspaceThreadLane
+}
+
+type workspaceThreadRef struct {
+	workspaceID string
+	threadID    string
+}
+
+type workspaceThreadLane struct {
+	mu    sync.Mutex
+	users int
 }
 
 // New builds a MemoryLayer-backed store.
@@ -47,8 +66,10 @@ func New(cfg Config) (*Store, error) {
 	return &Store{
 		client:   c,
 		now:      time.Now,
-		appended: map[string]map[string]bool{},
-		threads:  map[string]threadindex.Session{},
+		appended: map[workspaceThreadRef]map[string]bool{},
+		threads:  map[string]map[string]threadindex.Session{},
+		ensured:  map[string]bool{},
+		lanes:    map[workspaceThreadRef]*workspaceThreadLane{},
 	}, nil
 }
 
@@ -58,10 +79,23 @@ func New(cfg Config) (*Store, error) {
 // MemoryLayer does not know about is empty rather than an error, matching the
 // filesystem store: the first turn of a new thread reads before it writes.
 func (s *Store) LoadHistory(ctx context.Context, threadID string) ([]protocol.ChatMessage, error) {
+	return s.LoadWorkspaceHistory(ctx, s.client.workspace, threadID)
+}
+
+// LoadWorkspaceHistory loads a transcript under the composite workspace/thread
+// identity. The explicit workspace wins over the configured default.
+func (s *Store) LoadWorkspaceHistory(ctx context.Context, workspaceID, threadID string) ([]protocol.ChatMessage, error) {
 	if threadID == "" {
 		return nil, nil
 	}
-	raw, err := s.client.getMessages(ctx, threadID)
+	workspaceID = s.client.resolveWorkspace(workspaceID)
+	if err := s.ensureWorkspace(ctx, workspaceID); err != nil {
+		return nil, err
+	}
+	ref := workspaceThreadRef{workspaceID: workspaceID, threadID: threadID}
+	unlock := s.lockThread(ref)
+	defer unlock()
+	raw, err := s.client.getMessages(ctx, workspaceID, threadID)
 	if err != nil {
 		if errors.Is(err, errNotFound) {
 			return nil, nil
@@ -84,7 +118,7 @@ func (s *Store) LoadHistory(ctx context.Context, threadID string) ([]protocol.Ch
 	// Loading tells us what the remote already holds, which is what the append
 	// diff needs to know.
 	s.mu.Lock()
-	s.appended[threadID] = seen
+	s.appended[ref] = seen
 	s.mu.Unlock()
 	return messages, nil
 }
@@ -93,14 +127,27 @@ func (s *Store) LoadHistory(ctx context.Context, threadID string) ([]protocol.Ch
 // harness hands over the full transcript each turn while MemoryLayer's API
 // appends, so this diffs by message id and sends only what is new.
 func (s *Store) SaveHistory(ctx context.Context, threadID string, messages []protocol.ChatMessage) error {
+	return s.SaveWorkspaceHistory(ctx, s.client.workspace, threadID, messages)
+}
+
+// SaveWorkspaceHistory appends only messages not already observed in the
+// composite workspace/thread cache.
+func (s *Store) SaveWorkspaceHistory(ctx context.Context, workspaceID, threadID string, messages []protocol.ChatMessage) error {
 	if threadID == "" || len(messages) == 0 {
 		return nil
 	}
+	workspaceID = s.client.resolveWorkspace(workspaceID)
+	if err := s.ensureWorkspace(ctx, workspaceID); err != nil {
+		return err
+	}
+	ref := workspaceThreadRef{workspaceID: workspaceID, threadID: threadID}
+	unlock := s.lockThread(ref)
+	defer unlock()
 	s.mu.Lock()
-	seen := s.appended[threadID]
+	seen := s.appended[ref]
 	if seen == nil {
 		seen = map[string]bool{}
-		s.appended[threadID] = seen
+		s.appended[ref] = seen
 	}
 	fresh := make([]protocol.ChatMessage, 0, len(messages))
 	for _, msg := range messages {
@@ -122,19 +169,20 @@ func (s *Store) SaveHistory(ctx context.Context, threadID string, messages []pro
 	if err != nil {
 		return err
 	}
-	if err := s.client.appendMessages(ctx, threadID, payloads); err != nil {
+	if err := s.client.appendMessages(ctx, workspaceID, threadID, payloads); err != nil {
 		return err
 	}
 
 	s.mu.Lock()
 	for _, msg := range fresh {
 		if msg.ID != "" {
-			s.appended[threadID][msg.ID] = true
+			s.appended[ref][msg.ID] = true
 		}
 	}
-	if session, ok := s.threads[threadID]; ok {
+	workspaceThreads := s.threads[workspaceID]
+	if session, ok := workspaceThreads[threadID]; ok {
 		session.Updated = s.now().UnixMilli()
-		s.threads[threadID] = session
+		workspaceThreads[threadID] = session
 	}
 	s.mu.Unlock()
 	return nil
@@ -144,14 +192,23 @@ func (s *Store) SaveHistory(ctx context.Context, threadID string, messages []pro
 // thread instead would drop it from the switcher, and "clear" means an empty
 // conversation rather than a vanished one.
 func (s *Store) DeleteHistory(ctx context.Context, threadID string) error {
+	return s.DeleteWorkspaceHistory(ctx, s.client.workspace, threadID)
+}
+
+// DeleteWorkspaceHistory clears only the addressed workspace/thread transcript.
+func (s *Store) DeleteWorkspaceHistory(ctx context.Context, workspaceID, threadID string) error {
 	if threadID == "" {
 		return nil
 	}
+	workspaceID = s.client.resolveWorkspace(workspaceID)
+	ref := workspaceThreadRef{workspaceID: workspaceID, threadID: threadID}
+	unlock := s.lockThread(ref)
+	defer unlock()
 	s.mu.Lock()
-	delete(s.appended, threadID)
+	delete(s.appended, ref)
 	s.mu.Unlock()
 
-	ids, err := s.client.messageIDs(ctx, threadID)
+	ids, err := s.client.messageIDs(ctx, workspaceID, threadID)
 	if err != nil {
 		if errors.Is(err, errNotFound) {
 			return nil
@@ -159,7 +216,7 @@ func (s *Store) DeleteHistory(ctx context.Context, threadID string) error {
 		return err
 	}
 	for _, id := range ids {
-		if err := s.client.deleteMessage(ctx, threadID, id); err != nil {
+		if err := s.client.deleteMessage(ctx, workspaceID, threadID, id); err != nil {
 			return err
 		}
 	}
@@ -171,18 +228,25 @@ func (s *Store) DeleteHistory(ctx context.Context, threadID string) error {
 // Refresh ensures the workspace exists and reloads the thread list. Call it
 // once at startup; List serves the cached snapshot afterwards.
 func (s *Store) Refresh(ctx context.Context) error {
-	if err := s.client.ensureWorkspace(ctx); err != nil {
+	return s.RefreshWorkspace(ctx, s.client.workspace)
+}
+
+// RefreshWorkspace ensures and reloads one workspace's thread-list cache.
+func (s *Store) RefreshWorkspace(ctx context.Context, workspaceID string) error {
+	workspaceID = s.client.resolveWorkspace(workspaceID)
+	if err := s.ensureWorkspace(ctx, workspaceID); err != nil {
 		return err
 	}
-	threads, err := s.client.listThreads(ctx, 200)
+	threads, err := s.client.listThreads(ctx, workspaceID, 200)
 	if err != nil {
 		return err
 	}
 	s.mu.Lock()
-	s.threads = make(map[string]threadindex.Session, len(threads))
+	workspaceThreads := make(map[string]threadindex.Session, len(threads))
 	for _, t := range threads {
-		s.threads[t.ID] = sessionFromThread(t)
+		workspaceThreads[t.ID] = sessionFromThread(t)
 	}
+	s.threads[workspaceID] = workspaceThreads
 	s.mu.Unlock()
 	return nil
 }
@@ -191,9 +255,16 @@ func (s *Store) Refresh(ctx context.Context) error {
 // cached snapshot: it is called from UI render paths that must not block on the
 // network.
 func (s *Store) List() []threadindex.Session {
+	return s.ListWorkspace(s.client.workspace)
+}
+
+// ListWorkspace returns the cached threads for workspaceID without network I/O.
+func (s *Store) ListWorkspace(workspaceID string) []threadindex.Session {
+	workspaceID = s.client.resolveWorkspace(workspaceID)
 	s.mu.Lock()
-	out := make([]threadindex.Session, 0, len(s.threads))
-	for _, session := range s.threads {
+	workspaceThreads := s.threads[workspaceID]
+	out := make([]threadindex.Session, 0, len(workspaceThreads))
+	for _, session := range workspaceThreads {
 		out = append(out, session)
 	}
 	s.mu.Unlock()
@@ -209,7 +280,16 @@ func (s *Store) List() []threadindex.Session {
 // Create makes a new thread. The id comes from the server, which mints its own
 // and ignores any the client supplies.
 func (s *Store) Create() (threadindex.Session, error) {
-	created, err := s.client.createThread(context.Background(), defaultTitle)
+	return s.CreateWorkspaceThread(s.client.workspace)
+}
+
+// CreateWorkspaceThread creates and caches a server-minted thread in one workspace.
+func (s *Store) CreateWorkspaceThread(workspaceID string) (threadindex.Session, error) {
+	workspaceID = s.client.resolveWorkspace(workspaceID)
+	if err := s.ensureWorkspace(context.Background(), workspaceID); err != nil {
+		return threadindex.Session{}, err
+	}
+	created, err := s.client.createThread(context.Background(), workspaceID, defaultTitle)
 	if err != nil {
 		return threadindex.Session{}, err
 	}
@@ -218,7 +298,7 @@ func (s *Store) Create() (threadindex.Session, error) {
 	}
 	session := sessionFromThread(created)
 	s.mu.Lock()
-	s.threads[session.ID] = session
+	s.workspaceThreadsLocked(workspaceID)[session.ID] = session
 	s.mu.Unlock()
 	return session, nil
 }
@@ -226,11 +306,20 @@ func (s *Store) Create() (threadindex.Session, error) {
 // Touch bumps the thread's updated time and derives an initial title from the
 // first user message, mirroring the filesystem index.
 func (s *Store) Touch(id, firstUserText string) error {
+	return s.TouchWorkspaceThread(s.client.workspace, id, firstUserText)
+}
+
+// TouchWorkspaceThread updates one workspace's cached/server thread metadata.
+func (s *Store) TouchWorkspaceThread(workspaceID, id, firstUserText string) error {
 	if id == "" {
 		return nil
 	}
+	workspaceID = s.client.resolveWorkspace(workspaceID)
+	unlock := s.lockThread(workspaceThreadRef{workspaceID: workspaceID, threadID: id})
+	defer unlock()
 	s.mu.Lock()
-	session, ok := s.threads[id]
+	workspaceThreads := s.workspaceThreadsLocked(workspaceID)
+	session, ok := workspaceThreads[id]
 	if !ok {
 		session = threadindex.Session{ID: id, Title: defaultTitle, Created: s.now().UnixMilli()}
 	}
@@ -239,7 +328,7 @@ func (s *Store) Touch(id, firstUserText string) error {
 		session.Title = titleFrom(firstUserText)
 	}
 	session.Updated = s.now().UnixMilli()
-	s.threads[id] = session
+	workspaceThreads[id] = session
 	s.mu.Unlock()
 
 	if !needsTitle {
@@ -247,7 +336,7 @@ func (s *Store) Touch(id, firstUserText string) error {
 	}
 	// Only a title change is worth a round trip; the updated time rides along
 	// with the next append.
-	if err := s.client.updateThread(context.Background(), id, session.Title); err != nil && !errors.Is(err, errNotFound) {
+	if err := s.client.updateThread(context.Background(), workspaceID, id, session.Title); err != nil && !errors.Is(err, errNotFound) {
 		return err
 	}
 	return nil
@@ -255,48 +344,105 @@ func (s *Store) Touch(id, firstUserText string) error {
 
 // Rename sets a stable display title.
 func (s *Store) Rename(id, titleText string) error {
+	return s.RenameWorkspaceThread(s.client.workspace, id, titleText)
+}
+
+// RenameWorkspaceThread sets a title within one workspace.
+func (s *Store) RenameWorkspaceThread(workspaceID, id, titleText string) error {
 	if id == "" {
 		return nil
 	}
+	workspaceID = s.client.resolveWorkspace(workspaceID)
+	unlock := s.lockThread(workspaceThreadRef{workspaceID: workspaceID, threadID: id})
+	defer unlock()
 	titleText = titleFrom(titleText)
 	if titleText == "" {
 		titleText = defaultTitle
 	}
-	if err := s.client.updateThread(context.Background(), id, titleText); err != nil {
+	if err := s.client.updateThread(context.Background(), workspaceID, id, titleText); err != nil {
 		return err
 	}
 	s.mu.Lock()
-	session := s.threads[id]
+	workspaceThreads := s.workspaceThreadsLocked(workspaceID)
+	session := workspaceThreads[id]
 	session.ID = id
 	session.Title = titleText
 	session.Updated = s.now().UnixMilli()
-	s.threads[id] = session
+	workspaceThreads[id] = session
 	s.mu.Unlock()
 	return nil
 }
 
 // Delete removes the thread and its transcript.
 func (s *Store) Delete(id string) error {
+	return s.DeleteWorkspaceThread(s.client.workspace, id)
+}
+
+// DeleteWorkspaceThread removes only the addressed workspace's thread.
+func (s *Store) DeleteWorkspaceThread(workspaceID, id string) error {
 	if id == "" {
 		return nil
 	}
-	if err := s.client.deleteThread(context.Background(), id); err != nil {
+	workspaceID = s.client.resolveWorkspace(workspaceID)
+	ref := workspaceThreadRef{workspaceID: workspaceID, threadID: id}
+	unlock := s.lockThread(ref)
+	defer unlock()
+	if err := s.client.deleteThread(context.Background(), workspaceID, id); err != nil {
 		return err
 	}
 	s.mu.Lock()
-	delete(s.threads, id)
-	delete(s.appended, id)
+	delete(s.threads[workspaceID], id)
+	delete(s.appended, ref)
 	s.mu.Unlock()
 	return nil
 }
 
-func (s *Store) cacheThread(t thread) {
-	if t.ID == "" {
-		return
+func (s *Store) ensureWorkspace(ctx context.Context, workspaceID string) error {
+	workspaceID = s.client.resolveWorkspace(workspaceID)
+	s.mu.Lock()
+	ensured := s.ensured[workspaceID]
+	s.mu.Unlock()
+	if ensured {
+		return nil
+	}
+	if err := s.client.ensureWorkspace(ctx, workspaceID); err != nil {
+		return err
 	}
 	s.mu.Lock()
-	s.threads[t.ID] = sessionFromThread(t)
+	s.ensured[workspaceID] = true
 	s.mu.Unlock()
+	return nil
+}
+
+func (s *Store) workspaceThreadsLocked(workspaceID string) map[string]threadindex.Session {
+	threads := s.threads[workspaceID]
+	if threads == nil {
+		threads = make(map[string]threadindex.Session)
+		s.threads[workspaceID] = threads
+	}
+	return threads
+}
+
+func (s *Store) lockThread(ref workspaceThreadRef) func() {
+	s.mu.Lock()
+	lane := s.lanes[ref]
+	if lane == nil {
+		lane = &workspaceThreadLane{}
+		s.lanes[ref] = lane
+	}
+	lane.users++
+	s.mu.Unlock()
+
+	lane.mu.Lock()
+	return func() {
+		lane.mu.Unlock()
+		s.mu.Lock()
+		lane.users--
+		if lane.users == 0 {
+			delete(s.lanes, ref)
+		}
+		s.mu.Unlock()
+	}
 }
 
 func sessionFromThread(t thread) threadindex.Session {

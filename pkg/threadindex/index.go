@@ -3,6 +3,7 @@
 package threadindex
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -41,6 +42,19 @@ type Store interface {
 	Touch(id, firstUserText string) error
 	Rename(id, titleText string) error
 	Delete(id string) error
+}
+
+// WorkspaceStore is the additive multi-workspace thread registry surface used
+// by hosts that serve more than one logical project from a single backend.
+// Legacy UI instances continue to use Store against their selected default.
+type WorkspaceStore interface {
+	Store
+	RefreshWorkspace(ctx context.Context, workspaceID string) error
+	ListWorkspace(workspaceID string) []Session
+	CreateWorkspaceThread(workspaceID string) (Session, error)
+	TouchWorkspaceThread(workspaceID, id, firstUserText string) error
+	RenameWorkspaceThread(workspaceID, id, titleText string) error
+	DeleteWorkspaceThread(workspaceID, id string) error
 }
 
 // Index is a JSON-file-backed registry of chat sessions.

@@ -138,6 +138,11 @@ agent-harness --tui   --aether 127.0.0.1:50051 --memorylayer http://127.0.0.1:61
 
 The workspace (`--memorylayer-workspace`, defaulting to the resolved logical
 workspace or `default`) is created on first use if MemoryLayer does not have it.
+The OSS MemoryLayer adapter also implements the additive workspace-aware history
+and thread-index interfaces: one process can address another visible workspace
+per operation, and identical thread IDs remain isolated by the composite
+workspace/thread key. The configured workspace remains the default for existing
+single-workspace callers.
 
 With MemoryLayer wired, each turn also gets the memories it has distilled from
 past conversations that are relevant to the current message (`--memory-recall`,

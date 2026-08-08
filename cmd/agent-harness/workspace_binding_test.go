@@ -67,6 +67,44 @@ func TestBoundLegacyBackendAcceptsExplicitBackendWorkspaceOverride(t *testing.T)
 	}
 }
 
+type recordingScopedHistory struct {
+	legacyHistoryStore
+	workspaceID string
+}
+
+func (s *recordingScopedHistory) LoadWorkspaceHistory(_ context.Context, workspaceID, _ string) ([]protocol.ChatMessage, error) {
+	s.workspaceID = workspaceID
+	return nil, nil
+}
+
+func (s *recordingScopedHistory) SaveWorkspaceHistory(_ context.Context, workspaceID, _ string, _ []protocol.ChatMessage) error {
+	s.workspaceID = workspaceID
+	return nil
+}
+
+func (s *recordingScopedHistory) DeleteWorkspaceHistory(_ context.Context, workspaceID, _ string) error {
+	s.workspaceID = workspaceID
+	return nil
+}
+
+func TestBoundScopedBackendMapsLogicalWorkspaceToOverride(t *testing.T) {
+	base := &recordingScopedHistory{}
+	bound := bindHistoryBackend(base, "project-a", "memorylayer-a")
+	scoped := bound.(harness.WorkspaceHistoryStore)
+	if _, err := scoped.LoadWorkspaceHistory(context.Background(), "project-a", "shared"); err != nil {
+		t.Fatal(err)
+	}
+	if base.workspaceID != "memorylayer-a" {
+		t.Fatalf("backend workspace = %q", base.workspaceID)
+	}
+	if err := scoped.SaveWorkspaceHistory(context.Background(), "project-b", "shared", nil); err != nil {
+		t.Fatal(err)
+	}
+	if base.workspaceID != "project-b" {
+		t.Fatalf("dynamic backend workspace = %q", base.workspaceID)
+	}
+}
+
 type recordingMemoryService struct{ workspaceID string }
 
 func (s *recordingMemoryService) Recall(_ context.Context, _ tools.MemoryAuthority, workspaceID, _ string, _ int) ([]tools.MemoryHit, error) {

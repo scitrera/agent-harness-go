@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
@@ -66,20 +67,25 @@ func (f *fakeServer) handle(w http.ResponseWriter, r *http.Request) {
 		// The real server MINTS the id and ignores one supplied by the client.
 		f.created++
 		id := fmt.Sprintf("thread_server_%d", f.created)
+		workspaceID, _ := body["workspace_id"].(string)
 		title, _ := body["title"].(string)
-		thread := map[string]any{"id": id, "title": title, "created_at": "2026-08-07T10:00:00Z", "updated_at": "2026-08-07T10:00:00Z"}
-		f.threads[id] = thread
+		thread := map[string]any{"id": id, "workspace_id": workspaceID, "title": title, "created_at": "2026-08-07T10:00:00Z", "updated_at": "2026-08-07T10:00:00Z"}
+		f.threads[fakeThreadKey(workspaceID, id)] = thread
 		_ = json.NewEncoder(w).Encode(map[string]any{"thread": thread})
 
 	case segments[0] == "threads" && len(segments) == 1 && r.Method == http.MethodGet:
 		list := make([]map[string]any, 0, len(f.threads))
+		workspaceID := r.URL.Query().Get("workspace_id")
 		for _, thread := range f.threads {
-			list = append(list, thread)
+			if thread["workspace_id"] == workspaceID {
+				list = append(list, thread)
+			}
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"threads": list})
 
 	case len(segments) == 2 && segments[0] == "threads" && r.Method == http.MethodPut:
-		thread, ok := f.threads[segments[1]]
+		key := fakeThreadKey(r.URL.Query().Get("workspace_id"), segments[1])
+		thread, ok := f.threads[key]
 		if !ok {
 			w.WriteHeader(http.StatusNotFound)
 			_ = json.NewEncoder(w).Encode(map[string]any{"detail": "Not Found"})
@@ -94,18 +100,20 @@ func (f *fakeServer) handle(w http.ResponseWriter, r *http.Request) {
 
 	case len(segments) == 2 && segments[0] == "threads" && r.Method == http.MethodDelete:
 		f.deletes++
-		delete(f.threads, segments[1])
-		delete(f.messages, segments[1])
+		key := fakeThreadKey(r.URL.Query().Get("workspace_id"), segments[1])
+		delete(f.threads, key)
+		delete(f.messages, key)
 		_ = json.NewEncoder(w).Encode(map[string]any{"deleted": true})
 
 	case len(segments) == 4 && segments[0] == "threads" && segments[2] == "messages" && r.Method == http.MethodDelete:
-		kept := f.messages[segments[1]][:0]
-		for _, m := range f.messages[segments[1]] {
+		key := fakeThreadKey(r.URL.Query().Get("workspace_id"), segments[1])
+		kept := f.messages[key][:0]
+		for _, m := range f.messages[key] {
 			if m["id"] != segments[3] {
 				kept = append(kept, m)
 			}
 		}
-		f.messages[segments[1]] = kept
+		f.messages[key] = kept
 		_ = json.NewEncoder(w).Encode(map[string]any{"deleted": true})
 
 	case len(segments) == 3 && segments[0] == "threads" && segments[2] == "messages" && r.Method == http.MethodPost:
@@ -117,31 +125,47 @@ func (f *fakeServer) handle(w http.ResponseWriter, r *http.Request) {
 			_ = json.NewEncoder(w).Encode(map[string]any{"detail": "Failed to append messages"})
 			return
 		}
+		workspaceID := r.URL.Query().Get("workspace_id")
+		key := fakeThreadKey(workspaceID, segments[1])
 		f.appends++
 		var body struct {
 			Messages []map[string]any `json:"messages"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		// Appending to an unknown thread id creates it server-side.
-		if _, ok := f.threads[segments[1]]; !ok {
-			f.threads[segments[1]] = map[string]any{
+		if _, ok := f.threads[key]; !ok {
+			f.threads[key] = map[string]any{
 				"id": segments[1], "title": segments[1],
-				"created_at": "2026-08-07T10:00:00Z", "updated_at": "2026-08-07T10:00:00Z",
+				"workspace_id": workspaceID,
+				"created_at":   "2026-08-07T10:00:00Z", "updated_at": "2026-08-07T10:00:00Z",
 			}
 		}
 		for i, m := range body.Messages {
-			m["id"] = fmt.Sprintf("msg_%s_%d", segments[1], len(f.messages[segments[1]])+i)
-			f.messages[segments[1]] = append(f.messages[segments[1]], m)
+			m["id"] = fmt.Sprintf("msg_%s_%d", segments[1], len(f.messages[key])+i)
+			f.messages[key] = append(f.messages[key], m)
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"messages": body.Messages})
 
 	case len(segments) == 3 && segments[0] == "threads" && segments[2] == "messages" && r.Method == http.MethodGet:
-		_ = json.NewEncoder(w).Encode(map[string]any{"messages": f.messages[segments[1]]})
+		key := fakeThreadKey(r.URL.Query().Get("workspace_id"), segments[1])
+		if _, ok := f.threads[key]; !ok {
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]any{"detail": "Not Found"})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"messages": f.messages[key]})
 
 	default:
 		w.WriteHeader(http.StatusNotFound)
 		_ = json.NewEncoder(w).Encode(map[string]any{"detail": "Not Found"})
 	}
+}
+
+func fakeThreadKey(workspaceID, threadID string) string {
+	if workspaceID == "default" {
+		return threadID
+	}
+	return workspaceID + "\x00" + threadID
 }
 
 func newTestStore(t *testing.T) (*Store, *fakeServer) {
@@ -196,6 +220,31 @@ func TestSaveHistoryAppendsOnlyNewMessages(t *testing.T) {
 	}
 }
 
+func TestConcurrentSaveDoesNotDuplicateOneTranscript(t *testing.T) {
+	store, fake := newTestStore(t)
+	messages := []protocol.ChatMessage{userMessage(t, "m1", "hello")}
+	const writers = 32
+	errors := make(chan error, writers)
+	var wait sync.WaitGroup
+	for i := 0; i < writers; i++ {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			errors <- store.SaveWorkspaceHistory(context.Background(), "default", "shared", messages)
+		}()
+	}
+	wait.Wait()
+	close(errors)
+	for err := range errors {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := len(fake.messages["shared"]); got != 1 {
+		t.Fatalf("stored %d duplicate messages", got)
+	}
+}
+
 // A round trip must preserve the message identity and content the UI renders.
 func TestLoadHistoryRoundTrip(t *testing.T) {
 	s, _ := newTestStore(t)
@@ -225,6 +274,84 @@ func TestLoadHistoryRoundTrip(t *testing.T) {
 			t.Fatalf("message %d text = %q, want %q", i, text.Text, wantText.Text)
 		}
 	}
+}
+
+func TestWorkspaceHistoryAndThreadCachesAreIsolated(t *testing.T) {
+	fake, server := newFakeServer(t)
+	store, err := New(Config{BaseURL: server.URL, Workspace: "project-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	messageA := userMessage(t, "same-message", "project A")
+	messageB := userMessage(t, "same-message", "project B")
+	if err := store.SaveWorkspaceHistory(ctx, "project-a", "shared", []protocol.ChatMessage{messageA}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveWorkspaceHistory(ctx, "project-b", "shared", []protocol.ChatMessage{messageB}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.messages[fakeThreadKey("project-a", "shared")]) != 1 || len(fake.messages[fakeThreadKey("project-b", "shared")]) != 1 {
+		t.Fatalf("workspace messages = %#v", fake.messages)
+	}
+
+	loadedA, err := store.LoadWorkspaceHistory(ctx, "project-a", "shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	loadedB, err := store.LoadWorkspaceHistory(ctx, "project-b", "shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if messageText(loadedA) != "project A" || messageText(loadedB) != "project B" {
+		t.Fatalf("loaded A=%q B=%q", messageText(loadedA), messageText(loadedB))
+	}
+
+	if err := store.RefreshWorkspace(ctx, "project-a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RefreshWorkspace(ctx, "project-b"); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.ListWorkspace("project-a"); len(got) != 1 || got[0].ID != "shared" {
+		t.Fatalf("project A threads = %#v", got)
+	}
+	if got := store.ListWorkspace("project-b"); len(got) != 1 || got[0].ID != "shared" {
+		t.Fatalf("project B threads = %#v", got)
+	}
+	if err := store.RenameWorkspaceThread("project-b", "shared", "project B title"); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.ListWorkspace("project-a"); len(got) != 1 || got[0].Title != "shared" {
+		t.Fatalf("project B rename changed project A cache: %#v", got)
+	}
+	if got := store.ListWorkspace("project-b"); len(got) != 1 || got[0].Title != "project B title" {
+		t.Fatalf("project B title = %#v", got)
+	}
+
+	if err := store.DeleteWorkspaceHistory(ctx, "project-b", "shared"); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.messages[fakeThreadKey("project-a", "shared")]) != 1 || len(fake.messages[fakeThreadKey("project-b", "shared")]) != 0 {
+		t.Fatalf("workspace clear crossed boundaries: %#v", fake.messages)
+	}
+	if err := store.DeleteWorkspaceThread("project-b", "shared"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := fake.threads[fakeThreadKey("project-a", "shared")]; !ok {
+		t.Fatal("deleting project B removed project A's same-ID thread")
+	}
+}
+
+func messageText(messages []protocol.ChatMessage) string {
+	if len(messages) != 1 || len(messages[0].Content) != 1 {
+		return ""
+	}
+	part, ok := messages[0].Content[0].AsText()
+	if !ok {
+		return ""
+	}
+	return part.Text
 }
 
 // Loading tells the store what the remote already holds, so a save after a load
@@ -349,7 +476,8 @@ func TestRefreshPicksUpRemoteThreads(t *testing.T) {
 	s, fake := newTestStore(t)
 	fake.threads["thread-remote"] = map[string]any{
 		"id": "thread-remote", "title": "made elsewhere",
-		"created_at": "2026-08-07T10:00:00Z", "updated_at": "2026-08-07T10:00:00Z",
+		"workspace_id": "default",
+		"created_at":   "2026-08-07T10:00:00Z", "updated_at": "2026-08-07T10:00:00Z",
 	}
 	if err := s.Refresh(context.Background()); err != nil {
 		t.Fatalf("Refresh: %v", err)
@@ -360,12 +488,9 @@ func TestRefreshPicksUpRemoteThreads(t *testing.T) {
 	}
 }
 
-// Writing to a workspace MemoryLayer does not have fails with an opaque 500
-// ("Failed to append messages" — really a foreign-key violation on the
-// auto-created thread). Startup must create the workspace, or every write fails
-// with no hint at the cause. MemoryLayer ships `_default`, not `default`, so a
-// stock configuration lands here.
-func TestRefreshCreatesMissingWorkspace(t *testing.T) {
+// A first write must lazily ensure its addressed workspace. Multi-workspace
+// hosts cannot pre-refresh every project they may receive after startup.
+func TestFirstWriteCreatesMissingWorkspace(t *testing.T) {
 	fake, srv := newFakeServer(t)
 	s, err := New(Config{BaseURL: srv.URL, Workspace: "brand-new"})
 	if err != nil {
@@ -373,21 +498,10 @@ func TestRefreshCreatesMissingWorkspace(t *testing.T) {
 	}
 	ctx := context.Background()
 
-	// Without the workspace, a write fails the way the real server fails.
-	if err := s.SaveHistory(ctx, "t1", []protocol.ChatMessage{userMessage(t, "m1", "hi")}); err == nil {
-		t.Fatal("expected the write to fail while the workspace is missing")
-	}
-	if fake.workspaces["brand-new"] {
-		t.Fatal("workspace should not exist yet")
-	}
-
-	if err := s.Refresh(ctx); err != nil {
-		t.Fatalf("Refresh: %v", err)
+	if err := s.SaveHistory(ctx, "t1", []protocol.ChatMessage{userMessage(t, "m1", "hi")}); err != nil {
+		t.Fatalf("first write: %v", err)
 	}
 	if !fake.workspaces["brand-new"] {
-		t.Fatal("Refresh did not create the missing workspace")
-	}
-	if err := s.SaveHistory(ctx, "t1", []protocol.ChatMessage{userMessage(t, "m1", "hi")}); err != nil {
-		t.Fatalf("write after Refresh: %v", err)
+		t.Fatal("first write did not create the missing workspace")
 	}
 }

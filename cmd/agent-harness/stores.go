@@ -78,7 +78,7 @@ func (s *boundHistoryStore) DeleteHistory(ctx context.Context, threadID string) 
 
 func (s *boundHistoryStore) LoadWorkspaceHistory(ctx context.Context, workspaceID, threadID string) ([]protocol.ChatMessage, error) {
 	if scoped, ok := s.base.(harness.WorkspaceHistoryStore); ok {
-		return scoped.LoadWorkspaceHistory(ctx, workspaceID, threadID)
+		return scoped.LoadWorkspaceHistory(ctx, s.backendWorkspace(workspaceID), threadID)
 	}
 	if !s.accepts(workspaceID) {
 		return nil, fmt.Errorf("history backend is bound to workspace %q, cannot load %q", s.workspaceID, workspaceID)
@@ -88,7 +88,7 @@ func (s *boundHistoryStore) LoadWorkspaceHistory(ctx context.Context, workspaceI
 
 func (s *boundHistoryStore) SaveWorkspaceHistory(ctx context.Context, workspaceID, threadID string, messages []protocol.ChatMessage) error {
 	if scoped, ok := s.base.(harness.WorkspaceHistoryStore); ok {
-		return scoped.SaveWorkspaceHistory(ctx, workspaceID, threadID, messages)
+		return scoped.SaveWorkspaceHistory(ctx, s.backendWorkspace(workspaceID), threadID, messages)
 	}
 	if !s.accepts(workspaceID) {
 		return fmt.Errorf("history backend is bound to workspace %q, cannot save %q", s.workspaceID, workspaceID)
@@ -98,7 +98,7 @@ func (s *boundHistoryStore) SaveWorkspaceHistory(ctx context.Context, workspaceI
 
 func (s *boundHistoryStore) DeleteWorkspaceHistory(ctx context.Context, workspaceID, threadID string) error {
 	if scoped, ok := s.base.(workspaceHistoryDeleter); ok {
-		return scoped.DeleteWorkspaceHistory(ctx, workspaceID, threadID)
+		return scoped.DeleteWorkspaceHistory(ctx, s.backendWorkspace(workspaceID), threadID)
 	}
 	if !s.accepts(workspaceID) {
 		return fmt.Errorf("history backend is bound to workspace %q, cannot delete %q", s.workspaceID, workspaceID)
@@ -108,6 +108,13 @@ func (s *boundHistoryStore) DeleteWorkspaceHistory(ctx context.Context, workspac
 
 func (s *boundHistoryStore) accepts(workspaceID string) bool {
 	return workspaceID == s.workspaceID || workspaceID == s.backendWorkspaceID
+}
+
+func (s *boundHistoryStore) backendWorkspace(workspaceID string) string {
+	if workspaceID == s.workspaceID {
+		return s.backendWorkspaceID
+	}
+	return workspaceID
 }
 
 type boundMemoryService struct {

@@ -140,10 +140,17 @@ func (c *client) do(ctx context.Context, method, path string, query url.Values, 
 	return nil
 }
 
-func (c *client) workspaceQuery() url.Values {
+func (c *client) resolveWorkspace(workspace string) string {
+	if workspace != "" {
+		return workspace
+	}
+	return c.workspace
+}
+
+func (c *client) workspaceQuery(workspace string) url.Values {
 	q := url.Values{}
-	if c.workspace != "" {
-		q.Set("workspace_id", c.workspace)
+	if workspace = c.resolveWorkspace(workspace); workspace != "" {
+		q.Set("workspace_id", workspace)
 	}
 	return q
 }
@@ -171,8 +178,8 @@ type messageListEnvelope struct {
 	Messages []map[string]any `json:"messages"`
 }
 
-// ensureWorkspace creates the configured workspace when the server does not
-// have it.
+// ensureWorkspace creates the addressed (or configured default) workspace when
+// the server does not have it.
 //
 // Servers from before memorylayer oss 0e01496 resolve the workspace to
 // auto-create from the request body only, never the query string — so a write
@@ -184,11 +191,12 @@ type messageListEnvelope struct {
 //
 // A fixed server makes this redundant but harmless; it stays so the harness
 // works against already-deployed ones.
-func (c *client) ensureWorkspace(ctx context.Context) error {
-	if c.workspace == "" {
+func (c *client) ensureWorkspace(ctx context.Context, workspace string) error {
+	workspace = c.resolveWorkspace(workspace)
+	if workspace == "" {
 		return nil
 	}
-	err := c.do(ctx, http.MethodGet, "/v1/workspaces/"+url.PathEscape(c.workspace), nil, nil, nil)
+	err := c.do(ctx, http.MethodGet, "/v1/workspaces/"+url.PathEscape(workspace), nil, nil, nil)
 	if err == nil {
 		return nil
 	}
@@ -196,11 +204,11 @@ func (c *client) ensureWorkspace(ctx context.Context) error {
 		return err
 	}
 	createErr := c.do(ctx, http.MethodPost, "/v1/workspaces", nil,
-		map[string]any{"id": c.workspace, "name": c.workspace}, nil)
+		map[string]any{"id": workspace, "name": workspace}, nil)
 	if createErr != nil {
 		// A concurrent process may have won the race; treat an existing
 		// workspace as success.
-		if verifyErr := c.do(ctx, http.MethodGet, "/v1/workspaces/"+url.PathEscape(c.workspace), nil, nil, nil); verifyErr == nil {
+		if verifyErr := c.do(ctx, http.MethodGet, "/v1/workspaces/"+url.PathEscape(workspace), nil, nil, nil); verifyErr == nil {
 			return nil
 		}
 		return createErr
@@ -211,23 +219,24 @@ func (c *client) ensureWorkspace(ctx context.Context) error {
 // createThread makes a new thread. The server mints the id and IGNORES one
 // supplied by the client, so the caller must adopt the returned id rather than
 // assume its own — passing one silently creates a thread under a different id.
-func (c *client) createThread(ctx context.Context, title string) (thread, error) {
+func (c *client) createThread(ctx context.Context, workspace, title string) (thread, error) {
+	workspace = c.resolveWorkspace(workspace)
 	body := map[string]any{"ownership": c.ownership}
-	if c.workspace != "" {
-		body["workspace_id"] = c.workspace
+	if workspace != "" {
+		body["workspace_id"] = workspace
 	}
 	if title != "" {
 		body["title"] = title
 	}
 	var out threadEnvelope
-	if err := c.do(ctx, http.MethodPost, "/v1/threads", c.workspaceQuery(), body, &out); err != nil {
+	if err := c.do(ctx, http.MethodPost, "/v1/threads", c.workspaceQuery(workspace), body, &out); err != nil {
 		return thread{}, err
 	}
 	return out.Thread, nil
 }
 
-func (c *client) listThreads(ctx context.Context, limit int) ([]thread, error) {
-	q := c.workspaceQuery()
+func (c *client) listThreads(ctx context.Context, workspace string, limit int) ([]thread, error) {
+	q := c.workspaceQuery(workspace)
 	q.Set("limit", strconv.Itoa(limit))
 	// No ownership filter: appending to an unknown thread id auto-creates the
 	// thread as user-owned regardless of what the append asks for, so filtering
@@ -239,35 +248,36 @@ func (c *client) listThreads(ctx context.Context, limit int) ([]thread, error) {
 	return out.Threads, nil
 }
 
-func (c *client) updateThread(ctx context.Context, id, title string) error {
-	return c.do(ctx, http.MethodPut, "/v1/threads/"+url.PathEscape(id), c.workspaceQuery(),
+func (c *client) updateThread(ctx context.Context, workspace, id, title string) error {
+	return c.do(ctx, http.MethodPut, "/v1/threads/"+url.PathEscape(id), c.workspaceQuery(workspace),
 		map[string]any{"title": title}, nil)
 }
 
-func (c *client) deleteThread(ctx context.Context, id string) error {
-	err := c.do(ctx, http.MethodDelete, "/v1/threads/"+url.PathEscape(id), c.workspaceQuery(), nil, nil)
+func (c *client) deleteThread(ctx context.Context, workspace, id string) error {
+	err := c.do(ctx, http.MethodDelete, "/v1/threads/"+url.PathEscape(id), c.workspaceQuery(workspace), nil, nil)
 	if err == errNotFound {
 		return nil
 	}
 	return err
 }
 
-func (c *client) appendMessages(ctx context.Context, threadID string, payloads []map[string]any) error {
+func (c *client) appendMessages(ctx context.Context, workspace, threadID string, payloads []map[string]any) error {
+	workspace = c.resolveWorkspace(workspace)
 	body := map[string]any{"messages": payloads, "ownership": c.ownership}
-	if c.workspace != "" {
-		body["workspace_id"] = c.workspace
+	if workspace != "" {
+		body["workspace_id"] = workspace
 	}
 	return c.do(ctx, http.MethodPost,
-		"/v1/threads/"+url.PathEscape(threadID)+"/messages", c.workspaceQuery(), body, nil)
+		"/v1/threads/"+url.PathEscape(threadID)+"/messages", c.workspaceQuery(workspace), body, nil)
 }
 
 // deleteMessage removes one message. Clearing a transcript goes message by
 // message because there is no bulk delete and dropping the thread would remove
 // it from the switcher.
-func (c *client) deleteMessage(ctx context.Context, threadID, messageID string) error {
+func (c *client) deleteMessage(ctx context.Context, workspace, threadID, messageID string) error {
 	err := c.do(ctx, http.MethodDelete,
 		"/v1/threads/"+url.PathEscape(threadID)+"/messages/"+url.PathEscape(messageID),
-		c.workspaceQuery(), nil, nil)
+		c.workspaceQuery(workspace), nil, nil)
 	if errors.Is(err, errNotFound) {
 		return nil
 	}
@@ -275,8 +285,8 @@ func (c *client) deleteMessage(ctx context.Context, threadID, messageID string) 
 }
 
 // messageIDs returns the server-side ids of a thread's messages.
-func (c *client) messageIDs(ctx context.Context, threadID string) ([]string, error) {
-	raw, err := c.getMessages(ctx, threadID)
+func (c *client) messageIDs(ctx context.Context, workspace, threadID string) ([]string, error) {
+	raw, err := c.getMessages(ctx, workspace, threadID)
 	if err != nil {
 		return nil, err
 	}
@@ -289,8 +299,8 @@ func (c *client) messageIDs(ctx context.Context, threadID string) ([]string, err
 	return ids, nil
 }
 
-func (c *client) getMessages(ctx context.Context, threadID string) ([]map[string]any, error) {
-	q := c.workspaceQuery()
+func (c *client) getMessages(ctx context.Context, workspace, threadID string) ([]map[string]any, error) {
+	q := c.workspaceQuery(workspace)
 	q.Set("limit", strconv.Itoa(c.window))
 	q.Set("order", "asc")
 	var out messageListEnvelope
