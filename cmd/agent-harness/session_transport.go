@@ -34,6 +34,7 @@ func newSessionWorkspaceResolver(defaultWorkspace string, visible []string) (*se
 func newSessionTransport(
 	stateDir string,
 	st stores,
+	eventLog sessionlog.EventStore,
 	workspaces sessionlog.WorkspaceResolver,
 	defaultWorkspace string,
 	multiWorkspace bool,
@@ -44,9 +45,12 @@ func newSessionTransport(
 	if err != nil {
 		return nil, fmt.Errorf("session history: %w", err)
 	}
-	eventLog, err := sessionlog.NewFileEventLog(sessionlog.FileEventLogConfig{StateDir: stateDir})
-	if err != nil {
-		return nil, fmt.Errorf("session events: %w", err)
+	if eventLog == nil {
+		var err error
+		eventLog, err = sessionlog.NewFileEventLog(sessionlog.FileEventLogConfig{StateDir: stateDir})
+		if err != nil {
+			return nil, fmt.Errorf("session events: %w", err)
+		}
 	}
 	state, err := sessionlog.NewLifecycleStateProvider(sessionlog.LifecycleStateProviderConfig{
 		Subagents: st.subagents,

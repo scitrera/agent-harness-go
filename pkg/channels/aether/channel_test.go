@@ -300,9 +300,9 @@ func TestControlCancelIsNotDeliveredAsATurn(t *testing.T) {
 func TestControlClearCarriesCompositeWorkspaceThreadAddress(t *testing.T) {
 	c, _ := newTestChannel(t)
 	want := protocol.MessageAddress{WorkspaceID: "project-a", ThreadID: "shared", TaskID: "task-1"}
-	var got protocol.MessageAddress
+	cleared := make(chan protocol.MessageAddress, 1)
 	c.SetThreadClearer(func(addr protocol.MessageAddress) error {
-		got = addr
+		cleared <- addr
 		return nil
 	})
 
@@ -310,8 +310,13 @@ func TestControlClearCarriesCompositeWorkspaceThreadAddress(t *testing.T) {
 	if err := c.onMessage(context.Background(), &sdk.Message{Payload: body}); err != nil {
 		t.Fatalf("onMessage: %v", err)
 	}
-	if got.WorkspaceID != want.WorkspaceID || got.ThreadID != want.ThreadID {
-		t.Fatalf("clear address = %+v, want %+v", got, want)
+	select {
+	case got := <-cleared:
+		if got.WorkspaceID != want.WorkspaceID || got.ThreadID != want.ThreadID {
+			t.Fatalf("clear address = %+v, want %+v", got, want)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("clear control was not applied")
 	}
 	select {
 	case in := <-c.tasks:
@@ -421,21 +426,33 @@ func sessionAttachPayload(t *testing.T, requestID string, request spec.SessionAt
 }
 
 func TestSessionAttachRepliesBeforeBufferedLiveEvents(t *testing.T) {
-	c, sent := newTestChannel(t)
+	c, _ := newTestChannel(t)
+	sent := make(chan sentMessage, 2)
+	c.sendMessage = func(topic string, payload []byte) error {
+		sent <- sentMessage{Topic: topic, Payload: payload}
+		return nil
+	}
 	service := &blockingSessionService{entered: make(chan struct{}), release: make(chan struct{})}
 	c.SetSessionService(service)
 	request := spec.NewSessionAttachRequest("thread-1", "client-1")
 	request.WorkspaceID = "project-a"
 	attachPayload := sessionAttachPayload(t, "attach-1", request)
 
-	done := make(chan struct{})
+	returned := make(chan error, 1)
 	go func() {
-		defer close(done)
-		_ = c.onMessage(context.Background(), &sdk.Message{
+		returned <- c.onMessage(context.Background(), &sdk.Message{
 			Payload:     attachPayload,
 			SourceTopic: "us::drew::w1",
 		})
 	}()
+	select {
+	case err := <-returned:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("session frame blocked the SDK receive callback")
+	}
 	<-service.entered
 	event := spec.SessionEvent{
 		ProtocolVersion: spec.SessionProtocolVersion,
@@ -450,16 +467,20 @@ func TestSessionAttachRepliesBeforeBufferedLiveEvents(t *testing.T) {
 		t.Fatal(err)
 	}
 	close(service.release)
-	<-done
-
-	if len(*sent) != 2 {
-		t.Fatalf("sent %d session frames, want result + event", len(*sent))
+	var frames []sentMessage
+	for len(frames) < 2 {
+		select {
+		case frame := <-sent:
+			frames = append(frames, frame)
+		case <-time.After(time.Second):
+			t.Fatalf("received %d session frames, want result + event", len(frames))
+		}
 	}
-	first, ok, err := aetherwire.ParseSessionFrame((*sent)[0].Payload)
+	first, ok, err := aetherwire.ParseSessionFrame(frames[0].Payload)
 	if err != nil || !ok || first.Type != spec.SessionFrameAttachResult {
 		t.Fatalf("first frame = %+v, %v, %v", first, ok, err)
 	}
-	second, ok, err := aetherwire.ParseSessionFrame((*sent)[1].Payload)
+	second, ok, err := aetherwire.ParseSessionFrame(frames[1].Payload)
 	if err != nil || !ok || second.Type != spec.SessionFrameEvent {
 		t.Fatalf("second frame = %+v, %v, %v", second, ok, err)
 	}

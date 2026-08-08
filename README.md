@@ -93,10 +93,10 @@ default, and unlisted explicit workspaces fail closed.
 ### Session attachment library
 
 `pkg/sessionlog` is the transport-independent OSS reference for resumable
-clients. It provides bounded in-memory and atomically persisted event logs keyed
-by `(workspace_id, session_id)`, generation-aware complete/partial/unavailable
-replay, an atomic attach capture, and a publisher wrapper that records the
-shared chat-stream vocabulary. Its
+clients. It provides bounded in-memory, atomically persisted file, and
+compare-and-swap event logs keyed by `(workspace_id, session_id)`,
+generation-aware complete/partial/unavailable replay, an atomic attach capture,
+and a publisher wrapper that records the shared chat-stream vocabulary. Its
 attach coordinator combines workspace-scoped durable history with any live
 stream projection so a client does not miss a finalized message during the
 short interval before transcript persistence.
@@ -109,10 +109,13 @@ web mode exposes the local integration at `POST /api/session/attach`. Its
 also pass `generation` and `sequence`. A detected reset or delivery gap closes
 the stream after a `session_reset` or `session_gap` marker so the client can
 attach again. Legacy single-workspace history storage is preserved on disk while
-the wire API resolves it as workspace `default`. Web and Aether worker modes
-persist their session cursor, retained event suffix, and live message projection
-below `<state-dir>/sessionlog/workspaces`; reconnect replay therefore survives a
-worker restart. Each state directory supports one writing process at a time.
+the wire API resolves it as workspace `default`. Web mode persists its session
+cursor, retained event suffix, and live message projection below
+`<state-dir>/sessionlog/workspaces`; each local state directory supports one
+writing process at a time. Aether worker and standalone modes instead keep the
+same bounded state in the agent's workspace-exclusive Aether KV namespace.
+Full-value compare-and-swap prevents two replicas from assigning the same cursor
+or overwriting one another while preserving the same `EventStore` behavior.
 
 Schema-revision-3 clients may additionally negotiate
 `session.state.subagents.v1` and `session.state.goals.v1`. The reference host
@@ -157,6 +160,12 @@ recipients. Worker and standalone modes expose that option as
 `--aether-task-message-lanes`; leave it disabled for task-less clients. Aether
 routing workspace and logical session workspace are kept separate, so a
 transport-specific `--aether-workspace` does not change project storage identity.
+The routing workspace plus agent implementation/specifier identify the Aether KV
+namespace; use a stable `--aether-specifier` for replay across worker restarts.
+The standalone mode's generated specifier intentionally makes its default KV
+state ephemeral to that run. Checkpoints remain reserved for task hibernation
+and hand-off snapshots; the active multi-writer event ledger uses KV because it
+requires atomic create and compare-and-swap.
 
 By default each client keeps a local copy of the conversation it witnessed, so a
 second client attaching mid-conversation sees only what arrives after it

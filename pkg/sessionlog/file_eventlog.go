@@ -95,7 +95,7 @@ func (l *FileEventLog) loadLocked(ref Ref) error {
 	if err := json.Unmarshal(data, &persisted); err != nil {
 		return fmt.Errorf("%w: decode %s: %v", ErrCorruptEventLog, l.eventPath(ref), err)
 	}
-	session, err := l.decodeState(ref, persisted)
+	session, err := decodeEventLogState(ref, persisted, l.memory.maxEvents)
 	if err != nil {
 		return fmt.Errorf("%w: validate %s: %v", ErrCorruptEventLog, l.eventPath(ref), err)
 	}
@@ -106,7 +106,7 @@ func (l *FileEventLog) loadLocked(ref Ref) error {
 	return nil
 }
 
-func (l *FileEventLog) decodeState(ref Ref, persisted fileEventLogState) (*memorySession, error) {
+func decodeEventLogState(ref Ref, persisted fileEventLogState, maxEvents int) (*memorySession, error) {
 	if persisted.SchemaVersion != fileEventLogSchemaVersion {
 		return nil, fmt.Errorf("unsupported schema version %d", persisted.SchemaVersion)
 	}
@@ -119,8 +119,8 @@ func (l *FileEventLog) decodeState(ref Ref, persisted fileEventLogState) (*memor
 	if persisted.Sequence > spec.SessionMaxSequence {
 		return nil, errors.New("sequence exceeds the JSON-safe maximum")
 	}
-	if len(persisted.Events) > l.memory.maxEvents {
-		return nil, fmt.Errorf("retained event count %d exceeds configured maximum %d", len(persisted.Events), l.memory.maxEvents)
+	if len(persisted.Events) > maxEvents {
+		return nil, fmt.Errorf("retained event count %d exceeds configured maximum %d", len(persisted.Events), maxEvents)
 	}
 	if uint64(len(persisted.Events)) > persisted.Sequence {
 		return nil, errors.New("retained event count exceeds sequence")
@@ -154,8 +154,8 @@ func (l *FileEventLog) decodeState(ref Ref, persisted fileEventLogState) (*memor
 			}
 		}
 	}
-	if len(persisted.Messages) > l.memory.maxEvents {
-		return nil, fmt.Errorf("projected message count %d exceeds configured maximum %d", len(persisted.Messages), l.memory.maxEvents)
+	if len(persisted.Messages) > maxEvents {
+		return nil, fmt.Errorf("projected message count %d exceeds configured maximum %d", len(persisted.Messages), maxEvents)
 	}
 	session := &memorySession{
 		generation: persisted.Generation,
@@ -187,12 +187,16 @@ func (l *FileEventLog) decodeState(ref Ref, persisted fileEventLogState) (*memor
 }
 
 func (l *FileEventLog) snapshotLocked(ref Ref) *memorySession {
-	l.memory.mu.Lock()
-	session := l.memory.sessions[ref]
+	return snapshotMemorySession(l.memory, ref)
+}
+
+func snapshotMemorySession(memory *MemoryEventLog, ref Ref) *memorySession {
+	memory.mu.Lock()
+	session := memory.sessions[ref]
 	if session != nil {
 		session.mu.Lock()
 	}
-	l.memory.mu.Unlock()
+	memory.mu.Unlock()
 	if session == nil {
 		return nil
 	}
@@ -229,6 +233,20 @@ func (l *FileEventLog) persistLocked(ref Ref) error {
 	if session == nil {
 		return errors.New("sessionlog: cannot persist an uninitialized session")
 	}
+	data, err := encodeEventLogState(ref, session)
+	if err != nil {
+		return err
+	}
+	if err := atomicfile.Write(l.eventPath(ref), data, 0o600); err != nil {
+		return fmt.Errorf("sessionlog: persist file event log: %w", err)
+	}
+	return nil
+}
+
+func encodeEventLogState(ref Ref, session *memorySession) ([]byte, error) {
+	if session == nil {
+		return nil, errors.New("sessionlog: cannot encode an uninitialized session")
+	}
 	persisted := fileEventLogState{
 		SchemaVersion: fileEventLogSchemaVersion,
 		WorkspaceID:   ref.WorkspaceID,
@@ -248,13 +266,10 @@ func (l *FileEventLog) persistLocked(ref Ref) error {
 	}
 	data, err := json.MarshalIndent(persisted, "", "  ")
 	if err != nil {
-		return fmt.Errorf("sessionlog: encode file event log: %w", err)
+		return nil, fmt.Errorf("sessionlog: encode event log state: %w", err)
 	}
 	data = append(data, '\n')
-	if err := atomicfile.Write(l.eventPath(ref), data, 0o600); err != nil {
-		return fmt.Errorf("sessionlog: persist file event log: %w", err)
-	}
-	return nil
+	return data, nil
 }
 
 func (l *FileEventLog) prepareLocked(ref Ref) (*memorySession, error) {

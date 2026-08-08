@@ -11,6 +11,7 @@ import (
 	aetherchan "github.com/scitrera/agent-harness-go/pkg/channels/aether"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 	"github.com/scitrera/agent-harness-go/pkg/runtime"
+	"github.com/scitrera/agent-harness-go/pkg/sessionlog"
 	"github.com/scitrera/agent-harness-go/pkg/turncancel"
 )
 
@@ -49,8 +50,16 @@ func runServe(cfg appConfig) error {
 	if err != nil {
 		return err
 	}
+	blobs, err := ch.SessionBlobStore(0)
+	if err != nil {
+		return err
+	}
+	eventLog, err := sessionlog.NewCASEventLog(sessionlog.CASEventLogConfig{Blobs: blobs})
+	if err != nil {
+		return err
+	}
 	sessionTransport, err := newSessionTransport(
-		cfg.stateDir, st, workspaceResolver, wireWorkspaceID,
+		cfg.stateDir, st, eventLog, workspaceResolver, wireWorkspaceID,
 		hasAdditionalVisibleWorkspace(wireWorkspaceID, cfg.visibleWorkspaces), ch, ch,
 	)
 	if err != nil {

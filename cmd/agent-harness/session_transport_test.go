@@ -35,7 +35,7 @@ func TestSessionTransportAdvertisesAndEnforcesVisibleWorkspaces(t *testing.T) {
 		t.Fatal(err)
 	}
 	stateDir := t.TempDir()
-	transport, err := newSessionTransport(stateDir, newTestSessionStores(t, stateDir), resolver, "project-a", true, nil, nil)
+	transport, err := newSessionTransport(stateDir, newTestSessionStores(t, stateDir), nil, resolver, "project-a", true, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +63,7 @@ func TestSessionTransportResumesAfterRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	firstStores := newTestSessionStores(t, stateDir)
-	firstTransport, err := newSessionTransport(stateDir, firstStores, resolver, "project-a", false, nil, nil)
+	firstTransport, err := newSessionTransport(stateDir, firstStores, nil, resolver, "project-a", false, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +97,7 @@ func TestSessionTransportResumesAfterRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	restartedTransport, err := newSessionTransport(stateDir, newTestSessionStores(t, stateDir), resolver, "project-a", false, nil, nil)
+	restartedTransport, err := newSessionTransport(stateDir, newTestSessionStores(t, stateDir), nil, resolver, "project-a", false, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -275,7 +275,10 @@ func (c *Channel) onMessage(ctx context.Context, msg *sdk.Message) error {
 		return nil
 	}
 	if frame, ok, frameErr := aetherwire.ParseSessionFrame(msg.Payload); ok {
-		c.handleSessionFrame(ctx, msg.SourceTopic, frame, frameErr)
+		// SDK message callbacks run on the receive loop. Attach may read Aether KV
+		// synchronously, so handling it inline would prevent that same loop from
+		// dispatching the correlated KV response and deadlock until timeout.
+		go c.handleSessionFrame(context.WithoutCancel(ctx), msg.SourceTopic, frame, frameErr)
 		return nil
 	}
 	chatMsg, ctrl, err := aetherwire.ParseInbound(msg.Payload)
@@ -344,10 +347,13 @@ func (c *Channel) applyControl(ctx context.Context, ctrl *aetherwire.InboundCont
 		if c.clearThread == nil || addr.ThreadID == "" {
 			return
 		}
-		if err := c.clearThread(addr); err != nil {
-			slog.WarnContext(ctx, "aether: clear thread history failed",
-				slog.String("workspace", addr.WorkspaceID), slog.String("thread", addr.ThreadID), slog.Any("err", err))
-		}
+		clearThread := c.clearThread
+		go func() {
+			if err := clearThread(addr); err != nil {
+				slog.WarnContext(ctx, "aether: clear thread history failed",
+					slog.String("workspace", addr.WorkspaceID), slog.String("thread", addr.ThreadID), slog.Any("err", err))
+			}
+		}()
 	case spec.ControlApprove, spec.ControlDeny:
 		if c.approvals == nil {
 			return
@@ -514,6 +520,8 @@ func (c *Channel) handleSessionFrame(ctx context.Context, topic string, frame sp
 	result, err := service.Attach(ctx, *request)
 	if err != nil {
 		c.removeSessionSubscriber(subscriber)
+		slog.WarnContext(ctx, "aether: session attach failed",
+			slog.String("workspace", workspaceID), slog.String("session", request.SessionID), slog.Any("err", err))
 		c.sendSessionError(topic, frame.RequestID, "attach_failed", "session attach failed", true)
 		return
 	}

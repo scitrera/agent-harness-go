@@ -31,7 +31,7 @@ func runWeb(cfg appConfig, addr string, openBrowser bool) error {
 		return err
 	}
 	sessionTransport, err := newSessionTransport(
-		cfg.stateDir, st, workspaceResolver, wireWorkspaceID,
+		cfg.stateDir, st, nil, workspaceResolver, wireWorkspaceID,
 		hasAdditionalVisibleWorkspace(wireWorkspaceID, cfg.visibleWorkspaces), wc, wc,
 	)
 	if err != nil {
