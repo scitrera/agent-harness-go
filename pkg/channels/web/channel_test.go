@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	spec "github.com/scitrera/ecosystem-messaging-spec/go"
+
 	"github.com/scitrera/agent-harness-go/pkg/channel"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 )
@@ -21,6 +23,34 @@ func TestChannelEnqueueFetchRoundTrip(t *testing.T) {
 	}
 	if got.Addr.ThreadID != "t1" || got.Addr.TaskID != "task-1" {
 		t.Fatalf("round-trip mismatch: %+v", got.Addr)
+	}
+}
+
+func TestPublishSessionEventFanOutBySession(t *testing.T) {
+	channel := NewChannel()
+	events, cancel := channel.SubscribeSession("session-1")
+	defer cancel()
+	other, cancelOther := channel.SubscribeSession("session-2")
+	defer cancelOther()
+	event := spec.SessionEvent{
+		SessionID: "session-1",
+		Cursor:    spec.SessionCursor{Generation: "generation-1", Sequence: 1},
+	}
+	if err := channel.PublishSessionEvent(context.Background(), event); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-events:
+		if got.SessionID != event.SessionID || got.Cursor.Sequence != 1 {
+			t.Fatalf("session event = %#v", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("session subscriber did not receive event")
+	}
+	select {
+	case got := <-other:
+		t.Fatalf("other session received event: %#v", got)
+	case <-time.After(50 * time.Millisecond):
 	}
 }
 

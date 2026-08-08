@@ -97,8 +97,16 @@ short interval before transcript persistence.
 
 The wire types, version, capabilities, and validation rules come from the
 ecosystem messaging spec rather than a Sahara-specific duplicate. The reference
-CLI does not expose a new attach transport yet; Aether and other channels can
-adapt this library without changing the protocol or local storage behavior.
+web mode exposes the local integration at `POST /api/session/attach`. Its
+`GET /api/session/stream?session_id=<id>&client_id=<id>` SSE endpoint first emits
+`session_attached`, then cursor-bearing `session_event` records; reconnectors can
+also pass `generation` and `sequence`. A detected reset or delivery gap closes
+the stream after a `session_reset` or `session_gap` marker so the client can
+attach again. Legacy single-workspace storage is preserved on disk while the
+wire API resolves it as workspace `default`.
+
+Aether and other channels can adapt the same library without changing the
+protocol or local storage behavior.
 
 ### Over Aether
 

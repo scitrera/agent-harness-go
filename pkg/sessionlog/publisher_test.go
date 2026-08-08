@@ -2,6 +2,8 @@ package sessionlog
 
 import (
 	"context"
+	"fmt"
+	"sync"
 	"testing"
 
 	spec "github.com/scitrera/ecosystem-messaging-spec/go"
@@ -14,9 +16,11 @@ func TestRecordingPublisherRecordsProjectionAndForwardsNormalizedEvents(t *testi
 	ctx := context.Background()
 	log := NewMemoryEventLog(MemoryEventLogConfig{NewGeneration: sequenceGenerations()})
 	downstream := &capturingPublisher{}
+	sessionEvents := &capturingSessionPublisher{}
 	publisher, err := NewRecordingPublisher(RecordingPublisherConfig{
 		Events:           log,
 		Next:             downstream,
+		SessionEvents:    sessionEvents,
 		DefaultWorkspace: "project-a",
 	})
 	if err != nil {
@@ -50,6 +54,14 @@ func TestRecordingPublisherRecordsProjectionAndForwardsNormalizedEvents(t *testi
 	}
 	if len(downstream.events) != len(events) {
 		t.Fatalf("forwarded %d events, want %d", len(downstream.events), len(events))
+	}
+	if len(sessionEvents.events) != len(events) {
+		t.Fatalf("published %d session events, want %d", len(sessionEvents.events), len(events))
+	}
+	for i, event := range sessionEvents.events {
+		if event.Cursor.Sequence != uint64(i+1) || event.WorkspaceID != ref.WorkspaceID || event.SessionID != ref.SessionID {
+			t.Fatalf("session event %d = %#v", i, event)
+		}
 	}
 	for i, event := range downstream.events {
 		if event.Addr.WorkspaceID != ref.WorkspaceID {
@@ -126,11 +138,78 @@ func TestRecordingPublisherRejectsMalformedAndConflictingEvents(t *testing.T) {
 	}
 }
 
+func TestRecordingPublisherKeepsConcurrentSessionNotificationsOrdered(t *testing.T) {
+	const count = 64
+	log := NewMemoryEventLog(MemoryEventLogConfig{MaxEvents: count, NewGeneration: sequenceGenerations()})
+	sink := &capturingSessionPublisher{}
+	publisher, err := NewRecordingPublisher(RecordingPublisherConfig{
+		Events:           log,
+		SessionEvents:    sink,
+		DefaultWorkspace: "project-a",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	errors := make(chan error, count)
+	var wait sync.WaitGroup
+	for i := 0; i < count; i++ {
+		wait.Add(1)
+		go func(i int) {
+			defer wait.Done()
+			message := spec.NewChatMessage(fmt.Sprintf("message-%d", i), spec.RoleAssistant)
+			errors <- publisher.PublishEvent(context.Background(), channel.Event{
+				Type:    channel.EventMessageFinal,
+				Addr:    protocol.MessageAddress{ThreadID: "session-1"},
+				Message: &message,
+			})
+		}(i)
+	}
+	wait.Wait()
+	close(errors)
+	for err := range errors {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	events := sink.snapshot()
+	if len(events) != count {
+		t.Fatalf("session notifications = %d, want %d", len(events), count)
+	}
+	for i, event := range events {
+		if event.Cursor.Sequence != uint64(i+1) {
+			t.Fatalf("notification %d sequence = %d", i, event.Cursor.Sequence)
+		}
+	}
+}
+
 type capturingPublisher struct {
+	mu     sync.Mutex
 	events []channel.Event
 }
 
+type capturingSessionPublisher struct {
+	mu     sync.Mutex
+	events []spec.SessionEvent
+}
+
+func (p *capturingSessionPublisher) PublishSessionEvent(_ context.Context, event spec.SessionEvent) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.events = append(p.events, event)
+	return nil
+}
+
+func (p *capturingSessionPublisher) snapshot() []spec.SessionEvent {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]spec.SessionEvent(nil), p.events...)
+}
+
 func (p *capturingPublisher) PublishEvent(_ context.Context, event channel.Event) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	p.events = append(p.events, event)
 	return nil
 }

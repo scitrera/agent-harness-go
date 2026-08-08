@@ -10,6 +10,8 @@ import (
 	"context"
 	"sync"
 
+	spec "github.com/scitrera/ecosystem-messaging-spec/go"
+
 	"github.com/scitrera/agent-harness-go/pkg/channel"
 )
 
@@ -29,18 +31,47 @@ type Channel struct {
 
 	mu   sync.RWMutex
 	subs map[string]map[*subscriber]struct{} // threadID -> set of listeners
+	// Session subscribers receive the cursor-bearing envelopes used by the
+	// resumable API. They are indexed by session ID; the HTTP handler filters the
+	// resolved workspace before writing to a client.
+	sessionSubs map[string]map[*sessionSubscriber]struct{}
 }
 
 type subscriber struct {
 	ch chan channel.Event
 }
 
+type sessionSubscriber struct {
+	ch chan spec.SessionEvent
+}
+
 // NewChannel returns a ready Channel.
 func NewChannel() *Channel {
 	return &Channel{
-		inbox: make(chan channel.Inbound, inboxBuffer),
-		subs:  make(map[string]map[*subscriber]struct{}),
+		inbox:       make(chan channel.Inbound, inboxBuffer),
+		subs:        make(map[string]map[*subscriber]struct{}),
+		sessionSubs: make(map[string]map[*sessionSubscriber]struct{}),
 	}
+}
+
+// PublishSessionEvent fans a retained cursor-bearing event out to resumable
+// stream subscribers. It deliberately mirrors PublishEvent's non-blocking slow
+// consumer policy.
+func (c *Channel) PublishSessionEvent(_ context.Context, event spec.SessionEvent) error {
+	c.mu.RLock()
+	set := c.sessionSubs[event.SessionID]
+	listeners := make([]*sessionSubscriber, 0, len(set))
+	for subscriber := range set {
+		listeners = append(listeners, subscriber)
+	}
+	c.mu.RUnlock()
+	for _, subscriber := range listeners {
+		select {
+		case subscriber.ch <- event:
+		default:
+		}
+	}
+	return nil
 }
 
 // Enqueue submits an inbound turn. It blocks only while the inbox buffer is full
@@ -115,6 +146,36 @@ func (c *Channel) Subscribe(threadID string) (<-chan channel.Event, func()) {
 		})
 	}
 	return s.ch, cancel
+}
+
+// SubscribeSession registers for cursor-bearing events for sessionID. Events
+// may span workspaces with the same session ID; consumers must filter the
+// resolved workspace before exposing them.
+func (c *Channel) SubscribeSession(sessionID string) (<-chan spec.SessionEvent, func()) {
+	subscriber := &sessionSubscriber{ch: make(chan spec.SessionEvent, subscriberBuffer)}
+	c.mu.Lock()
+	set := c.sessionSubs[sessionID]
+	if set == nil {
+		set = make(map[*sessionSubscriber]struct{})
+		c.sessionSubs[sessionID] = set
+	}
+	set[subscriber] = struct{}{}
+	c.mu.Unlock()
+
+	var once sync.Once
+	cancel := func() {
+		once.Do(func() {
+			c.mu.Lock()
+			if set := c.sessionSubs[sessionID]; set != nil {
+				delete(set, subscriber)
+				if len(set) == 0 {
+					delete(c.sessionSubs, sessionID)
+				}
+			}
+			c.mu.Unlock()
+		})
+	}
+	return subscriber.ch, cancel
 }
 
 var (

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 
 	spec "github.com/scitrera/ecosystem-messaging-spec/go"
 
@@ -16,7 +17,14 @@ import (
 type RecordingPublisherConfig struct {
 	Events           EventStore
 	Next             channel.Publisher
+	SessionEvents    SessionEventPublisher
 	DefaultWorkspace string
+}
+
+// SessionEventPublisher receives the cursor-bearing envelope after it has been
+// retained. A channel can use this to provide gap-free live session streams.
+type SessionEventPublisher interface {
+	PublishSessionEvent(ctx context.Context, event spec.SessionEvent) error
 }
 
 // RecordingPublisher records every shared chat-stream event before forwarding
@@ -25,7 +33,16 @@ type RecordingPublisherConfig struct {
 type RecordingPublisher struct {
 	events           EventStore
 	next             channel.Publisher
+	sessionEvents    SessionEventPublisher
 	defaultWorkspace string
+
+	lanesMu sync.Mutex
+	lanes   map[Ref]*publisherLane
+}
+
+type publisherLane struct {
+	mu    sync.Mutex
+	users int
 }
 
 func NewRecordingPublisher(config RecordingPublisherConfig) (*RecordingPublisher, error) {
@@ -35,7 +52,9 @@ func NewRecordingPublisher(config RecordingPublisherConfig) (*RecordingPublisher
 	return &RecordingPublisher{
 		events:           config.Events,
 		next:             config.Next,
+		sessionEvents:    config.SessionEvents,
 		defaultWorkspace: config.DefaultWorkspace,
+		lanes:            make(map[Ref]*publisherLane),
 	}, nil
 }
 
@@ -68,18 +87,51 @@ func (p *RecordingPublisher) PublishEvent(ctx context.Context, event channel.Eve
 		if err := validateStreamEvent(streamEvent); err != nil {
 			return err
 		}
+		ref := Ref{WorkspaceID: workspaceID, SessionID: event.Addr.ThreadID}
+		unlock := p.lockRef(ref)
+		defer unlock()
 		payload, err := json.Marshal(streamEvent)
 		if err != nil {
 			return fmt.Errorf("sessionlog: encode stream event: %w", err)
 		}
-		if _, err := p.events.Append(ctx, Ref{WorkspaceID: workspaceID, SessionID: event.Addr.ThreadID}, spec.SessionEventChatStream, payload); err != nil {
+		recorded, err := p.events.Append(ctx, ref, spec.SessionEventChatStream, payload)
+		if err != nil {
 			return err
+		}
+		if p.sessionEvents != nil {
+			if err := p.sessionEvents.PublishSessionEvent(ctx, recorded); err != nil {
+				return fmt.Errorf("sessionlog: publish recorded session event: %w", err)
+			}
 		}
 	}
 	if p.next != nil {
 		return p.next.PublishEvent(ctx, event)
 	}
 	return nil
+}
+
+// lockRef preserves append/notification/forward order for concurrent
+// publishers targeting one session without serializing unrelated workspaces.
+func (p *RecordingPublisher) lockRef(ref Ref) func() {
+	p.lanesMu.Lock()
+	lane := p.lanes[ref]
+	if lane == nil {
+		lane = &publisherLane{}
+		p.lanes[ref] = lane
+	}
+	lane.users++
+	p.lanesMu.Unlock()
+
+	lane.mu.Lock()
+	return func() {
+		lane.mu.Unlock()
+		p.lanesMu.Lock()
+		lane.users--
+		if lane.users == 0 {
+			delete(p.lanes, ref)
+		}
+		p.lanesMu.Unlock()
+	}
 }
 
 func isChatStreamType(eventType channel.EventType) bool {

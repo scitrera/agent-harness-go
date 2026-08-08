@@ -6,8 +6,11 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
+
+	spec "github.com/scitrera/ecosystem-messaging-spec/go"
 
 	"github.com/scitrera/agent-harness-go/pkg/channel"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
@@ -31,6 +34,7 @@ type Server struct {
 	store     HistoryStore
 	sessions  *Index
 	canceller *turncancel.Canceller
+	session   SessionService
 	mux       *http.ServeMux
 }
 
@@ -40,10 +44,23 @@ type HistoryStore interface {
 	DeleteHistory(ctx context.Context, threadID string) error
 }
 
+// SessionService is the spec-native attach/reset surface supplied by the host.
+// It stays optional so embedders using only the legacy REST/SSE API are
+// unaffected.
+type SessionService interface {
+	Attach(ctx context.Context, request spec.SessionAttachRequest) (spec.SessionAttachResult, error)
+	ResetSession(ctx context.Context, requestedWorkspace, sessionID string) (spec.SessionCursor, error)
+}
+
 // New builds the HTTP server. canceller may be nil (the /api/cancel endpoint
 // then reports nothing cancelled).
 func New(ch *Channel, fs HistoryStore, sessions *Index, canceller *turncancel.Canceller) *Server {
-	s := &Server{ch: ch, store: fs, sessions: sessions, canceller: canceller, mux: http.NewServeMux()}
+	return NewWithSessionService(ch, fs, sessions, canceller, nil)
+}
+
+// NewWithSessionService builds the server with the resumable session API.
+func NewWithSessionService(ch *Channel, fs HistoryStore, sessions *Index, canceller *turncancel.Canceller, session SessionService) *Server {
+	s := &Server{ch: ch, store: fs, sessions: sessions, canceller: canceller, session: session, mux: http.NewServeMux()}
 	s.routes()
 	return s
 }
@@ -61,6 +78,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/sessions/{id}/history", s.handleHistory)
 	s.mux.HandleFunc("POST /api/chat", guardCSRF(s.handleChat))
 	s.mux.HandleFunc("GET /api/stream", s.handleStream)
+	s.mux.HandleFunc("POST /api/session/attach", guardCSRF(s.handleSessionAttach))
+	s.mux.HandleFunc("GET /api/session/stream", s.handleSessionStream)
 	s.mux.HandleFunc("POST /api/cancel", guardCSRF(s.handleCancel))
 	s.mux.HandleFunc("/", s.handleSPA)
 }
@@ -109,6 +128,12 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	if s.session != nil {
+		if _, err := s.session.ResetSession(r.Context(), "", id); err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+	}
 	if err := s.sessions.Delete(id); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -118,6 +143,150 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleSessionAttach(w http.ResponseWriter, r *http.Request) {
+	if s.session == nil {
+		writeError(w, http.StatusNotImplemented, fmt.Errorf("resumable sessions are not configured"))
+		return
+	}
+	var request spec.SessionAttachRequest
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := request.Validate(); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	result, err := s.session.Attach(r.Context(), request)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) handleSessionStream(w http.ResponseWriter, r *http.Request) {
+	if s.session == nil {
+		writeError(w, http.StatusNotImplemented, fmt.Errorf("resumable sessions are not configured"))
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, fmt.Errorf("streaming unsupported"))
+		return
+	}
+	request, err := sessionAttachRequestFromQuery(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+
+	// Subscribe first. An event appended before Attach's atomic capture will be
+	// present in its snapshot/replay and skipped from this queue; an event
+	// appended afterward has a greater cursor and is delivered live.
+	events, cancel := s.ch.SubscribeSession(request.SessionID)
+	defer cancel()
+	result, err := s.session.Attach(r.Context(), request)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	if err := writeSSE(w, "session_attached", result); err != nil {
+		return
+	}
+	flusher.Flush()
+
+	boundary := result.Snapshot.Cursor
+	ping := time.NewTicker(keepaliveInterval)
+	defer ping.Stop()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case event := <-events:
+			if event.WorkspaceID != result.WorkspaceID || event.SessionID != result.SessionID {
+				continue
+			}
+			if event.Cursor.Generation != boundary.Generation {
+				_ = writeSSE(w, "session_reset", event.Cursor)
+				flusher.Flush()
+				return
+			}
+			if event.Cursor.Sequence <= boundary.Sequence {
+				continue
+			}
+			if event.Cursor.Sequence != boundary.Sequence+1 {
+				_ = writeSSE(w, "session_gap", event.Cursor)
+				flusher.Flush()
+				return
+			}
+			if err := writeSSE(w, "session_event", event); err != nil {
+				return
+			}
+			flusher.Flush()
+			boundary = event.Cursor
+		case <-ping.C:
+			_, _ = fmt.Fprint(w, ": ping\n\n")
+			flusher.Flush()
+		}
+	}
+}
+
+func sessionAttachRequestFromQuery(r *http.Request) (spec.SessionAttachRequest, error) {
+	query := r.URL.Query()
+	request := spec.NewSessionAttachRequest(query.Get("session_id"), query.Get("client_id"))
+	request.WorkspaceID = query.Get("workspace_id")
+	if value := query.Get("protocol_version"); value != "" {
+		parsed, err := strconv.ParseUint(value, 10, 32)
+		if err != nil {
+			return spec.SessionAttachRequest{}, fmt.Errorf("invalid protocol_version: %w", err)
+		}
+		request.ProtocolVersion = uint32(parsed)
+	}
+	if value := query.Get("schema_revision"); value != "" {
+		parsed, err := strconv.ParseUint(value, 10, 32)
+		if err != nil {
+			return spec.SessionAttachRequest{}, fmt.Errorf("invalid schema_revision: %w", err)
+		}
+		request.SchemaRevision = uint32(parsed)
+	}
+	if capabilities, present := query["capability"]; present {
+		request.Capabilities = make([]spec.SessionCapability, len(capabilities))
+		for i, capability := range capabilities {
+			request.Capabilities[i] = spec.SessionCapability(capability)
+		}
+	}
+	generation, sequence := query.Get("generation"), query.Get("sequence")
+	if generation != "" || sequence != "" {
+		if generation == "" || sequence == "" {
+			return spec.SessionAttachRequest{}, fmt.Errorf("generation and sequence must be provided together")
+		}
+		parsed, err := strconv.ParseUint(sequence, 10, 64)
+		if err != nil {
+			return spec.SessionAttachRequest{}, fmt.Errorf("invalid sequence: %w", err)
+		}
+		request.ResumeAfter = &spec.SessionCursor{Generation: generation, Sequence: parsed}
+	}
+	if err := request.Validate(); err != nil {
+		return spec.SessionAttachRequest{}, err
+	}
+	return request, nil
+}
+
+func writeSSE(w http.ResponseWriter, event string, value any) error {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, data)
+	return err
 }
 
 type renameSessionRequest struct {

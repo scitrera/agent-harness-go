@@ -138,7 +138,10 @@ func (c *Coordinator) Attach(ctx context.Context, request spec.SessionAttachRequ
 	if err != nil {
 		return spec.SessionAttachResult{}, fmt.Errorf("sessionlog: capture event boundary: %w", err)
 	}
-	messages = mergeSnapshotMessages(messages, capture.Messages)
+	messages, err = normalizeSnapshotMessages(ref, mergeSnapshotMessages(messages, capture.Messages))
+	if err != nil {
+		return spec.SessionAttachResult{}, err
+	}
 	state := map[string]json.RawMessage{}
 	if c.state != nil {
 		state, err = c.state.SnapshotState(ctx, workspaceID, request.SessionID, capture.Cursor, messages)
@@ -175,6 +178,25 @@ func (c *Coordinator) Attach(ctx context.Context, request spec.SessionAttachRequ
 	return result, nil
 }
 
+// ResetSession begins a new event generation for a resolved workspace session.
+// Transcript deletion remains the host's responsibility so it can preserve its
+// own ordering and error policy.
+func (c *Coordinator) ResetSession(ctx context.Context, requestedWorkspace, sessionID string) (spec.SessionCursor, error) {
+	workspaceID, err := c.workspaces.ResolveWorkspace(ctx, requestedWorkspace)
+	if err != nil {
+		return spec.SessionCursor{}, err
+	}
+	ref := Ref{WorkspaceID: workspaceID, SessionID: sessionID}
+	if err := ref.validate(); err != nil {
+		return spec.SessionCursor{}, err
+	}
+	cursor, err := c.events.Reset(ctx, ref)
+	if err != nil {
+		return spec.SessionCursor{}, fmt.Errorf("sessionlog: reset session: %w", err)
+	}
+	return cursor, nil
+}
+
 // mergeSnapshotMessages adds messages from the deterministic live stream
 // projection when durable history does not contain them yet. Durable messages
 // win because persistence may add metadata after message_finalized is emitted.
@@ -196,6 +218,22 @@ func mergeSnapshotMessages(history, projected []protocol.ChatMessage) []protocol
 		out = append(out, message.Clone())
 	}
 	return out
+}
+
+func normalizeSnapshotMessages(ref Ref, messages []protocol.ChatMessage) ([]protocol.ChatMessage, error) {
+	out := cloneMessages(messages)
+	for i := range out {
+		address := &out[i].Addr
+		if address.WorkspaceID != "" && address.WorkspaceID != ref.WorkspaceID {
+			return nil, fmt.Errorf("sessionlog: snapshot message %q belongs to workspace %q, not %q", out[i].ID, address.WorkspaceID, ref.WorkspaceID)
+		}
+		if address.ThreadID != "" && address.ThreadID != ref.SessionID {
+			return nil, fmt.Errorf("sessionlog: snapshot message %q belongs to session %q, not %q", out[i].ID, address.ThreadID, ref.SessionID)
+		}
+		address.WorkspaceID = ref.WorkspaceID
+		address.ThreadID = ref.SessionID
+	}
+	return out, nil
 }
 
 func loadHistory(ctx context.Context, history WorkspaceHistoryStore, ref Ref) ([]protocol.ChatMessage, error) {
