@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	spec "github.com/scitrera/ecosystem-messaging-spec/go"
+
 	"github.com/scitrera/agent-harness-go/pkg/authhandoff"
 	"github.com/scitrera/agent-harness-go/pkg/channel"
 	"github.com/scitrera/agent-harness-go/pkg/contextpack"
@@ -124,6 +126,40 @@ func Test_Runner_StartBackground_pushes_completion_notice_to_parent(t *testing.T
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("no completion notice was pushed")
+	}
+}
+
+func Test_Runner_StartBackground_usesDurableTaskLifecycle(t *testing.T) {
+	enq := newCaptureEnqueuer()
+	tasks := &captureSubagentTasks{}
+	observer := &captureSubagentLifecycle{}
+	runner, err := NewRunner(Config{
+		Store: &fakeStore{}, Loader: fakeLoader{}, Provider: &fakeProvider{},
+		Assembler: contextpack.NewAssembler(contextpack.Config{MaxHistoryMessages: 8}),
+		Notifier:  enq, SubagentTasks: tasks, SubagentObserver: observer, SubagentDefaultWorkspace: "project-a",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	threadID, err := runner.StartBackground(context.Background(), subagent.Request{
+		Task: "background review", InvocationID: "tool-call-bg",
+		Parent: protocol.MessageAddress{WorkspaceID: "project-a", ThreadID: "parent-1", TaskID: "parent-task"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-enq.done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("no task-backed background completion notice")
+	}
+	calls, admission, _ := tasks.snapshot()
+	if strings.Join(calls, ",") != "admit,start,finish:completed" || !admission.Background || admission.ChildSessionID != threadID {
+		t.Fatalf("calls=%#v admission=%+v", calls, admission)
+	}
+	events := observer.snapshot()
+	if len(events) != 3 || events[0].Record.TaskID != "aether-child-task" || events[2].Record.Status != spec.SessionSubagentCompleted {
+		t.Fatalf("lifecycle events = %#v", events)
 	}
 }
 

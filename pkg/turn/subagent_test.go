@@ -27,6 +27,48 @@ type captureSubagentLifecycle struct {
 	err    error
 }
 
+type captureSubagentTasks struct {
+	mu         sync.Mutex
+	calls      []string
+	admission  subagent.TaskAdmission
+	startErr   error
+	finishErr  error
+	finishRuns int
+}
+
+func (t *captureSubagentTasks) Admit(_ context.Context, admission subagent.TaskAdmission) (string, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.calls = append(t.calls, "admit")
+	t.admission = admission
+	return "aether-child-task", nil
+}
+
+func (t *captureSubagentTasks) Start(context.Context, string) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.calls = append(t.calls, "start")
+	return t.startErr
+}
+
+func (t *captureSubagentTasks) Finish(_ context.Context, _ string, outcome subagent.TaskOutcome, _ string) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.calls = append(t.calls, "finish:"+string(outcome))
+	t.finishRuns++
+	return t.finishErr
+}
+
+func (t *captureSubagentTasks) Recover(context.Context, string) (subagent.TaskRecovery, error) {
+	return subagent.TaskRecoveryInterrupted, nil
+}
+
+func (t *captureSubagentTasks) snapshot() ([]string, subagent.TaskAdmission, int) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return append([]string(nil), t.calls...), t.admission, t.finishRuns
+}
+
 func (o *captureSubagentLifecycle) ObserveSubagent(_ context.Context, event subagent.LifecycleEvent) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -101,6 +143,109 @@ func Test_Runner_RunSubagent_observesDurableLifecycle(t *testing.T) {
 	}
 	if events[2].Record.CompletedAt == "" || events[2].Record.Name != "reviewer" || events[2].Record.Kind != "review" || events[2].Record.Model != "local-model" {
 		t.Fatalf("terminal lifecycle record = %#v", events[2].Record)
+	}
+}
+
+func Test_Runner_RunSubagent_usesTaskAuthorityBeforeLifecycleProjection(t *testing.T) {
+	observer := &captureSubagentLifecycle{}
+	tasks := &captureSubagentTasks{}
+	publisher := &fakePublisher{}
+	runner, err := NewRunner(Config{
+		Store: &fakeStore{}, Loader: fakeLoader{}, Provider: &fakeProvider{}, Publisher: publisher,
+		Assembler:        contextpack.NewAssembler(contextpack.Config{MaxHistoryMessages: 8}),
+		SubagentObserver: observer, SubagentDefaultWorkspace: "project-a", SubagentTasks: tasks,
+		StreamSubagents: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := runner.RunSubagent(context.Background(), subagent.Request{
+		Task: "review", Depth: 2, InvocationID: "tool-call-7", ParentMessageID: "message-3",
+		Parent:    protocol.MessageAddress{WorkspaceID: "project-a", ThreadID: "parent-1", TaskID: "parent-task"},
+		AgentName: "reviewer", AgentType: "review", GrantID: "grant-1", SubjectType: "user", SubjectID: "alice",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls, admission, finishRuns := tasks.snapshot()
+	if strings.Join(calls, ",") != "admit,start,finish:completed" || finishRuns != 1 {
+		t.Fatalf("task calls = %#v", calls)
+	}
+	if admission.ChildSessionID != result.ThreadID || admission.ParentTaskID != "parent-task" || admission.InvocationID != "tool-call-7" || admission.ParentMessageID != "message-3" {
+		t.Fatalf("task admission = %+v", admission)
+	}
+	events := observer.snapshot()
+	if len(events) != 3 {
+		t.Fatalf("lifecycle events = %#v", events)
+	}
+	for i, status := range []spec.SessionSubagentStatus{spec.SessionSubagentAdmitted, spec.SessionSubagentRunning, spec.SessionSubagentCompleted} {
+		if events[i].Record.TaskID != "aether-child-task" || events[i].Record.Status != status {
+			t.Fatalf("event %d = %#v", i, events[i])
+		}
+	}
+	for _, event := range publisher.events {
+		if event.Addr.TaskID != "aether-child-task" || event.Addr.ThreadID != result.ThreadID {
+			t.Fatalf("child stream address = %+v", event.Addr)
+		}
+	}
+}
+
+func Test_Runner_RunSubagent_projectsInterruptedWhenTaskFinishIsUncertain(t *testing.T) {
+	observer := &captureSubagentLifecycle{}
+	tasks := &captureSubagentTasks{finishErr: errors.New("task state unavailable")}
+	runner, err := NewRunner(Config{
+		Store: &fakeStore{}, Loader: fakeLoader{}, Provider: &fakeProvider{},
+		Assembler:        contextpack.NewAssembler(contextpack.Config{MaxHistoryMessages: 8}),
+		SubagentObserver: observer, SubagentDefaultWorkspace: "project-a", SubagentTasks: tasks,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = runner.RunSubagent(context.Background(), subagent.Request{
+		Task: "review", Parent: protocol.MessageAddress{WorkspaceID: "project-a", ThreadID: "parent-1"},
+	})
+	if !errors.Is(err, subagent.ErrTaskOutcomeUncertain) {
+		t.Fatalf("error = %v, want ErrTaskOutcomeUncertain", err)
+	}
+	_, _, finishRuns := tasks.snapshot()
+	if finishRuns != 1 {
+		t.Fatalf("terminal mutation calls = %d, want 1", finishRuns)
+	}
+	events := observer.snapshot()
+	terminal := events[len(events)-1].Record
+	if terminal.Status != spec.SessionSubagentInterrupted || terminal.CompletedAt == "" || terminal.TaskID != "aether-child-task" {
+		t.Fatalf("terminal lifecycle = %#v", terminal)
+	}
+}
+
+func Test_Runner_RunSubagent_neverExecutesAfterTaskStartFailure(t *testing.T) {
+	observer := &captureSubagentLifecycle{}
+	tasks := &captureSubagentTasks{startErr: errors.New("claim rejected")}
+	provider := &scriptedProvider{}
+	runner, err := NewRunner(Config{
+		Store: &fakeStore{}, Loader: fakeLoader{}, Provider: provider,
+		Assembler:        contextpack.NewAssembler(contextpack.Config{MaxHistoryMessages: 8}),
+		SubagentObserver: observer, SubagentDefaultWorkspace: "project-a", SubagentTasks: tasks,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = runner.RunSubagent(context.Background(), subagent.Request{
+		Task: "review", Parent: protocol.MessageAddress{WorkspaceID: "project-a", ThreadID: "parent-1"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "task start") {
+		t.Fatalf("error = %v", err)
+	}
+	if len(provider.requests) != 0 {
+		t.Fatalf("provider ran after failed claim: %d requests", len(provider.requests))
+	}
+	calls, _, _ := tasks.snapshot()
+	if strings.Join(calls, ",") != "admit,start,finish:cancelled" {
+		t.Fatalf("task calls = %#v", calls)
+	}
+	events := observer.snapshot()
+	if len(events) != 2 || events[0].Record.Status != spec.SessionSubagentAdmitted || events[1].Record.Status != spec.SessionSubagentCancelled {
+		t.Fatalf("lifecycle events = %#v", events)
 	}
 }
 

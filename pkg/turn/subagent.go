@@ -51,13 +51,126 @@ func (r *Runner) RunSubagent(ctx context.Context, req subagent.Request) (_ subag
 	ctx, span := telemetry.StartSubagent(ctx, req.Depth)
 	defer telemetry.Finish(span, &err)
 	childThreadID, resume := r.resolveSubagentThread(ctx, req)
-	admittedAt := r.subagentLifecycleNow()
-	r.observeSubagent(ctx, req, childThreadID, spec.SessionSubagentAdmitted, admittedAt, admittedAt, "", nil)
+	execution, err := r.admitSubagent(ctx, req, childThreadID, false)
+	if err != nil {
+		return subagent.Result{}, err
+	}
+	if err := r.startSubagent(ctx, execution); err != nil {
+		return subagent.Result{}, err
+	}
 	var publisher channel.Publisher
 	if r.streamSubagents {
 		publisher = r.publisher
 	}
-	return r.runSubagentOn(ctx, req, childThreadID, resume, publisher, admittedAt)
+	result, runErr := r.runSubagentOn(ctx, req, childThreadID, resume, publisher, &execution)
+	return result, r.finishSubagent(ctx, execution, runErr)
+}
+
+type subagentExecution struct {
+	req           subagent.Request
+	childThreadID string
+	taskID        string
+	admittedAt    time.Time
+	model         string
+	childUsage    map[string]json.RawMessage
+}
+
+// admitSubagent creates the durable execution task before projecting admission.
+// A backend failure is fail-closed: no model or tool work starts without the
+// execution authority accepting the child. Local mode has no task backend and
+// retains the historical observer-only behavior.
+func (r *Runner) admitSubagent(ctx context.Context, req subagent.Request, childThreadID string, background bool) (subagentExecution, error) {
+	execution := subagentExecution{
+		req:           req,
+		childThreadID: childThreadID,
+		admittedAt:    r.subagentLifecycleNow(),
+		model:         req.Model,
+	}
+	if r.subagentTasks != nil {
+		workspaceID := r.subagentWorkspace(req)
+		taskID, err := r.subagentTasks.Admit(ctx, subagent.TaskAdmission{
+			WorkspaceID:     workspaceID,
+			ParentSessionID: req.Parent.ThreadID,
+			ChildSessionID:  childThreadID,
+			ParentTaskID:    req.Parent.TaskID,
+			ParentMessageID: req.ParentMessageID,
+			InvocationID:    req.InvocationID,
+			Name:            subagentDisplayName(req),
+			Kind:            string(req.AgentType),
+			Model:           req.Model,
+			Depth:           req.Depth,
+			Background:      background,
+			GrantID:         req.GrantID,
+			SubjectType:     req.SubjectType,
+			SubjectID:       req.SubjectID,
+		})
+		if err != nil {
+			return subagentExecution{}, fmt.Errorf("subagent task admission: %w", err)
+		}
+		if strings.TrimSpace(taskID) == "" {
+			return subagentExecution{}, errors.New("subagent task admission: backend returned an empty task id")
+		}
+		execution.taskID = taskID
+	}
+	r.observeSubagent(ctx, req, childThreadID, execution.taskID, spec.SessionSubagentAdmitted, execution.admittedAt, execution.admittedAt, "", nil)
+	return execution, nil
+}
+
+// startSubagent claims the durable task before projecting running. If claim
+// fails, it attempts one terminal cancellation and never runs the child.
+func (r *Runner) startSubagent(ctx context.Context, execution subagentExecution) error {
+	if r.subagentTasks != nil {
+		if err := r.subagentTasks.Start(ctx, execution.taskID); err != nil {
+			claimErr := fmt.Errorf("subagent task start: %w", err)
+			terminalAt := r.subagentLifecycleNow()
+			finishErr := r.subagentTasks.Finish(
+				context.WithoutCancel(ctx), execution.taskID, subagent.TaskOutcomeCancelled, claimErr.Error(),
+			)
+			status := spec.SessionSubagentCancelled
+			if finishErr != nil {
+				status = spec.SessionSubagentInterrupted
+				claimErr = errors.Join(claimErr, fmt.Errorf("%w: cancel unstarted task %q: %v", subagent.ErrTaskOutcomeUncertain, execution.taskID, finishErr))
+			}
+			r.observeSubagent(ctx, execution.req, execution.childThreadID, execution.taskID, status, execution.admittedAt, terminalAt, execution.model, execution.childUsage)
+			return claimErr
+		}
+	}
+	r.observeSubagent(ctx, execution.req, execution.childThreadID, execution.taskID, spec.SessionSubagentRunning, execution.admittedAt, r.subagentLifecycleNow(), execution.model, nil)
+	return nil
+}
+
+// finishSubagent transitions the execution authority before publishing the
+// terminal registry projection. A terminal operation that cannot be confirmed
+// becomes interrupted/uncertain and is never automatically replayed.
+func (r *Runner) finishSubagent(ctx context.Context, execution subagentExecution, runErr error) error {
+	status := spec.SessionSubagentCompleted
+	outcome := subagent.TaskOutcomeCompleted
+	if runErr != nil {
+		status = spec.SessionSubagentFailed
+		outcome = subagent.TaskOutcomeFailed
+		if errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded) {
+			status = spec.SessionSubagentCancelled
+			outcome = subagent.TaskOutcomeCancelled
+		}
+	}
+	terminalAt := r.subagentLifecycleNow()
+	if r.subagentTasks != nil {
+		reason := ""
+		if runErr != nil {
+			reason = runErr.Error()
+		}
+		if err := r.subagentTasks.Finish(context.WithoutCancel(ctx), execution.taskID, outcome, reason); err != nil {
+			status = spec.SessionSubagentInterrupted
+			authorityErr := fmt.Errorf("%w: finish task %q: %v", subagent.ErrTaskOutcomeUncertain, execution.taskID, err)
+			r.observeSubagent(ctx, execution.req, execution.childThreadID, execution.taskID, status, execution.admittedAt, terminalAt, execution.model, execution.childUsage)
+			if runErr != nil {
+				return errors.Join(runErr, authorityErr)
+			}
+			return authorityErr
+		}
+	}
+	r.observeSubagent(ctx, execution.req, execution.childThreadID, execution.taskID, status, execution.admittedAt, terminalAt, execution.model, execution.childUsage)
+	return runErr
 }
 
 // resolveSubagentThread resolves the canonical child id before the child is
@@ -108,24 +221,14 @@ func (r *Runner) resolveSubagentThread(ctx context.Context, req subagent.Request
 // OBO carried through, cross-thread back-ref + spawn meta on new child threads,
 // and the durable commit of task+assistant. The optional thread registrar has
 // already resolved the canonical id before this function is called.
-func (r *Runner) runSubagentOn(ctx context.Context, req subagent.Request, childThreadID string, resume bool, publisher channel.Publisher, admittedAt time.Time) (result subagent.Result, err error) {
-	model := req.Model
-	var childUsage map[string]json.RawMessage
-	r.observeSubagent(ctx, req, childThreadID, spec.SessionSubagentRunning, admittedAt, r.subagentLifecycleNow(), model, nil)
-	defer func() {
-		status := spec.SessionSubagentCompleted
-		if err != nil {
-			status = spec.SessionSubagentFailed
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				status = spec.SessionSubagentCancelled
-			}
-		}
-		r.observeSubagent(ctx, req, childThreadID, status, admittedAt, r.subagentLifecycleNow(), model, childUsage)
-	}()
+func (r *Runner) runSubagentOn(ctx context.Context, req subagent.Request, childThreadID string, resume bool, publisher channel.Publisher, execution *subagentExecution) (result subagent.Result, err error) {
 	ctx = withWorkingDirectoryPrompt(ctx)
 	parentThread := req.Parent.ThreadID
 	addr := req.Parent
 	addr.ThreadID = childThreadID
+	if execution.taskID != "" {
+		addr.TaskID = execution.taskID
+	}
 
 	auth := tools.MemoryAuthority{GrantID: req.GrantID, SubjectType: req.SubjectType, SubjectID: req.SubjectID}
 	// Carry the subagent's OBO on ctx so per-turn tool discovery + dynamic tool
@@ -170,7 +273,7 @@ func (r *Runner) runSubagentOn(ctx context.Context, req subagent.Request, childT
 	// req.Model (from spawn_subagent's model arg) is an explicit override; with it
 	// empty the sub-agent uses normal capability-matched selection for its task.
 	subModel := r.resolveTurnModel(ctx, addr, userMsg, req.Model)
-	model = subModel
+	execution.model = subModel
 	if req.MaxTurns > 0 {
 		ctx = withToolIterationLimit(ctx, req.MaxTurns)
 	}
@@ -197,7 +300,7 @@ func (r *Runner) runSubagentOn(ctx context.Context, req subagent.Request, childT
 	// the "::sub::" thread-name convention. On resume the task message has no ref
 	// (skipped above), so committing it is still correct (just the follow-up turn).
 	r.commitMessages(ctx, auth, addr, []protocol.ChatMessage{userMsg, assistant})
-	childUsage = sessionUsageProjection(assistant)
+	execution.childUsage = sessionUsageProjection(assistant)
 	text := textOf(assistant)
 	return subagent.Result{Text: text, ThreadID: childThreadID, Summary: summarizeSubagent(text)}, nil
 }
@@ -214,8 +317,10 @@ func (r *Runner) StartBackground(ctx context.Context, req subagent.Request) (str
 		return "", subagent.ErrBackgroundUnsupported
 	}
 	childThreadID, resume := r.resolveSubagentThread(ctx, req)
-	admittedAt := r.subagentLifecycleNow()
-	r.observeSubagent(ctx, req, childThreadID, spec.SessionSubagentAdmitted, admittedAt, admittedAt, "", nil)
+	execution, err := r.admitSubagent(ctx, req, childThreadID, true)
+	if err != nil {
+		return "", err
+	}
 	// Snapshot the parent OBO so the woken completion turn can act as the same
 	// principal. It is handed off out-of-band via a single-use token (never the
 	// credential on the message); a zero authority (local dev, no OBO) yields an
@@ -231,12 +336,17 @@ func (r *Runner) StartBackground(ctx context.Context, req subagent.Request) (str
 		var err error
 		sctx, span := telemetry.StartSubagent(bgCtx, req.Depth)
 		defer func() { telemetry.Finish(span, &err) }()
+		if err = r.startSubagent(sctx, execution); err != nil {
+			r.notifySubagentComplete(sctx, req, childThreadID, parentAuth, subagent.Result{}, err)
+			return
+		}
 		var publisher channel.Publisher
 		if r.streamBackgroundSubagents {
 			publisher = r.publisher
 		}
 		var res subagent.Result
-		res, err = r.runSubagentOn(sctx, req, childThreadID, resume, publisher, admittedAt)
+		res, err = r.runSubagentOn(sctx, req, childThreadID, resume, publisher, &execution)
+		err = r.finishSubagent(sctx, execution, err)
 		r.notifySubagentComplete(sctx, req, childThreadID, parentAuth, res, err)
 	}()
 	return childThreadID, nil
@@ -253,6 +363,7 @@ func (r *Runner) observeSubagent(
 	ctx context.Context,
 	req subagent.Request,
 	childThreadID string,
+	taskID string,
 	status spec.SessionSubagentStatus,
 	createdAt, updatedAt time.Time,
 	model string,
@@ -261,14 +372,12 @@ func (r *Runner) observeSubagent(
 	if r.subagentObserver == nil {
 		return
 	}
-	workspaceID := req.Parent.WorkspaceID
-	if workspaceID == "" {
-		workspaceID = r.subagentDefaultWorkspace
-	}
+	workspaceID := r.subagentWorkspace(req)
 	record := spec.SessionSubagentRecord{
 		ID:              childThreadID,
 		ParentSessionID: req.Parent.ThreadID,
 		ChildSessionID:  childThreadID,
+		TaskID:          taskID,
 		Name:            subagentDisplayName(req),
 		Kind:            string(req.AgentType),
 		Model:           model,
@@ -278,7 +387,7 @@ func (r *Runner) observeSubagent(
 		UpdatedAt:       updatedAt.Format(time.RFC3339Nano),
 		ChildUsage:      childUsage,
 	}
-	if status == spec.SessionSubagentCompleted || status == spec.SessionSubagentFailed || status == spec.SessionSubagentCancelled {
+	if status == spec.SessionSubagentCompleted || status == spec.SessionSubagentFailed || status == spec.SessionSubagentCancelled || status == spec.SessionSubagentInterrupted {
 		record.CompletedAt = record.UpdatedAt
 	}
 	if err := r.subagentObserver.ObserveSubagent(context.WithoutCancel(ctx), subagent.LifecycleEvent{
@@ -288,6 +397,13 @@ func (r *Runner) observeSubagent(
 		slog.WarnContext(ctx, "subagent: record lifecycle failed",
 			slog.String("thread", childThreadID), slog.String("status", string(status)), slog.Any("err", err))
 	}
+}
+
+func (r *Runner) subagentWorkspace(req subagent.Request) string {
+	if req.Parent.WorkspaceID != "" {
+		return req.Parent.WorkspaceID
+	}
+	return r.subagentDefaultWorkspace
 }
 
 func sessionUsageProjection(message protocol.ChatMessage) map[string]json.RawMessage {

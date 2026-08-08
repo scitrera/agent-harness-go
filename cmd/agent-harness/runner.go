@@ -20,9 +20,15 @@ import (
 	"github.com/scitrera/agent-harness-go/pkg/turn"
 )
 
-func buildRunner(cfg appConfig, st stores, pub channel.Publisher, approvals approval.Awaiter, decorator func(context.Context, protocol.MessageAddress) context.Context) (*turn.Runner, *localtools.Workspace, error) {
+func buildRunner(cfg appConfig, st stores, pub channel.Publisher, approvals approval.Awaiter, subagentTasks subagent.TaskBackend, notifier channel.Enqueuer, decorator func(context.Context, protocol.MessageAddress) context.Context) (*turn.Runner, *localtools.Workspace, error) {
 	if st.subagents != nil {
-		if err := st.subagents.RecoverInterrupted(context.Background(), time.Now()); err != nil {
+		var err error
+		if taskRecovery, ok := st.subagents.(subagent.TaskRecoveryRegistry); ok && subagentTasks != nil {
+			err = taskRecovery.RecoverInterruptedWithTasks(context.Background(), time.Now(), subagentTasks)
+		} else {
+			err = st.subagents.RecoverInterrupted(context.Background(), time.Now())
+		}
+		if err != nil {
 			return nil, nil, fmt.Errorf("subagents: recover interrupted lifecycle: %w", err)
 		}
 	}
@@ -53,7 +59,10 @@ func buildRunner(cfg appConfig, st stores, pub channel.Publisher, approvals appr
 	// A publisher that can also enqueue inbound turns (web/tui channels) lets a
 	// detached background sub-agent push its completion back to the parent thread;
 	// cli (stdout-only) cannot, so background stays disabled there.
-	notifier, allowBackground := pub.(channel.Enqueuer)
+	if notifier == nil {
+		notifier, _ = pub.(channel.Enqueuer)
+	}
+	allowBackground := notifier != nil
 	if err := registerReferenceSubagent(reg, subagentRef, agentCatalog, allowBackground); err != nil {
 		return nil, nil, fmt.Errorf("register subagent: %w", err)
 	}
@@ -140,9 +149,10 @@ func buildRunner(cfg appConfig, st stores, pub channel.Publisher, approvals appr
 		Notifier:                 notifier,
 		SubagentObserver:         st.subagents,
 		SubagentDefaultWorkspace: effectiveWorkspace("", cfg.workspaceID),
+		SubagentTasks:            subagentTasks,
 		// Interactive web/TUI channels can use child-thread stream events to keep the
 		// blocking spawn_subagent row live with the child's latest activity.
-		StreamSubagents: allowBackground,
+		StreamSubagents: allowBackground || subagentTasks != nil,
 		// Detached children use the same child-thread event stream.
 		StreamBackgroundSubagents: allowBackground,
 		// ContextDecorator wraps each turn's ctx (ACP passes ac.TurnContext to route

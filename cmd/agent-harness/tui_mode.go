@@ -28,7 +28,7 @@ func runTUI(cfg appConfig) error {
 	if err != nil {
 		return err
 	}
-	runner, workspace, err := buildRunner(cfg, st, tc, broker, nil)
+	runner, workspace, err := buildRunner(cfg, st, tc, broker, nil, nil, nil)
 	if err != nil {
 		return err
 	}

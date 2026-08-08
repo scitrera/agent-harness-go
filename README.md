@@ -20,6 +20,7 @@ and is the open-source core that the Scitrera distribution ("sahara") builds on.
 | Tool approval | `hooks` | allow-all | allow-lists, ACL/human approvers |
 | Tool observer | `hooks` | none | OTel/audit observers |
 | Session attach/replay | `sessionlog` | bounded memory/file event logs | Aether/MemoryLayer/distributed implementations |
+| Subagent execution authority | `subagent.TaskBackend` | in-process execution | durable task systems such as Aether |
 
 ## Quick start
 
@@ -124,14 +125,17 @@ namespaces. Local web/CLI modes use atomic files below
 `<state-dir>/session-state/workspaces`; Aether worker/standalone modes store the
 same typed states in workspace-exclusive KV with atomic create and full-value
 compare-and-swap. The in-process subagent runner records admitted, running, and
-terminal child lifecycle plus child token usage. Local startup marks children
-left running by a prior single writer as `interrupted`; Aether defers that scan
-until its stable agent identity has connected successfully, proving a duplicate
-worker is not still active, then recovers every indexed parent projection. Goal
-and subagent CAS stores preserve deterministic ordering, deletion tombstones,
-workspace isolation, and the same strict corruption checks as their file
-counterparts. Clients that do not request these capabilities do not load or
-receive the optional state.
+terminal child lifecycle plus child token usage. An optional
+`subagent.TaskBackend` makes a durable task system authoritative for admission,
+start, terminal state, and restart reconciliation while the registry remains the
+parent-session snapshot projection. Local startup marks children left running
+by a prior single writer as `interrupted`; Aether defers that scan until its
+stable agent identity has connected successfully, proving a duplicate worker is
+not still active, then reconciles every indexed parent projection against its
+task. Goal and subagent CAS stores preserve deterministic ordering, deletion
+tombstones, workspace isolation, and the same strict corruption checks as their
+file counterparts. Clients that do not request these capabilities do not load
+or receive the optional state.
 
 Aether and other channels can adapt the same library without changing the
 protocol or local storage behavior.
@@ -170,6 +174,23 @@ The standalone mode's generated specifier intentionally makes its default KV
 state ephemeral to that run. Checkpoints remain reserved for task hibernation
 and hand-off snapshots; the active multi-writer event ledger uses KV because it
 requires atomic create and compare-and-swap.
+
+Aether worker and standalone modes also account every subagent invocation as a
+real self-assigned Aether task before child model or tool work starts. The task
+uses a stable admission idempotency key, one execution attempt, a session context
+ID, bounded non-secret correlation metadata, and the parent turn's OBO authority
+when one is available. Its ID is used on the child stream and in the
+revision-3 `session.state.subagents.v1` record. A task transition is confirmed
+before the corresponding lifecycle projection; an ambiguous terminal result is
+projected as `interrupted` and is never automatically replayed. Restart recovery
+queries terminal tasks and terminates abandoned non-terminal in-process work.
+
+The reference worker currently receives parent turns as its stable agent
+identity, so these child tasks retain the parent task ID as correlation metadata
+rather than claiming native Aether `parent_task_id`. Native task hierarchy
+requires executing the parent turn under its task principal. The shared session
+protocol needs no extra field for this: revision 3 already carries the child
+`task_id`, while Aether owns task identity, idempotency, and parentage semantics.
 
 By default each client keeps a local copy of the conversation it witnessed, so a
 second client attaching mid-conversation sees only what arrives after it

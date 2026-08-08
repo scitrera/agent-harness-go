@@ -199,6 +199,7 @@ type Runner struct {
 	authHandoff               *authhandoff.Store
 	subagentObserver          subagent.LifecycleObserver
 	subagentDefaultWorkspace  string
+	subagentTasks             subagent.TaskBackend
 
 	// rubric, when set, runs the opt-in post-turn self-grading verifier at
 	// end-of-turn (nil → skipped; default behavior unchanged).
@@ -457,6 +458,11 @@ type Config struct {
 	// omit workspace on their address. It is separate from DefaultWorkspaceID so
 	// legacy unscoped transcript storage need not move on disk.
 	SubagentDefaultWorkspace string
+	// SubagentTasks optionally makes a durable task backend the execution
+	// authority for child admission, running, terminal state, and restart
+	// reconciliation. The lifecycle observer remains the session snapshot
+	// projection. Nil preserves the independently useful local runner.
+	SubagentTasks subagent.TaskBackend
 
 	// Rubric, when set, runs an OPT-IN post-turn self-grading verifier: after a
 	// turn finishes, an independent grader checks the just-produced result against
@@ -591,6 +597,7 @@ func NewRunner(cfg Config) (*Runner, error) {
 		authHandoff:               authHandoff,
 		subagentObserver:          cfg.SubagentObserver,
 		subagentDefaultWorkspace:  strings.TrimSpace(cfg.SubagentDefaultWorkspace),
+		subagentTasks:             cfg.SubagentTasks,
 		rubric:                    cfg.Rubric,
 		ctxDecorator:              cfg.ContextDecorator,
 	}, nil

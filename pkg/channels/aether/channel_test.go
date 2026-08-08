@@ -220,7 +220,7 @@ func TestPublishEventCanUseRealAetherTaskLane(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if len(sent) != 1 || sent[0].Topic != aetherwire.TaskMessageTopic("project-a", "task-real") {
+	if len(sent) != 1 || sent[0].Topic != aetherwire.TaskMessageTopic("aether-routing", "task-real") {
 		t.Fatalf("task-lane sends = %+v", sent)
 	}
 }

@@ -33,6 +33,15 @@ type Registry interface {
 	RecoverInterrupted(ctx context.Context, at time.Time) error
 }
 
+// TaskRecoveryRegistry is implemented by distributed registries that can
+// reconcile incomplete projections with their execution authority during owner
+// restart. Local registries deliberately retain process-owner interruption
+// recovery and do not need this extension.
+type TaskRecoveryRegistry interface {
+	Registry
+	RecoverInterruptedWithTasks(ctx context.Context, at time.Time, tasks TaskBackend) error
+}
+
 // RecoverInterrupted marks children left admitted/running by a prior process as
 // interrupted. It validates the complete registry set before writing any file,
 // so corrupt state fails startup without silently skipping another session.

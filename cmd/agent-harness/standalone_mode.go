@@ -86,7 +86,11 @@ func runAetherStandalone(cfg appConfig) error {
 		return err
 	}
 	worker.SetSessionService(sessionTransport.Coordinator)
-	runner, _, err := buildRunner(cfg, st, sessionTransport.Publisher, broker, nil)
+	subagentTasks, err := worker.SubagentTaskBackend(0)
+	if err != nil {
+		return err
+	}
+	runner, _, err := buildRunner(cfg, st, sessionTransport.Publisher, broker, subagentTasks, worker, nil)
 	if err != nil {
 		return err
 	}

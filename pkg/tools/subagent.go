@@ -79,13 +79,14 @@ func RegisterSubagentWithConfig(reg *Registry, cfg SubagentConfig) error {
 			}
 		}
 		subReq := subagent.Request{
-			Task:        args.Task,
-			Depth:       depth + 1,
-			Parent:      req.Addr,
-			GrantID:     req.Authority.GrantID,
-			SubjectType: req.Authority.SubjectType,
-			SubjectID:   req.Authority.SubjectID,
-			Model:       args.Model,
+			Task:         args.Task,
+			Depth:        depth + 1,
+			Parent:       req.Addr,
+			InvocationID: req.CallID,
+			GrantID:      req.Authority.GrantID,
+			SubjectType:  req.Authority.SubjectType,
+			SubjectID:    req.Authority.SubjectID,
+			Model:        args.Model,
 			// A non-empty thread continues an existing child sub-agent thread
 			// (its handle is the thread_id returned from a prior spawn) instead
 			// of minting a new one.

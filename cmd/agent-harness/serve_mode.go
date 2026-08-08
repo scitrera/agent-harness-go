@@ -70,7 +70,11 @@ func runServe(cfg appConfig) error {
 		return err
 	}
 	ch.SetSessionService(sessionTransport.Coordinator)
-	runner, _, err := buildRunner(cfg, st, sessionTransport.Publisher, broker, nil)
+	subagentTasks, err := ch.SubagentTaskBackend(0)
+	if err != nil {
+		return err
+	}
+	runner, _, err := buildRunner(cfg, st, sessionTransport.Publisher, broker, subagentTasks, ch, nil)
 	if err != nil {
 		return err
 	}

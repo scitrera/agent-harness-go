@@ -28,12 +28,17 @@ var ErrBackgroundUnsupported = errors.New("subagent: background execution not su
 // grant (as primitives to avoid importing the tools package and creating a
 // cycle) so the sub-agent acts on behalf of the same principal.
 type Request struct {
-	Task        string
-	Depth       int
-	Parent      protocol.MessageAddress
-	GrantID     string
-	SubjectType string
-	SubjectID   string
+	Task   string
+	Depth  int
+	Parent protocol.MessageAddress
+	// InvocationID identifies this spawn invocation independently from the child
+	// thread. The reference tool supplies its stable tool-call ID so a durable
+	// task backend can deduplicate an admission retry without collapsing later
+	// follow-ups that resume the same child thread.
+	InvocationID string
+	GrantID      string
+	SubjectType  string
+	SubjectID    string
 	// Model optionally pins the sub-agent to a specific model (validated against
 	// the registry by the runner; empty → the runner's normal per-turn selection).
 	Model string

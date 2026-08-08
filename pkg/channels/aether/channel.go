@@ -441,7 +441,15 @@ func (c *Channel) streamMessage(event channel.Event) (topic string, payload []by
 
 func (c *Channel) streamTopic(addr protocol.MessageAddress) string {
 	if c.preferTaskMessageLanes && addr.TaskID != "" {
-		if workspaceID := c.workspaceFor(addr); workspaceID != "" {
+		// Task topics belong to the Aether routing workspace in which the task
+		// was created. addr.WorkspaceID is the logical application workspace and
+		// remains in the envelope; using it in the broker topic breaks optional
+		// multi-workspace deployments that share one Aether worker identity.
+		workspaceID := c.workspace
+		if workspaceID == "" {
+			workspaceID = c.workspaceFor(addr)
+		}
+		if workspaceID != "" {
 			return aetherwire.TaskMessageTopic(workspaceID, addr.TaskID)
 		}
 	}

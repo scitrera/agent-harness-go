@@ -17,6 +17,30 @@ type memoryCASBlobs struct {
 	values map[string][]byte
 }
 
+type recoveryTaskBackend struct {
+	recoveries map[string]TaskRecovery
+	calls      []string
+}
+
+func (*recoveryTaskBackend) Admit(context.Context, TaskAdmission) (string, error) {
+	panic("unexpected admission")
+}
+
+func (*recoveryTaskBackend) Start(context.Context, string) error { panic("unexpected start") }
+
+func (*recoveryTaskBackend) Finish(context.Context, string, TaskOutcome, string) error {
+	panic("unexpected finish")
+}
+
+func (b *recoveryTaskBackend) Recover(_ context.Context, taskID string) (TaskRecovery, error) {
+	b.calls = append(b.calls, taskID)
+	recovery, ok := b.recoveries[taskID]
+	if !ok {
+		return "", fmt.Errorf("unknown task %s", taskID)
+	}
+	return recovery, nil
+}
+
 func newMemoryCASBlobs() *memoryCASBlobs {
 	return &memoryCASBlobs{values: map[string][]byte{}}
 }
@@ -143,6 +167,57 @@ func TestCASRegistryDeferredRecoveryRunsOnFirstUse(t *testing.T) {
 	done, err := restarted.ListSubagents(context.Background(), "project-b", "parent-2")
 	if err != nil || len(done) != 1 || done[0].Status != spec.SessionSubagentCompleted {
 		t.Fatalf("terminal record changed: %#v err=%v", done, err)
+	}
+}
+
+func TestCASRegistryDeferredRecoveryProjectsAuthoritativeTaskState(t *testing.T) {
+	blobs := newMemoryCASBlobs()
+	seed, _ := NewCASRegistry(CASRegistryConfig{Blobs: blobs})
+	for _, item := range []struct {
+		id     string
+		taskID string
+	}{
+		{id: "cancelled", taskID: "task-cancelled"},
+		{id: "completed", taskID: "task-completed"},
+		{id: "failed", taskID: "task-failed"},
+		{id: "orphaned", taskID: "task-orphaned"},
+		{id: "legacy"},
+	} {
+		record := casRecord(item.id, "parent-1", spec.SessionSubagentRunning)
+		record.TaskID = item.taskID
+		if err := seed.ObserveSubagent(context.Background(), LifecycleEvent{WorkspaceID: "project-a", Record: record}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tasks := &recoveryTaskBackend{recoveries: map[string]TaskRecovery{
+		"task-cancelled": TaskRecoveryCancelled,
+		"task-completed": TaskRecoveryCompleted,
+		"task-failed":    TaskRecoveryFailed,
+		"task-orphaned":  TaskRecoveryInterrupted,
+	}}
+	restarted, _ := NewCASRegistry(CASRegistryConfig{Blobs: blobs, DeferRecovery: true})
+	recoveryAt := time.Date(2026, 8, 8, 22, 0, 0, 0, time.UTC)
+	if err := restarted.RecoverInterruptedWithTasks(context.Background(), recoveryAt, tasks); err != nil {
+		t.Fatal(err)
+	}
+	records, err := restarted.ListSubagents(context.Background(), "project-a", "parent-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]spec.SessionSubagentStatus{
+		"cancelled": spec.SessionSubagentCancelled,
+		"completed": spec.SessionSubagentCompleted,
+		"failed":    spec.SessionSubagentFailed,
+		"legacy":    spec.SessionSubagentInterrupted,
+		"orphaned":  spec.SessionSubagentInterrupted,
+	}
+	for _, record := range records {
+		if record.Status != want[record.ID] || record.CompletedAt != recoveryAt.Format(time.RFC3339Nano) {
+			t.Fatalf("record = %#v", record)
+		}
+	}
+	if len(tasks.calls) != 4 {
+		t.Fatalf("task recovery calls = %#v", tasks.calls)
 	}
 }
 

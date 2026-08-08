@@ -45,6 +45,7 @@ type CASRegistry struct {
 	deferRecovery  bool
 	recoveryMu     sync.Mutex
 	pendingRecover time.Time
+	pendingTasks   TaskBackend
 }
 
 type casRegistryRef struct {
@@ -279,6 +280,20 @@ func (r *CASRegistry) ListSubagents(ctx context.Context, workspaceID, parentSess
 }
 
 func (r *CASRegistry) RecoverInterrupted(ctx context.Context, at time.Time) error {
+	return r.recoverInterrupted(ctx, at, nil)
+}
+
+// RecoverInterruptedWithTasks reconciles unfinished projections against the
+// durable execution task state. In deferred Aether mode the backend is retained
+// with the timestamp and used by the first post-connect registry operation.
+func (r *CASRegistry) RecoverInterruptedWithTasks(ctx context.Context, at time.Time, tasks TaskBackend) error {
+	if tasks == nil {
+		return errors.New("subagent: task-aware recovery requires a task backend")
+	}
+	return r.recoverInterrupted(ctx, at, tasks)
+}
+
+func (r *CASRegistry) recoverInterrupted(ctx context.Context, at time.Time, tasks TaskBackend) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -289,9 +304,10 @@ func (r *CASRegistry) RecoverInterrupted(ctx context.Context, at time.Time) erro
 	defer r.recoveryMu.Unlock()
 	if r.deferRecovery {
 		r.pendingRecover = at
+		r.pendingTasks = tasks
 		return nil
 	}
-	return r.recoverAll(ctx, at)
+	return r.recoverAll(ctx, at, tasks)
 }
 
 func (r *CASRegistry) ensureDeferredRecovery(ctx context.Context) error {
@@ -300,27 +316,28 @@ func (r *CASRegistry) ensureDeferredRecovery(ctx context.Context) error {
 	if r.pendingRecover.IsZero() {
 		return nil
 	}
-	if err := r.recoverAll(ctx, r.pendingRecover); err != nil {
+	if err := r.recoverAll(ctx, r.pendingRecover, r.pendingTasks); err != nil {
 		return err
 	}
 	r.pendingRecover = time.Time{}
+	r.pendingTasks = nil
 	return nil
 }
 
-func (r *CASRegistry) recoverAll(ctx context.Context, at time.Time) error {
+func (r *CASRegistry) recoverAll(ctx context.Context, at time.Time, tasks TaskBackend) error {
 	_, index, _, err := r.readIndex(ctx)
 	if err != nil {
 		return err
 	}
 	for _, ref := range index.Refs {
-		if err := r.recoverRef(ctx, ref, at); err != nil {
+		if err := r.recoverRef(ctx, ref, at, tasks); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (r *CASRegistry) recoverRef(ctx context.Context, ref casRegistryRef, at time.Time) error {
+func (r *CASRegistry) recoverRef(ctx context.Context, ref casRegistryRef, at time.Time, tasks TaskBackend) error {
 	timestamp := at.UTC().Format(time.RFC3339Nano)
 	for attempt := 0; attempt < r.maxRetries; attempt++ {
 		previous, state, found, err := r.readState(ctx, ref.WorkspaceID, ref.ParentSessionID)
@@ -336,7 +353,26 @@ func (r *CASRegistry) recoverRef(ctx context.Context, ref casRegistryRef, at tim
 			if record.Status != spec.SessionSubagentAdmitted && record.Status != spec.SessionSubagentRunning {
 				continue
 			}
-			record.Status = spec.SessionSubagentInterrupted
+			recoveredStatus := spec.SessionSubagentInterrupted
+			if tasks != nil && record.TaskID != "" {
+				recovery, err := tasks.Recover(ctx, record.TaskID)
+				if err != nil {
+					return fmt.Errorf("subagent: reconcile execution task %q: %w", record.TaskID, err)
+				}
+				switch recovery {
+				case TaskRecoveryCompleted:
+					recoveredStatus = spec.SessionSubagentCompleted
+				case TaskRecoveryFailed:
+					recoveredStatus = spec.SessionSubagentFailed
+				case TaskRecoveryCancelled:
+					recoveredStatus = spec.SessionSubagentCancelled
+				case TaskRecoveryInterrupted:
+					recoveredStatus = spec.SessionSubagentInterrupted
+				default:
+					return fmt.Errorf("subagent: reconcile execution task %q returned unsupported recovery %q", record.TaskID, recovery)
+				}
+			}
+			record.Status = recoveredStatus
 			record.UpdatedAt = timestamp
 			record.CompletedAt = timestamp
 			changed = true
@@ -359,3 +395,4 @@ func (r *CASRegistry) recoverRef(ctx context.Context, ref casRegistryRef, at tim
 }
 
 var _ Registry = (*CASRegistry)(nil)
+var _ TaskRecoveryRegistry = (*CASRegistry)(nil)

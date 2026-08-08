@@ -51,8 +51,8 @@ require (
 	github.com/microcosm-cc/bluemonday v1.0.27 // indirect
 	github.com/muesli/cancelreader v0.2.2 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
-	github.com/scitrera/aether/api v0.2.2 // indirect
-	github.com/scitrera/aether/sdk/go v0.2.2
+	github.com/scitrera/aether/api v0.2.3
+	github.com/scitrera/aether/sdk/go v0.2.3
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	github.com/yuin/goldmark v1.7.17 // indirect
 	github.com/yuin/goldmark-emoji v1.0.5 // indirect
@@ -69,3 +69,8 @@ require (
 	google.golang.org/grpc v1.82.1 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 )
+
+// Local integration until the current Aether SDK/API changes are published.
+replace github.com/scitrera/aether/sdk/go => ../../../scitrera-aether3-go/oss-repo/sdk/go
+
+replace github.com/scitrera/aether/api => ../../../scitrera-aether3-go/oss-repo/api
