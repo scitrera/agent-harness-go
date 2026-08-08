@@ -336,31 +336,8 @@ func (c *Channel) streamMessage(event channel.Event) (topic string, payload []by
 	if topic == "" {
 		return "", nil, false, nil
 	}
-	var streamEvent spec.StreamEvent
-	switch event.Type {
-	case channel.EventMessageStarted:
-		if event.Message == nil {
-			return "", nil, false, nil
-		}
-		streamEvent = spec.MessageStartedEvent{Message: aetherwire.WithAgentName(*event.Message, c.currentAgentName())}
-	case channel.EventPartAppended:
-		if event.Part == nil {
-			return "", nil, false, nil
-		}
-		streamEvent = spec.PartAppendedEvent{MessageID: event.MessageID, Index: event.Index, Part: *event.Part}
-	case channel.EventTokenDelta:
-		streamEvent = spec.TokenDeltaEvent{MessageID: event.MessageID, Index: event.Index, Text: event.Delta}
-	case channel.EventPartUpdated:
-		streamEvent = spec.PartUpdatedEvent{MessageID: event.MessageID, Index: event.Index, Patch: event.Patch}
-	case channel.EventMessageFinal:
-		if event.Message == nil {
-			return "", nil, false, nil
-		}
-		final := aetherwire.WithAgentName(*event.Message, c.currentAgentName())
-		streamEvent = spec.MessageFinalizedEvent{MessageID: final.ID, Message: final}
-	default:
-		// EventToolResult / EventToolLifecycle / EventError are not wire events;
-		// tool activity reaches clients as part_appended.
+	streamEvent, ok := aetherwire.StreamEventFor(event, c.currentAgentName())
+	if !ok {
 		return "", nil, false, nil
 	}
 	meta := aetherwire.TurnMeta{
