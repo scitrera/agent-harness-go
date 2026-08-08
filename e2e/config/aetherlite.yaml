@@ -1,0 +1,28 @@
+# AetherLite for the local agent stack: embedded storage, plaintext gRPC, dev
+# auth. Loopback-only by construction — see the compose port bindings.
+mode: lite
+
+lite:
+  data_dir: /data
+
+gateway:
+  port: 50051
+  gateway_id: agent-harness-e2e
+  # A streaming turn publishes one message per token-delta batch. The harness
+  # coalesces deltas (50ms) so it stays well under the default 100/s, but a
+  # burst of tool activity on several concurrent turns can approach it, and an
+  # over-limit message is DROPPED with the rejection arriving asynchronously —
+  # invisible to the sender. Headroom is cheap here.
+  message_rate_limit: 2000
+  message_rate_burst: 4000
+
+quotas:
+  enabled: true
+  max_message_rate_per_identity: 2000
+
+admin:
+  enabled: true
+  port: 31880
+  cors_origin: "*"
+
+log_level: info

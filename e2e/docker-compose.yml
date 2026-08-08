@@ -1,0 +1,175 @@
+# A self-contained agent stack: an Aether gateway, the harness serving on it, and
+# MemoryLayer holding the conversations.
+#
+#   ./build.sh          # build the images (see IMAGES below)
+#   cp .env.example .env && $EDITOR .env   # point at your LLM endpoint
+#   docker compose up -d
+#   agent-harness --tui --aether 127.0.0.1:50051 --memorylayer http://127.0.0.1:61001
+#
+# The terminal UI runs on the HOST and attaches over Aether — that is the point
+# of the split, and it means the UI needs no container of its own. Several can
+# attach at once; with MemoryLayer wired they share one conversation.
+#
+# IMAGES. Every image is built locally from the sibling source trees (build.sh),
+# because the OSS images are not published yet. The tags are variables, so when
+# they are published this becomes an .env edit rather than a compose change.
+
+name: agent-harness-e2e
+
+services:
+  # ── One-shot: make the data volumes writable ─────────────────────────────
+  #
+  # Docker creates a named volume's mount point root-owned, but both servers run
+  # as uid 1000 and would fail their first write ("permission denied" opening the
+  # database). Fixing it here keeps the images unprivileged rather than running
+  # them as root.
+  init-perms:
+    image: busybox:1.37
+    command: ["sh", "-c", "chown -R 1000:1000 /aether-data /memorylayer-data"]
+    volumes:
+      - aether-data:/aether-data
+      - memorylayer-data:/memorylayer-data
+
+  # ── Aether: the broker between the UI(s) and the agent ────────────────────
+  #
+  # Dev mode accepts unauthenticated connections, which is what makes the stack
+  # zero-setup: no token minting before the first turn. It is also exactly why
+  # this compose binds to loopback and is not a deployment template.
+  aether:
+    image: ${AETHERLITE_IMAGE:-scitrera/aetherlite:local}
+    entrypoint: ["aetherlite"]
+    command:
+      - --config=/etc/aether/aetherlite.yaml
+      - --data-dir=/data
+      - --dev
+      - --insecure-admin
+      - --workflow=false
+    environment:
+      AETHER_ALLOW_DEV_MODE: "true"
+    volumes:
+      - ./config/aetherlite.yaml:/etc/aether/aetherlite.yaml:ro
+      - aether-data:/data
+    depends_on:
+      init-perms:
+        condition: service_completed_successfully
+    ports:
+      - "127.0.0.1:50051:50051"   # gRPC — the UI attaches here
+      - "127.0.0.1:31880:31880"   # admin UI
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/health/live"]
+      interval: 5s
+      timeout: 3s
+      start_period: 20s
+      retries: 10
+    restart: unless-stopped
+
+  # ── MemoryLayer: threads, transcripts, and the memories distilled from them ──
+  memorylayer:
+    image: ${MEMORYLAYER_IMAGE:-scitrera/memorylayer-server:local}
+    environment:
+      MEMORYLAYER_SERVER_HOST: "0.0.0.0"
+      MEMORYLAYER_SERVER_PORT: "61001"
+      MEMORYLAYER_DATA_DIR: /data
+      # `hash` is LEXICAL — it matches shared words, not meaning. Good enough to
+      # exercise the API and to see recall wired end to end; not good enough to
+      # judge retrieval quality. Bring up the `embed` profile for real semantic
+      # embeddings (see below), which switches these two settings.
+      MEMORYLAYER_EMBEDDING_PROVIDER: ${MEMORYLAYER_EMBEDDING_PROVIDER:-hash}
+      MEMORYLAYER_EMBED_SERVER_URL: ${MEMORYLAYER_EMBED_SERVER_URL:-http://embed-server:61051}
+      # MUST match the embed server's single-vector width. all-MiniLM-L6-v2 is
+      # 384-d. This is not a tuning knob: the width is written into every stored
+      # vector, so changing it later means re-embedding, and mixing widths in one
+      # workspace breaks recall outright.
+      # Pinned to the embed server's width even on `hash`, so turning on the
+      # embed profile later does not invalidate everything already stored. Note
+      # an EMPTY value is not the same as unset here: the server parses this as
+      # an int and an empty string is a startup crash.
+      MEMORYLAYER_EMBEDDING_DIMENSIONS: ${MEMORYLAYER_EMBEDDING_DIMENSIONS:-384}
+      # No auth in front of it; this stack is loopback-only.
+      MEMORYLAYER_AUTHENTICATION_SERVICE: default
+      MEMORYLAYER_AUTHORIZATION_SERVICE: default
+      MEMORYLAYER_RATE_LIMIT_SERVICE: noop
+      MEMORYLAYER_METRICS_SERVICE: noop
+      MEMORYLAYER_OTEL_ENABLED: "false"
+    volumes:
+      - memorylayer-data:/data
+    depends_on:
+      init-perms:
+        condition: service_completed_successfully
+    ports:
+      - "127.0.0.1:61001:61001"   # the host UI reads history from here too
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:61001/health"]
+      interval: 5s
+      timeout: 3s
+      start_period: 40s
+      retries: 20
+    restart: unless-stopped
+
+  # ── The agent worker ──────────────────────────────────────────────────────
+  agent:
+    image: ${AGENT_HARNESS_IMAGE:-agent-harness:local}
+    command:
+      - --serve
+      - --aether=aether:50051
+      - --aether-specifier=${AETHER_SPECIFIER:-e2e}
+      - --memorylayer=http://memorylayer:61001
+      - --memorylayer-workspace=${MEMORYLAYER_WORKSPACE:-default}
+      - --workspace=/workspace
+    environment:
+      # Your model endpoint. The harness talks OpenAI-compatible HTTP.
+      SAHARA_LLM_BASE_URL: ${SAHARA_LLM_BASE_URL:?set SAHARA_LLM_BASE_URL in .env}
+      SAHARA_LLM_API_KEY: ${SAHARA_LLM_API_KEY:-}
+      SAHARA_LLM_MODEL: ${SAHARA_LLM_MODEL:-gpt-4o-mini}
+    # So SAHARA_LLM_BASE_URL can name a model server running on the host (the
+    # common case for a local llama.cpp/Ollama/vLLM). Linux has no built-in
+    # host.docker.internal; host-gateway supplies it.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      # Bind-mounted so you can drop in skills, edit AGENTS.md, and read what the
+      # agent writes.
+      - ./workspace:/workspace
+    depends_on:
+      aether:
+        condition: service_healthy
+      memorylayer:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Real embeddings, opt-in: `docker compose --profile embed up -d` ───────
+  #
+  # Separate profile because the image is large and the first request downloads
+  # model weights. Without it MemoryLayer runs the lexical `hash` provider, which
+  # keeps the stack usable in minutes rather than tens of minutes.
+  #
+  # With this profile, ALSO set in .env:
+  #   MEMORYLAYER_EMBEDDING_PROVIDER=embed_server
+  #   MEMORYLAYER_EMBED_SERVER_URL=http://embed-server:61051
+  #   MEMORYLAYER_EMBEDDING_DIMENSIONS=384
+  # on a FRESH memorylayer-data volume — the vector width is fixed at creation.
+  embed-server:
+    profiles: ["embed"]
+    image: ${MEMORYLAYER_EMBED_IMAGE:-scitrera/memorylayer-embed-server:local}
+    environment:
+      # The image runs the Aether proxy-sidecar as PID 1 for mesh deployments;
+      # inside a compose network that indirection buys nothing.
+      EMBED_SERVER_RUN_SIDECAR: "false"
+      MEMORYLAYER_EMBED_SERVER_HOST: "0.0.0.0"
+    volumes:
+      # Persist model weights so a restart is not another download.
+      - hf-cache:/home/memorylayer/.cache/huggingface
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:61051/health"]
+      interval: 10s
+      timeout: 5s
+      # Long start_period, not many retries: the first model download is slow and
+      # a container marked unhealthy mid-download would restart into another one.
+      start_period: 300s
+      retries: 3
+    restart: unless-stopped
+
+volumes:
+  aether-data:
+  memorylayer-data:
+  hf-cache:

@@ -1,0 +1,7 @@
+.env
+
+# The agent seeds and writes here. Keep the directory (it is a bind-mount
+# source: if it does not exist, Docker creates it root-owned and the uid-1000
+# agent cannot seed into it) but track none of its contents.
+workspace/*
+!workspace/.gitkeep
