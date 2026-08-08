@@ -133,7 +133,11 @@ func bindMemory(base turn.MemoryService, workspaceID, backendWorkspaceID string)
 	if base == nil || workspaceID == "" || workspaceID == backendWorkspaceID {
 		return base
 	}
-	return &boundMemoryService{base: base, workspaceID: workspaceID, backendWorkspaceID: backendWorkspaceID}
+	bound := &boundMemoryService{base: base, workspaceID: workspaceID, backendWorkspaceID: backendWorkspaceID}
+	if registrar, ok := base.(turn.ThreadRegistrar); ok {
+		return &boundMemoryRegistrar{boundMemoryService: bound, registrar: registrar}
+	}
+	return bound
 }
 
 func (s *boundMemoryService) backendWorkspace(workspaceID string) string {
@@ -149,6 +153,20 @@ func (s *boundMemoryService) Recall(ctx context.Context, auth tools.MemoryAuthor
 
 func (s *boundMemoryService) AppendThreadMessages(ctx context.Context, auth tools.MemoryAuthority, workspaceID, threadID, ownership string, messages []protocol.ChatMessage) error {
 	return s.base.AppendThreadMessages(ctx, auth, s.backendWorkspace(workspaceID), threadID, ownership, messages)
+}
+
+// boundMemoryRegistrar preserves the optional ThreadRegistrar capability while
+// translating the logical project workspace to its configured MemoryLayer
+// workspace. Keeping it separate prevents a non-registrar MemoryService from
+// falsely advertising thread creation support.
+type boundMemoryRegistrar struct {
+	*boundMemoryService
+	registrar turn.ThreadRegistrar
+}
+
+func (s *boundMemoryRegistrar) EnsureThread(ctx context.Context, auth tools.MemoryAuthority, spec turn.ThreadSpec) (string, error) {
+	spec.WorkspaceID = s.backendWorkspace(spec.WorkspaceID)
+	return s.registrar.EnsureThread(ctx, auth, spec)
 }
 
 func workspaceStateDir(cfg appConfig) string {

@@ -2,11 +2,14 @@ package memorylayer
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 	"github.com/scitrera/agent-harness-go/pkg/tools"
+	"github.com/scitrera/agent-harness-go/pkg/turn"
 )
 
 // Recaller is the semantic-memory half of the MemoryLayer integration: it
@@ -98,6 +101,56 @@ func (r *Recaller) Recall(ctx context.Context, _ tools.MemoryAuthority, workspac
 func (r *Recaller) AppendThreadMessages(_ context.Context, _ tools.MemoryAuthority, _, _, _ string, _ []protocol.ChatMessage) error {
 	return nil
 }
+
+// EnsureThread implements turn.ThreadRegistrar against MemoryLayer's native
+// chat-thread hierarchy. An empty ThreadID asks MemoryLayer to mint a canonical
+// id while atomically recording parent_thread; the caller must adopt the
+// returned id. MemoryLayer intentionally does not expose caller-owned ids, so a
+// non-empty ThreadID can only ensure an already-existing thread.
+//
+// auth is ignored for the same reason as Recall: the OSS server has no OBO grant
+// issuer. Proprietary integrations can carry authority through their own
+// ThreadRegistrar while sharing the runner's canonical-id behavior.
+func (r *Recaller) EnsureThread(ctx context.Context, _ tools.MemoryAuthority, spec turn.ThreadSpec) (string, error) {
+	workspace := r.client.resolveWorkspace(spec.WorkspaceID)
+	if spec.ThreadID != "" {
+		existing, err := r.client.getThread(ctx, workspace, spec.ThreadID)
+		if err != nil {
+			if errors.Is(err, errNotFound) {
+				return "", fmt.Errorf("memorylayer: cannot create caller-owned thread id %q; omit ThreadID and adopt the server-minted id", spec.ThreadID)
+			}
+			return "", err
+		}
+		if existing.ID == "" {
+			return "", errors.New("memorylayer: server returned a thread with no id")
+		}
+		if spec.ParentThreadID != "" && (existing.ParentThread == nil || *existing.ParentThread != spec.ParentThreadID) {
+			return "", fmt.Errorf("memorylayer: thread %q exists without requested parent %q", existing.ID, spec.ParentThreadID)
+		}
+		return existing.ID, nil
+	}
+	if err := r.client.ensureWorkspace(ctx, workspace); err != nil {
+		return "", err
+	}
+	metadata := map[string]any(nil)
+	if spec.Origin != "" {
+		metadata = map[string]any{"scitrera": map[string]any{"origin": spec.Origin}}
+	}
+	created, err := r.client.createThreadWithOptions(ctx, workspace, createThreadOptions{
+		ParentThread: spec.ParentThreadID,
+		Ownership:    spec.Ownership,
+		Metadata:     metadata,
+	})
+	if err != nil {
+		return "", err
+	}
+	if created.ID == "" {
+		return "", errors.New("memorylayer: server returned a thread with no id")
+	}
+	return created.ID, nil
+}
+
+var _ turn.ThreadRegistrar = (*Recaller)(nil)
 
 // scoreOf prefers the boosted score (what the server actually ranked on) and
 // falls back to raw relevance.

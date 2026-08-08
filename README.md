@@ -183,7 +183,21 @@ The OSS MemoryLayer adapter also implements the additive workspace-aware history
 and thread-index interfaces: one process can address another visible workspace
 per operation, and identical thread IDs remain isolated by the composite
 workspace/thread key. The configured workspace remains the default for existing
-single-workspace callers.
+single-workspace callers. New subagents use MemoryLayer's native
+`parent_thread` hierarchy: the server mints the child ID before execution and
+the harness adopts that canonical ID for lifecycle events, transcript storage,
+kernel isolation, and resume handles. Without MemoryLayer, the same runner keeps
+the local `<parent>::sub::<sequence>` fallback.
+
+Library users can also construct `memorylayer.NewCatalogProvider` and call
+`Load` or `LoadWorkspace` to map enabled MemoryLayer skills (including accepted
+addenda, allowed tools, prerequisites, and preferred model metadata) and enabled
+stdio MCP servers into the neutral `catalog.Catalog` types. Results are sorted
+deterministically and scoped per requested workspace. The reference process does
+not implicitly merge one default workspace's remote catalog into all visible
+workspaces; multi-workspace hosts should load/cache a catalog per resolved
+workspace so project-specific skills and MCP configuration cannot leak across
+turns.
 
 With MemoryLayer wired, each turn also gets the memories it has distilled from
 past conversations that are relevant to the current message (`--memory-recall`,

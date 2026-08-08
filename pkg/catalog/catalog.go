@@ -1,7 +1,7 @@
 // Package catalog is the tool/skill/MCP discovery seam: where the set of
 // available tools, skills, and MCP servers comes from. The core ships a fixed
-// (Static) and a filesystem-backed provider; the Scitrera distribution provides
-// a MemoryLayer-backed provider. The catalog types are protocol-neutral.
+// (Static) and filesystem-backed provider; pkg/memorylayer supplies a
+// workspace-aware remote provider. The catalog types are protocol-neutral.
 package catalog
 
 import (
@@ -66,8 +66,8 @@ func (s MCPServerSpec) IdleTTL() time.Duration {
 	return time.Duration(s.IdleTTLSeconds) * time.Second
 }
 
-// Provider supplies the catalog. Implementations: Static (core), FS (core,
-// see catalog/fs), and a MemoryLayer-backed provider (distribution).
+// Provider supplies the catalog. Implementations include Static, filesystem
+// discovery, and pkg/memorylayer.CatalogProvider.
 type Provider interface {
 	Load(ctx context.Context) (Catalog, error)
 }

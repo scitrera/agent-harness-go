@@ -3,7 +3,6 @@ package turn
 import (
 	"bytes"
 	"context"
-	"strings"
 	"sync"
 	"testing"
 
@@ -83,9 +82,10 @@ func Test_Runner_RunSubagent_persists_child_thread_with_backref(t *testing.T) {
 		t.Fatalf("run subagent: %v", err)
 	}
 
-	// Then: it ran on a "<parent>::sub::N" child thread and returned that handle.
-	if !strings.HasPrefix(res.ThreadID, "parent-thread::sub::") {
-		t.Fatalf("child thread id = %q, want parent-thread::sub:: prefix", res.ThreadID)
+	// Then: it adopted the registrar's canonical child thread id and returned
+	// that handle everywhere.
+	if res.ThreadID != "mem-thread-1" {
+		t.Fatalf("child thread id = %q, want registrar-minted mem-thread-1", res.ThreadID)
 	}
 	// The DURABLE store was consulted (LoadHistory) for the child thread — proves
 	// it uses r.store, not a throwaway NewMemoryStore.
@@ -196,14 +196,15 @@ func Test_Runner_RunSubagent_declares_child_thread_parent_via_registrar(t *testi
 		t.Fatalf("run subagent: %v", err)
 	}
 
-	// Then: the runner DECLARED the child thread with its parent, before the commit.
+	// Then: the runner asked the registrar to MINT the child thread with its
+	// parent before the session and commit, and adopted the returned id.
 	if len(mem.ensured) != 1 {
 		t.Fatalf("expected one EnsureThread call, got %#v", mem.ensured)
 	}
 	got := mem.ensured[0]
-	if got.ThreadID != res.ThreadID || got.ParentThreadID != "parent-thread" ||
+	if got.ThreadID != "" || res.ThreadID != "mem-thread-1" || got.ParentThreadID != "parent-thread" ||
 		got.WorkspaceID != "ws1" || got.Origin != "subagent" {
-		t.Fatalf("declared thread = %#v, want {thread=%s, parent=parent-thread, ws=ws1, origin=subagent}", got, res.ThreadID)
+		t.Fatalf("mint spec = %#v result=%q, want {thread=empty, parent=parent-thread, ws=ws1, origin=subagent} → mem-thread-1", got, res.ThreadID)
 	}
 
 	// And: resuming that child thread does NOT re-declare it (it already exists).
@@ -216,6 +217,37 @@ func Test_Runner_RunSubagent_declares_child_thread_parent_via_registrar(t *testi
 	}
 	if len(mem.ensured) != 1 {
 		t.Fatalf("resume must not re-declare the thread, got %#v", mem.ensured)
+	}
+}
+
+func Test_Runner_RunSubagent_mints_native_thread_when_history_backend_owns_writes(t *testing.T) {
+	// OSS MemoryLayer is both the HistoryStore and registrar, so auto-commit is
+	// intentionally off to avoid writing each message twice. Native thread
+	// creation must remain independent and provide the canonical child id.
+	store := &recordingStore{}
+	mem := &fakeMemory{}
+	r, err := NewRunner(Config{
+		Store:            store,
+		Loader:           fakeLoader{},
+		Provider:         &fakeProvider{},
+		Assembler:        contextpack.NewAssembler(contextpack.Config{MaxHistoryMessages: 8}),
+		Memory:           mem,
+		MemoryAutoCommit: false,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := r.RunSubagent(context.Background(), subagent.Request{
+		Task: "research", Parent: protocol.MessageAddress{ThreadID: "parent", WorkspaceID: "ws"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.ThreadID != "mem-thread-1" || len(mem.ensured) != 1 || store.loadCount("mem-thread-1") == 0 {
+		t.Fatalf("result=%#v ensured=%#v loaded=%#v", res, mem.ensured, store.loaded)
+	}
+	if len(mem.appended) != 0 {
+		t.Fatalf("auto-commit must remain off when history backend owns writes: %#v", mem.appended)
 	}
 }
 

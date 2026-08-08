@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 	"github.com/scitrera/agent-harness-go/pkg/tools"
+	"github.com/scitrera/agent-harness-go/pkg/turn"
 )
 
 func newTestRecaller(t *testing.T, handler http.HandlerFunc) *Recaller {
@@ -106,5 +108,76 @@ func TestAppendThreadMessagesDoesNotWrite(t *testing.T) {
 	}
 	if called {
 		t.Fatal("AppendThreadMessages wrote to the server; the history store already persists the turn")
+	}
+}
+
+func TestEnsureThreadMintsCanonicalChildWithParentAndWorkspace(t *testing.T) {
+	workspaceCreated := false
+	threadCreates := 0
+	var createBody map[string]any
+	r := newTestRecaller(t, func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		switch {
+		case req.Method == http.MethodGet && req.URL.Path == "/v1/workspaces/project-a":
+			if !workspaceCreated {
+				w.WriteHeader(http.StatusNotFound)
+				_ = json.NewEncoder(w).Encode(map[string]any{"detail": "Not Found"})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"workspace": map[string]any{"id": "project-a"}})
+		case req.Method == http.MethodPost && req.URL.Path == "/v1/workspaces":
+			workspaceCreated = true
+			_ = json.NewEncoder(w).Encode(map[string]any{"workspace": map[string]any{"id": "project-a"}})
+		case req.Method == http.MethodPost && req.URL.Path == "/v1/threads":
+			threadCreates++
+			_ = json.NewDecoder(req.Body).Decode(&createBody)
+			if req.URL.Query().Get("workspace_id") != "project-a" {
+				t.Errorf("workspace query = %q", req.URL.Query().Get("workspace_id"))
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"thread": map[string]any{
+				"id": "thread_server_1", "parent_thread": "parent-1", "ownership": "workspace",
+			}})
+		default:
+			t.Errorf("unexpected request: %s %s", req.Method, req.URL.String())
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+
+	id, err := r.EnsureThread(context.Background(), tools.MemoryAuthority{}, turn.ThreadSpec{
+		WorkspaceID: "project-a", ParentThreadID: "parent-1", Ownership: "workspace", Origin: "subagent",
+	})
+	if err != nil {
+		t.Fatalf("EnsureThread: %v", err)
+	}
+	if id != "thread_server_1" || threadCreates != 1 || !workspaceCreated {
+		t.Fatalf("id=%q creates=%d workspaceCreated=%v", id, threadCreates, workspaceCreated)
+	}
+	if _, supplied := createBody["id"]; supplied {
+		t.Fatalf("MemoryLayer thread create must not supply an id: %#v", createBody)
+	}
+	if createBody["workspace_id"] != "project-a" || createBody["parent_thread"] != "parent-1" || createBody["ownership"] != "workspace" {
+		t.Fatalf("create body = %#v", createBody)
+	}
+	metadata, _ := createBody["metadata"].(map[string]any)
+	scitrera, _ := metadata["scitrera"].(map[string]any)
+	if scitrera["origin"] != "subagent" {
+		t.Fatalf("origin metadata = %#v", createBody["metadata"])
+	}
+}
+
+func TestEnsureThreadRejectsMissingCallerOwnedID(t *testing.T) {
+	r := newTestRecaller(t, func(w http.ResponseWriter, req *http.Request) {
+		if req.Method != http.MethodGet || req.URL.Path != "/v1/threads/client-id" {
+			t.Errorf("unexpected request: %s %s", req.Method, req.URL.String())
+		}
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]any{"detail": "Not Found"})
+	})
+
+	_, err := r.EnsureThread(context.Background(), tools.MemoryAuthority{}, turn.ThreadSpec{
+		WorkspaceID: "project-a", ThreadID: "client-id", ParentThreadID: "parent-1",
+	})
+	if err == nil || !strings.Contains(err.Error(), "server-minted") {
+		t.Fatalf("error = %v, want server-minted guidance", err)
 	}
 }

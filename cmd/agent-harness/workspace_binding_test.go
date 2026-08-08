@@ -8,6 +8,7 @@ import (
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 	"github.com/scitrera/agent-harness-go/pkg/store"
 	"github.com/scitrera/agent-harness-go/pkg/tools"
+	"github.com/scitrera/agent-harness-go/pkg/turn"
 )
 
 func TestBoundHistoryScopesLegacyUISurface(t *testing.T) {
@@ -131,5 +132,40 @@ func TestBoundMemoryMapsLogicalWorkspaceToExplicitBackendOverride(t *testing.T) 
 	}
 	if base.workspaceID != "project-b" {
 		t.Fatalf("dynamic backend workspace = %q", base.workspaceID)
+	}
+}
+
+type recordingMemoryRegistrar struct {
+	recordingMemoryService
+	spec turn.ThreadSpec
+}
+
+func (s *recordingMemoryRegistrar) EnsureThread(_ context.Context, _ tools.MemoryAuthority, spec turn.ThreadSpec) (string, error) {
+	s.spec = spec
+	return "thread-server", nil
+}
+
+func TestBoundMemoryPreservesRegistrarAndMapsItsWorkspace(t *testing.T) {
+	base := &recordingMemoryRegistrar{}
+	memory := bindMemory(base, "project-a", "memorylayer-a")
+	registrar, ok := memory.(turn.ThreadRegistrar)
+	if !ok {
+		t.Fatal("bound registrar capability was lost")
+	}
+	id, err := registrar.EnsureThread(context.Background(), tools.MemoryAuthority{}, turn.ThreadSpec{
+		WorkspaceID: "project-a", ParentThreadID: "parent-1", Origin: "subagent",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != "thread-server" || base.spec.WorkspaceID != "memorylayer-a" || base.spec.ParentThreadID != "parent-1" {
+		t.Fatalf("id=%q spec=%#v", id, base.spec)
+	}
+}
+
+func TestBoundMemoryDoesNotAdvertiseRegistrarWhenBaseLacksIt(t *testing.T) {
+	memory := bindMemory(&recordingMemoryService{}, "project-a", "memorylayer-a")
+	if _, ok := memory.(turn.ThreadRegistrar); ok {
+		t.Fatal("bound non-registrar falsely advertised ThreadRegistrar")
 	}
 }

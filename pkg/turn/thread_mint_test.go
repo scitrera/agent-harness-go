@@ -9,9 +9,8 @@ import (
 	"github.com/scitrera/agent-harness-go/pkg/tools"
 )
 
-// oboAuthority is a turn Authority hook that supplies a valid OBO identity, so the
-// registrar thread-mint seam (gated on GrantID+SubjectID) fires. Mirrors the
-// distribution's per-turn authority derivation for a real user chat task.
+// oboAuthority is a turn Authority hook that supplies a valid OBO identity.
+// Backends that require it receive it; local OSS registrars may not need it.
 func oboAuthority(_ protocol.MessageAddress, _ protocol.ChatMessage) tools.MemoryAuthority {
 	return tools.MemoryAuthority{GrantID: "grant-1", SubjectType: "user", SubjectID: "u@example.com"}
 }
@@ -63,13 +62,10 @@ func Test_Runner_Run_mints_thread_via_registrar_when_absent(t *testing.T) {
 	}
 }
 
-// Test_Runner_Run_mints_locally_when_no_obo: a registrar IS wired and auto-commit
-// is on, but the turn carries NO OBO identity (no Authority hook → zero authority,
-// e.g. an identity-less init/connect artifact). The registrar mint is a per-user
-// backend write, so with no identity it would only 403; the runner must skip
-// EnsureThread entirely and fall through to a LOCAL id — no doomed round-trip, no
-// phantom remote thread.
-func Test_Runner_Run_mints_locally_when_no_obo(t *testing.T) {
+// A registrar receives even an empty authority because OSS/local backends do not
+// require OBO. Authorization policy belongs to the backend; if it rejects the
+// call, the runner falls back to a local id (covered below).
+func Test_Runner_Run_mints_via_local_registrar_without_obo(t *testing.T) {
 	mem := &fakeMemory{}
 	r, err := NewRunner(Config{
 		Store:            &fakeStore{},
@@ -95,12 +91,43 @@ func Test_Runner_Run_mints_locally_when_no_obo(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if finalized.Addr.ThreadID != "local-99" {
-		t.Fatalf("finalized thread = %q, want local-99 (local mint, no OBO)", finalized.Addr.ThreadID)
+	if finalized.Addr.ThreadID != "mem-thread-1" {
+		t.Fatalf("finalized thread = %q, want mem-thread-1 (registrar mint without OBO)", finalized.Addr.ThreadID)
 	}
-	// The registrar mint must NOT have been attempted without an identity.
-	if len(mem.ensured) != 0 {
-		t.Fatalf("EnsureThread must not fire without OBO identity, ensured=%#v", mem.ensured)
+	if len(mem.ensured) != 1 {
+		t.Fatalf("EnsureThread calls = %#v, want one", mem.ensured)
+	}
+}
+
+type rejectingThreadRegistrar struct{ fakeMemory }
+
+func (rejectingThreadRegistrar) EnsureThread(context.Context, tools.MemoryAuthority, ThreadSpec) (string, error) {
+	return "", context.Canceled
+}
+
+func Test_Runner_Run_mints_locally_when_registrar_rejects(t *testing.T) {
+	r, err := NewRunner(Config{
+		Store:       &fakeStore{},
+		Loader:      fakeLoader{},
+		Provider:    &fakeProvider{},
+		Assembler:   contextpack.NewAssembler(contextpack.Config{MaxHistoryMessages: 8}),
+		Memory:      &rejectingThreadRegistrar{},
+		NewThreadID: func() string { return "local-99" },
+	})
+	if err != nil {
+		t.Fatalf("runner: %v", err)
+	}
+	userPart, err := protocol.NewTextPart("hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	finalized, err := r.Run(context.Background(), protocol.MessageAddress{WorkspaceID: "ws1"},
+		protocol.ChatMessage{ID: "u1", Role: protocol.RoleUser, Content: []protocol.ContentPart{userPart}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finalized.Addr.ThreadID != "local-99" {
+		t.Fatalf("finalized thread = %q, want local fallback", finalized.Addr.ThreadID)
 	}
 }
 

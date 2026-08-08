@@ -158,10 +158,12 @@ func (c *client) workspaceQuery(workspace string) url.Values {
 // thread is MemoryLayer's chat-thread record, reduced to the fields the harness
 // uses for its thread switcher.
 type thread struct {
-	ID        string  `json:"id"`
-	Title     *string `json:"title"`
-	CreatedAt string  `json:"created_at"`
-	UpdatedAt string  `json:"updated_at"`
+	ID           string  `json:"id"`
+	Title        *string `json:"title"`
+	ParentThread *string `json:"parent_thread"`
+	Ownership    string  `json:"ownership"`
+	CreatedAt    string  `json:"created_at"`
+	UpdatedAt    string  `json:"updated_at"`
 }
 
 // The server wraps single-object responses ({"thread": …}) and lists
@@ -220,16 +222,43 @@ func (c *client) ensureWorkspace(ctx context.Context, workspace string) error {
 // supplied by the client, so the caller must adopt the returned id rather than
 // assume its own — passing one silently creates a thread under a different id.
 func (c *client) createThread(ctx context.Context, workspace, title string) (thread, error) {
+	return c.createThreadWithOptions(ctx, workspace, createThreadOptions{Title: title})
+}
+
+type createThreadOptions struct {
+	Title        string
+	ParentThread string
+	Ownership    string
+	Metadata     map[string]any
+}
+
+// createThreadWithOptions creates a server-owned thread and returns the
+// canonical id. MemoryLayer deliberately does not accept a caller-supplied id.
+func (c *client) createThreadWithOptions(ctx context.Context, workspace string, opts createThreadOptions) (thread, error) {
 	workspace = c.resolveWorkspace(workspace)
-	body := map[string]any{"ownership": c.ownership}
+	body := map[string]any{"ownership": firstNonEmpty(opts.Ownership, c.ownership)}
 	if workspace != "" {
 		body["workspace_id"] = workspace
 	}
-	if title != "" {
-		body["title"] = title
+	if opts.Title != "" {
+		body["title"] = opts.Title
+	}
+	if opts.ParentThread != "" {
+		body["parent_thread"] = opts.ParentThread
+	}
+	if len(opts.Metadata) > 0 {
+		body["metadata"] = opts.Metadata
 	}
 	var out threadEnvelope
 	if err := c.do(ctx, http.MethodPost, "/v1/threads", c.workspaceQuery(workspace), body, &out); err != nil {
+		return thread{}, err
+	}
+	return out.Thread, nil
+}
+
+func (c *client) getThread(ctx context.Context, workspace, id string) (thread, error) {
+	var out threadEnvelope
+	if err := c.do(ctx, http.MethodGet, "/v1/threads/"+url.PathEscape(id), c.workspaceQuery(workspace), nil, &out); err != nil {
 		return thread{}, err
 	}
 	return out.Thread, nil

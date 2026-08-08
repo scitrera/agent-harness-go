@@ -52,11 +52,13 @@ type MemoryService interface {
 }
 
 // ThreadSpec describes a thread to declare durably, independent of its message
-// content. ThreadID + ParentThreadID are the load-bearing fields; the rest are
-// optional hints a backend MAY persist (e.g. as thread metadata) or ignore. It
-// is a struct — not a fixed argument list — so the seam can grow (title, tags,
-// expiry…) without breaking implementers: oss is meant to be a base for backends
-// beyond MemoryLayer.
+// content. ParentThreadID is the load-bearing hierarchy field. ThreadID is
+// optional: empty asks the backend to mint a canonical id; non-empty asks a
+// backend that supports caller-owned ids to ensure that id exists. The remaining
+// fields are optional hints a backend MAY persist (e.g. as thread metadata) or
+// ignore. It is a struct — not a fixed argument list — so the seam can grow
+// (title, tags, expiry…) without breaking implementers: oss is meant to be a
+// base for backends beyond MemoryLayer.
 type ThreadSpec struct {
 	WorkspaceID    string
 	ThreadID       string
@@ -72,15 +74,15 @@ type ThreadSpec struct {
 // ThreadRegistrar is an OPTIONAL capability a MemoryService (or any backend) may
 // implement to durably DECLARE (and, when asked, MINT) a thread plus its parent
 // relationship, separate from the per-message MessageRef the commit carries. The
-// turn runner calls EnsureThread in two cases: declaring a NEW sub-agent child
-// thread (spec.ThreadID set → returned unchanged), and minting a thread for a
-// new chat that arrived with none (spec.ThreadID empty → the backend generates a
-// canonical id and returns it). It is idempotent (create-or-noop) and
-// best-effort: a backend that does not implement it loses only the thread-level
-// index, not the message-level linkage; when it is absent the runner mints a
-// local id instead. oss owns this abstraction + the call sites; the distribution
-// implements it against its store (sahara → MemoryLayer's chat_threads, whose
-// server mints the id when none is supplied).
+// turn runner calls EnsureThread with an empty ThreadID when a backend-owned id
+// is needed: for a NEW sub-agent child and for a new chat that arrived with no
+// thread. The returned id is canonical and MUST be adopted by the caller. A
+// non-empty ThreadID remains available for backends that can idempotently
+// create-or-get caller-owned ids, but MemoryLayer intentionally owns its thread
+// ids and ignores supplied ids. The capability is best-effort: when absent or
+// unavailable, the runner mints a local id and retains message-level linkage.
+// oss owns this abstraction + the call sites; MemoryLayer-backed distributions
+// implement it against chat_threads.
 type ThreadRegistrar interface {
 	EnsureThread(ctx context.Context, auth tools.MemoryAuthority, spec ThreadSpec) (threadID string, err error)
 }
@@ -1070,17 +1072,15 @@ func (r *Runner) notifyTurn(ctx context.Context, ev hooks.TurnEvent) {
 // prefers the backend ThreadRegistrar (so the id is canonical + hierarchy-aware,
 // e.g. MemoryLayer's server-owned id) and falls back to a local random id so a
 // no-backend/offline client still works. Best-effort: any registrar error falls
-// through to the local id. Gated on memAutoCommit for the registrar path — with
-// auto-commit off the backend thread would never be populated, so mint locally.
+// through to the local id. Registration is independent of MemoryAutoCommit: a
+// backend may already be the HistoryStore (OSS MemoryLayer), in which case
+// auto-commit is correctly off to avoid duplicate messages while native thread
+// creation is still required.
 func (r *Runner) resolveNewThreadID(ctx context.Context, auth tools.MemoryAuthority, addr protocol.MessageAddress, _ protocol.ChatMessage) string {
-	// Only mint a canonical registrar thread when the turn carries an OBO identity
-	// — a backend "chat"-origin thread is a per-user write, so with no GrantID/subject
-	// the EnsureThread call is a guaranteed 403 (and any later auto-commit to that id
-	// 403s too). Without identity, fall straight through to a local id — no doomed
-	// round-trip, no phantom remote thread. (Defense-in-depth: the SDK ingress already
-	// drops task-less/identity-less turns before they reach a turn at all.)
-	if reg, ok := r.memory.(ThreadRegistrar); ok && r.memAutoCommit &&
-		auth.GrantID != "" && auth.SubjectID != "" {
+	// Core does not prescribe the registrar's authorization model. OSS
+	// MemoryLayer accepts local service authority; proprietary adapters may
+	// require OBO and return an error, which falls through to a local id.
+	if reg, ok := r.memory.(ThreadRegistrar); ok {
 		id, err := reg.EnsureThread(ctx, auth, ThreadSpec{WorkspaceID: addr.WorkspaceID, Ownership: addr.Ownership, Origin: "chat"})
 		if err == nil && id != "" {
 			slog.InfoContext(ctx, "turn: minted new thread via registrar", slog.String("thread", id))
