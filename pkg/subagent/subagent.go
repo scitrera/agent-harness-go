@@ -10,6 +10,8 @@ import (
 	"errors"
 	"sync"
 
+	spec "github.com/scitrera/ecosystem-messaging-spec/go"
+
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 )
 
@@ -89,6 +91,21 @@ type Runner interface {
 type BackgroundRunner interface {
 	Runner
 	StartBackground(ctx context.Context, req Request) (threadID string, err error)
+}
+
+// LifecycleEvent is an authoritative child-session registry update. The record
+// uses the shared session protocol shape so local files, MemoryLayer adapters,
+// Aether checkpoints, and remote clients project the same lifecycle fields.
+type LifecycleEvent struct {
+	WorkspaceID string
+	Record      spec.SessionSubagentRecord
+}
+
+// LifecycleObserver records subagent admission/running/terminal transitions.
+// Runner execution treats observation as best-effort; recovery surfaces fail
+// closed when a configured registry cannot be read or validated.
+type LifecycleObserver interface {
+	ObserveSubagent(ctx context.Context, event LifecycleEvent) error
 }
 
 type depthKey struct{}

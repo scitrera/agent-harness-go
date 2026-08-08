@@ -144,12 +144,28 @@ func (c *Coordinator) Attach(ctx context.Context, request spec.SessionAttachRequ
 	}
 	state := map[string]json.RawMessage{}
 	if c.state != nil {
-		state, err = c.state.SnapshotState(ctx, workspaceID, request.SessionID, capture.Cursor, messages)
+		if provider, ok := c.state.(NegotiatedSnapshotStateProvider); ok {
+			state, err = provider.SnapshotStateForCapabilities(
+				ctx, workspaceID, request.SessionID, capture.Cursor, messages, capabilities,
+			)
+		} else {
+			state, err = c.state.SnapshotState(ctx, workspaceID, request.SessionID, capture.Cursor, messages)
+		}
 		if err != nil {
 			return spec.SessionAttachResult{}, fmt.Errorf("sessionlog: snapshot state: %w", err)
 		}
 		if state == nil {
 			state = map[string]json.RawMessage{}
+		}
+		// Standard capability-owned namespaces use their capability string as
+		// their state key. Build the complete provider projection, then omit
+		// namespaces this client did not negotiate.
+		if provider, ok := c.state.(CapabilityStateProvider); ok {
+			for _, capability := range provider.Capabilities() {
+				if !spec.SupportsSessionCapability(capabilities, capability) {
+					delete(state, string(capability))
+				}
+			}
 		}
 	}
 	for key, value := range state {

@@ -33,14 +33,14 @@ func newSessionWorkspaceResolver(defaultWorkspace string, visible []string) (*se
 
 func newSessionTransport(
 	stateDir string,
-	history historyStore,
+	st stores,
 	workspaces sessionlog.WorkspaceResolver,
 	defaultWorkspace string,
 	multiWorkspace bool,
 	next channel.Publisher,
 	live sessionlog.SessionEventPublisher,
 ) (*sessionTransport, error) {
-	attachHistory, err := sessionlog.BindDefaultHistory(history, defaultWorkspace)
+	attachHistory, err := sessionlog.BindDefaultHistory(st.history, defaultWorkspace)
 	if err != nil {
 		return nil, fmt.Errorf("session history: %w", err)
 	}
@@ -48,7 +48,15 @@ func newSessionTransport(
 	if err != nil {
 		return nil, fmt.Errorf("session events: %w", err)
 	}
+	state, err := sessionlog.NewLifecycleStateProvider(sessionlog.LifecycleStateProviderConfig{
+		Subagents: st.subagents,
+		Goals:     st.goals,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("session lifecycle state: %w", err)
+	}
 	capabilities := spec.DefaultSessionCapabilities()
+	capabilities = append(capabilities, state.Capabilities()...)
 	if multiWorkspace {
 		capabilities = append(capabilities, spec.SessionCapabilityMultiWorkspace)
 	}
@@ -56,6 +64,7 @@ func newSessionTransport(
 		Workspaces:   workspaces,
 		History:      attachHistory,
 		Events:       eventLog,
+		State:        state,
 		Capabilities: capabilities,
 	})
 	if err != nil {

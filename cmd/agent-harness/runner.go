@@ -21,6 +21,11 @@ import (
 )
 
 func buildRunner(cfg appConfig, st stores, pub channel.Publisher, approvals approval.Awaiter, decorator func(context.Context, protocol.MessageAddress) context.Context) (*turn.Runner, *localtools.Workspace, error) {
+	if st.subagents != nil {
+		if err := st.subagents.RecoverInterrupted(context.Background(), time.Now()); err != nil {
+			return nil, nil, fmt.Errorf("subagents: recover interrupted lifecycle: %w", err)
+		}
+	}
 	if err := os.MkdirAll(cfg.workspaceRoot, 0o755); err != nil {
 		return nil, nil, err
 	}
@@ -132,7 +137,9 @@ func buildRunner(cfg appConfig, st stores, pub channel.Publisher, approvals appr
 		Approvals:           approvals,
 		// Notifier wakes a fresh parent turn with a background sub-agent's completion
 		// notice; nil (cli) → background spawns fall back to synchronous.
-		Notifier: notifier,
+		Notifier:                 notifier,
+		SubagentObserver:         st.subagents,
+		SubagentDefaultWorkspace: effectiveWorkspace("", cfg.workspaceID),
 		// Interactive web/TUI channels can use child-thread stream events to keep the
 		// blocking spawn_subagent row live with the child's latest activity.
 		StreamSubagents: allowBackground,

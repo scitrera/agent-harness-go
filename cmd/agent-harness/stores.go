@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/scitrera/agent-harness-go/pkg/goal"
 	"github.com/scitrera/agent-harness-go/pkg/harness"
 	"github.com/scitrera/agent-harness-go/pkg/memorylayer"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 	"github.com/scitrera/agent-harness-go/pkg/store"
+	"github.com/scitrera/agent-harness-go/pkg/subagent"
 	"github.com/scitrera/agent-harness-go/pkg/threadindex"
 	"github.com/scitrera/agent-harness-go/pkg/tools"
 	"github.com/scitrera/agent-harness-go/pkg/turn"
@@ -28,6 +30,10 @@ type stores struct {
 	// memory is the semantic-recall service, set only when MemoryLayer is
 	// configured. nil leaves the turn runner's memory hooks inert.
 	memory turn.MemoryService
+	// Lifecycle stores remain local OSS state even when transcripts use a remote
+	// MemoryLayer backend; distributed adapters can replace the same interfaces.
+	subagents *subagent.FileRegistry
+	goals     *goal.FileStore
 	// remote reports whether transcripts live outside this process, which is
 	// what makes them visible to other clients.
 	remote bool
@@ -168,12 +174,26 @@ func historyLabel(cfg appConfig) string {
 // when configured, otherwise local files.
 func openStores(ctx context.Context, cfg appConfig) (stores, error) {
 	files := store.NewFileStore(cfg.workspaceRoot, cfg.stateDir)
+	subagents, err := subagent.NewFileRegistry(cfg.stateDir)
+	if err != nil {
+		return stores{}, err
+	}
+	goals, err := goal.NewFileStore(cfg.stateDir)
+	if err != nil {
+		return stores{}, err
+	}
 	if cfg.memorylayerURL == "" {
 		index, err := threadindex.NewIndex(workspaceStateDir(cfg), time.Now)
 		if err != nil {
 			return stores{}, fmt.Errorf("threads: %w", err)
 		}
-		return stores{history: bindHistory(files, cfg.workspaceID), threads: index, files: files}, nil
+		return stores{
+			history:   bindHistory(files, cfg.workspaceID),
+			threads:   index,
+			files:     files,
+			subagents: subagents,
+			goals:     goals,
+		}, nil
 	}
 
 	ml, err := memorylayer.New(memorylayer.Config{
@@ -198,10 +218,12 @@ func openStores(ctx context.Context, cfg appConfig) (stores, error) {
 		return stores{}, err
 	}
 	return stores{
-		history: bindHistoryBackend(ml, cfg.workspaceID, cfg.memorylayerWorkspace),
-		threads: ml,
-		files:   files,
-		memory:  bindMemory(recaller, cfg.workspaceID, cfg.memorylayerWorkspace),
-		remote:  true,
+		history:   bindHistoryBackend(ml, cfg.workspaceID, cfg.memorylayerWorkspace),
+		threads:   ml,
+		files:     files,
+		memory:    bindMemory(recaller, cfg.workspaceID, cfg.memorylayerWorkspace),
+		subagents: subagents,
+		goals:     goals,
+		remote:    true,
 	}, nil
 }

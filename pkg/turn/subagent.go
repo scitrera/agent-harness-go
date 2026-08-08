@@ -3,13 +3,18 @@ package turn
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
 	"sync/atomic"
+	"time"
+
+	spec "github.com/scitrera/ecosystem-messaging-spec/go"
 
 	"github.com/scitrera/agent-harness-go/pkg/bootstrap"
 	"github.com/scitrera/agent-harness-go/pkg/channel"
+	"github.com/scitrera/agent-harness-go/pkg/compaction"
 	"github.com/scitrera/agent-harness-go/pkg/harness"
 	"github.com/scitrera/agent-harness-go/pkg/hooks"
 	"github.com/scitrera/agent-harness-go/pkg/ids"
@@ -45,11 +50,13 @@ func (r *Runner) RunSubagent(ctx context.Context, req subagent.Request) (_ subag
 	ctx, span := telemetry.StartSubagent(ctx, req.Depth)
 	defer telemetry.Finish(span, &err)
 	childThreadID, resume := resolveChildThread(req)
+	admittedAt := r.subagentLifecycleNow()
+	r.observeSubagent(ctx, req, childThreadID, spec.SessionSubagentAdmitted, admittedAt, admittedAt, "", nil)
 	var publisher channel.Publisher
 	if r.streamSubagents {
 		publisher = r.publisher
 	}
-	return r.runSubagentOn(ctx, req, childThreadID, resume, publisher)
+	return r.runSubagentOn(ctx, req, childThreadID, resume, publisher, admittedAt)
 }
 
 // resolveChildThread resolves the child sub-agent thread id: resume an existing
@@ -79,7 +86,20 @@ func resolveChildThread(req subagent.Request) (childThreadID string, resume bool
 // the original synchronous body: durable store (resume cold-loads via LoadHistory),
 // OBO carried through, cross-thread back-ref + spawn meta on new child threads, the
 // optional thread-registrar declaration, and the durable commit of task+assistant.
-func (r *Runner) runSubagentOn(ctx context.Context, req subagent.Request, childThreadID string, resume bool, publisher channel.Publisher) (subagent.Result, error) {
+func (r *Runner) runSubagentOn(ctx context.Context, req subagent.Request, childThreadID string, resume bool, publisher channel.Publisher, admittedAt time.Time) (result subagent.Result, err error) {
+	model := req.Model
+	var childUsage map[string]json.RawMessage
+	r.observeSubagent(ctx, req, childThreadID, spec.SessionSubagentRunning, admittedAt, r.subagentLifecycleNow(), model, nil)
+	defer func() {
+		status := spec.SessionSubagentCompleted
+		if err != nil {
+			status = spec.SessionSubagentFailed
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				status = spec.SessionSubagentCancelled
+			}
+		}
+		r.observeSubagent(ctx, req, childThreadID, status, admittedAt, r.subagentLifecycleNow(), model, childUsage)
+	}()
 	ctx = withWorkingDirectoryPrompt(ctx)
 	parentThread := req.Parent.ThreadID
 	addr := req.Parent
@@ -128,6 +148,7 @@ func (r *Runner) runSubagentOn(ctx context.Context, req subagent.Request, childT
 	// req.Model (from spawn_subagent's model arg) is an explicit override; with it
 	// empty the sub-agent uses normal capability-matched selection for its task.
 	subModel := r.resolveTurnModel(ctx, addr, userMsg, req.Model)
+	model = subModel
 	if req.MaxTurns > 0 {
 		ctx = withToolIterationLimit(ctx, req.MaxTurns)
 	}
@@ -182,6 +203,7 @@ func (r *Runner) runSubagentOn(ctx context.Context, req subagent.Request, childT
 	// the "::sub::" thread-name convention. On resume the task message has no ref
 	// (skipped above), so committing it is still correct (just the follow-up turn).
 	r.commitMessages(ctx, auth, addr, []protocol.ChatMessage{userMsg, assistant})
+	childUsage = sessionUsageProjection(assistant)
 	text := textOf(assistant)
 	return subagent.Result{Text: text, ThreadID: childThreadID, Summary: summarizeSubagent(text)}, nil
 }
@@ -198,6 +220,8 @@ func (r *Runner) StartBackground(ctx context.Context, req subagent.Request) (str
 		return "", subagent.ErrBackgroundUnsupported
 	}
 	childThreadID, resume := resolveChildThread(req)
+	admittedAt := r.subagentLifecycleNow()
+	r.observeSubagent(ctx, req, childThreadID, spec.SessionSubagentAdmitted, admittedAt, admittedAt, "", nil)
 	// Snapshot the parent OBO so the woken completion turn can act as the same
 	// principal. It is handed off out-of-band via a single-use token (never the
 	// credential on the message); a zero authority (local dev, no OBO) yields an
@@ -218,10 +242,70 @@ func (r *Runner) StartBackground(ctx context.Context, req subagent.Request) (str
 			publisher = r.publisher
 		}
 		var res subagent.Result
-		res, err = r.runSubagentOn(sctx, req, childThreadID, resume, publisher)
+		res, err = r.runSubagentOn(sctx, req, childThreadID, resume, publisher, admittedAt)
 		r.notifySubagentComplete(sctx, req, childThreadID, parentAuth, res, err)
 	}()
 	return childThreadID, nil
+}
+
+func (r *Runner) subagentLifecycleNow() time.Time {
+	if r.now != nil {
+		return r.now().UTC()
+	}
+	return time.Now().UTC()
+}
+
+func (r *Runner) observeSubagent(
+	ctx context.Context,
+	req subagent.Request,
+	childThreadID string,
+	status spec.SessionSubagentStatus,
+	createdAt, updatedAt time.Time,
+	model string,
+	childUsage map[string]json.RawMessage,
+) {
+	if r.subagentObserver == nil {
+		return
+	}
+	workspaceID := req.Parent.WorkspaceID
+	if workspaceID == "" {
+		workspaceID = r.subagentDefaultWorkspace
+	}
+	record := spec.SessionSubagentRecord{
+		ID:              childThreadID,
+		ParentSessionID: req.Parent.ThreadID,
+		ChildSessionID:  childThreadID,
+		Name:            subagentDisplayName(req),
+		Kind:            string(req.AgentType),
+		Model:           model,
+		Depth:           uint32(max(req.Depth, 0)),
+		Status:          status,
+		CreatedAt:       createdAt.Format(time.RFC3339Nano),
+		UpdatedAt:       updatedAt.Format(time.RFC3339Nano),
+		ChildUsage:      childUsage,
+	}
+	if status == spec.SessionSubagentCompleted || status == spec.SessionSubagentFailed || status == spec.SessionSubagentCancelled {
+		record.CompletedAt = record.UpdatedAt
+	}
+	if err := r.subagentObserver.ObserveSubagent(context.WithoutCancel(ctx), subagent.LifecycleEvent{
+		WorkspaceID: workspaceID,
+		Record:      record,
+	}); err != nil {
+		slog.WarnContext(ctx, "subagent: record lifecycle failed",
+			slog.String("thread", childThreadID), slog.String("status", string(status)), slog.Any("err", err))
+	}
+}
+
+func sessionUsageProjection(message protocol.ChatMessage) map[string]json.RawMessage {
+	raw := message.Meta[compaction.MetaUsage]
+	if len(raw) == 0 {
+		return nil
+	}
+	var usage map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &usage); err != nil {
+		return nil
+	}
+	return usage
 }
 
 // notifySubagentComplete pushes a completion notice for a background sub-agent

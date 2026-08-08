@@ -114,6 +114,18 @@ persist their session cursor, retained event suffix, and live message projection
 below `<state-dir>/sessionlog/workspaces`; reconnect replay therefore survives a
 worker restart. Each state directory supports one writing process at a time.
 
+Schema-revision-3 clients may additionally negotiate
+`session.state.subagents.v1` and `session.state.goals.v1`. The reference host
+projects workspace/session-isolated OSS file registries from
+`<state-dir>/session-state/workspaces` into those shared snapshot namespaces.
+The in-process subagent runner records admitted, running, and terminal child
+lifecycle plus child token usage; startup marks children left running by a prior
+process as `interrupted` rather than guessing their outcome. `pkg/goal` exposes
+the same typed atomic file-store seam for hosts and embedders; a remote
+MemoryLayer or Aether checkpoint adapter can replace either source without
+changing the session wire shape. Clients that do not request these capabilities
+do not load or receive the optional state.
+
 Aether and other channels can adapt the same library without changing the
 protocol or local storage behavior.
 

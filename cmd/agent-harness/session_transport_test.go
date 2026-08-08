@@ -8,7 +8,9 @@ import (
 	spec "github.com/scitrera/ecosystem-messaging-spec/go"
 
 	"github.com/scitrera/agent-harness-go/pkg/channel"
+	"github.com/scitrera/agent-harness-go/pkg/goal"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
+	"github.com/scitrera/agent-harness-go/pkg/subagent"
 )
 
 func TestParseVisibleWorkspacesNormalizesList(t *testing.T) {
@@ -32,7 +34,8 @@ func TestSessionTransportAdvertisesAndEnforcesVisibleWorkspaces(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	transport, err := newSessionTransport(t.TempDir(), &recordingScopedHistory{}, resolver, "project-a", true, nil, nil)
+	stateDir := t.TempDir()
+	transport, err := newSessionTransport(stateDir, newTestSessionStores(t, stateDir), resolver, "project-a", true, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +62,8 @@ func TestSessionTransportResumesAfterRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	firstTransport, err := newSessionTransport(stateDir, &recordingScopedHistory{}, resolver, "project-a", false, nil, nil)
+	firstStores := newTestSessionStores(t, stateDir)
+	firstTransport, err := newSessionTransport(stateDir, firstStores, resolver, "project-a", false, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,12 +81,28 @@ func TestSessionTransportResumesAfterRestart(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	if err := firstStores.subagents.ObserveSubagent(ctx, subagent.LifecycleEvent{
+		WorkspaceID: "project-a",
+		Record: spec.SessionSubagentRecord{
+			ID: "child-1", ParentSessionID: request.SessionID, ChildSessionID: request.SessionID + "::sub::1",
+			Status: spec.SessionSubagentRunning, CreatedAt: "2026-08-08T20:00:00Z", UpdatedAt: "2026-08-08T20:01:00Z",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := firstStores.goals.PutGoal(ctx, "project-a", request.SessionID, spec.SessionGoalRecord{
+		ID: "goal-1", Objective: "survive restart", Status: spec.SessionGoalActive,
+		CreatedAt: "2026-08-08T20:00:00Z", UpdatedAt: "2026-08-08T20:01:00Z",
+	}); err != nil {
+		t.Fatal(err)
+	}
 
-	restartedTransport, err := newSessionTransport(stateDir, &recordingScopedHistory{}, resolver, "project-a", false, nil, nil)
+	restartedTransport, err := newSessionTransport(stateDir, newTestSessionStores(t, stateDir), resolver, "project-a", false, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	request.ResumeAfter = &firstAttach.Snapshot.Cursor
+	request.Capabilities = append(request.Capabilities, spec.SessionCapabilityGoalsState, spec.SessionCapabilitySubagentsState)
 	restartedAttach, err := restartedTransport.Coordinator.Attach(ctx, request)
 	if err != nil {
 		t.Fatal(err)
@@ -95,5 +115,30 @@ func TestSessionTransportResumesAfterRestart(t *testing.T) {
 	}
 	if len(restartedAttach.Snapshot.Messages) != 1 || restartedAttach.Snapshot.Messages[0].ID != message.ID {
 		t.Fatalf("restart snapshot = %#v", restartedAttach.Snapshot.Messages)
+	}
+	goals, err := restartedAttach.Snapshot.DecodeGoalsState()
+	if err != nil || goals == nil || len(goals.Records) != 1 || goals.Records[0].ID != "goal-1" {
+		t.Fatalf("restart goals = %#v, %v", goals, err)
+	}
+	subagents, err := restartedAttach.Snapshot.DecodeSubagentsState()
+	if err != nil || subagents == nil || len(subagents.Records) != 1 || subagents.Records[0].ID != "child-1" {
+		t.Fatalf("restart subagents = %#v, %v", subagents, err)
+	}
+}
+
+func newTestSessionStores(t *testing.T, stateDir string) stores {
+	t.Helper()
+	subagents, err := subagent.NewFileRegistry(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	goals, err := goal.NewFileStore(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return stores{
+		history:   &recordingScopedHistory{},
+		subagents: subagents,
+		goals:     goals,
 	}
 }

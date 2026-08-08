@@ -24,6 +24,7 @@ import (
 	modelpkg "github.com/scitrera/agent-harness-go/pkg/model"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 	"github.com/scitrera/agent-harness-go/pkg/provider"
+	"github.com/scitrera/agent-harness-go/pkg/subagent"
 	"github.com/scitrera/agent-harness-go/pkg/telemetry"
 	"github.com/scitrera/agent-harness-go/pkg/tools"
 	"github.com/scitrera/agent-harness-go/pkg/turncancel"
@@ -194,6 +195,8 @@ type Runner struct {
 	streamSubagents           bool
 	streamBackgroundSubagents bool
 	authHandoff               *authhandoff.Store
+	subagentObserver          subagent.LifecycleObserver
+	subagentDefaultWorkspace  string
 
 	// rubric, when set, runs the opt-in post-turn self-grading verifier at
 	// end-of-turn (nil → skipped; default behavior unchanged).
@@ -444,6 +447,14 @@ type Config struct {
 	// message). Optional; nil → a Store is created. The distribution's Authority
 	// func resolves the token against it before falling back to gateway derivation.
 	AuthHandoff *authhandoff.Store
+	// SubagentObserver receives best-effort authoritative lifecycle transitions
+	// for durable registry/snapshot projection. Observation failures are logged
+	// and never fail the child turn itself.
+	SubagentObserver subagent.LifecycleObserver
+	// SubagentDefaultWorkspace resolves registry identity when legacy local turns
+	// omit workspace on their address. It is separate from DefaultWorkspaceID so
+	// legacy unscoped transcript storage need not move on disk.
+	SubagentDefaultWorkspace string
 
 	// Rubric, when set, runs an OPT-IN post-turn self-grading verifier: after a
 	// turn finishes, an independent grader checks the just-produced result against
@@ -576,6 +587,8 @@ func NewRunner(cfg Config) (*Runner, error) {
 		streamSubagents:           cfg.StreamSubagents,
 		streamBackgroundSubagents: cfg.StreamBackgroundSubagents,
 		authHandoff:               authHandoff,
+		subagentObserver:          cfg.SubagentObserver,
+		subagentDefaultWorkspace:  strings.TrimSpace(cfg.SubagentDefaultWorkspace),
 		rubric:                    cfg.Rubric,
 		ctxDecorator:              cfg.ContextDecorator,
 	}, nil

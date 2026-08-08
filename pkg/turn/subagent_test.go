@@ -6,7 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
+	"time"
+
+	spec "github.com/scitrera/ecosystem-messaging-spec/go"
 
 	"github.com/scitrera/agent-harness-go/pkg/bootstrap"
 	"github.com/scitrera/agent-harness-go/pkg/channel"
@@ -16,6 +20,25 @@ import (
 	"github.com/scitrera/agent-harness-go/pkg/subagent"
 	"github.com/scitrera/agent-harness-go/pkg/tools"
 )
+
+type captureSubagentLifecycle struct {
+	mu     sync.Mutex
+	events []subagent.LifecycleEvent
+	err    error
+}
+
+func (o *captureSubagentLifecycle) ObserveSubagent(_ context.Context, event subagent.LifecycleEvent) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.events = append(o.events, event)
+	return o.err
+}
+
+func (o *captureSubagentLifecycle) snapshot() []subagent.LifecycleEvent {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return append([]subagent.LifecycleEvent(nil), o.events...)
+}
 
 func Test_Runner_RunSubagent_returns_final_text(t *testing.T) {
 	r, err := NewRunner(Config{
@@ -37,6 +60,64 @@ func Test_Runner_RunSubagent_returns_final_text(t *testing.T) {
 	}
 	if res.Text != "assistant response" {
 		t.Fatalf("expected sub-agent final text, got %q", res.Text)
+	}
+}
+
+func Test_Runner_RunSubagent_observesDurableLifecycle(t *testing.T) {
+	observer := &captureSubagentLifecycle{}
+	now := time.Date(2026, 8, 8, 20, 0, 0, 0, time.UTC)
+	runner, err := NewRunner(Config{
+		Store:                    &fakeStore{},
+		Loader:                   fakeLoader{},
+		Provider:                 &fakeProvider{},
+		Assembler:                contextpack.NewAssembler(contextpack.Config{MaxHistoryMessages: 8}),
+		Now:                      func() time.Time { return now },
+		SubagentObserver:         observer,
+		SubagentDefaultWorkspace: "project-a",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := runner.RunSubagent(context.Background(), subagent.Request{
+		Task: "review", Depth: 1, Parent: protocol.MessageAddress{ThreadID: "parent-1"},
+		AgentName: "reviewer", AgentType: "review", Model: "local-model",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := observer.snapshot()
+	if len(events) != 3 {
+		t.Fatalf("lifecycle events = %#v", events)
+	}
+	wantStatuses := []spec.SessionSubagentStatus{
+		spec.SessionSubagentAdmitted,
+		spec.SessionSubagentRunning,
+		spec.SessionSubagentCompleted,
+	}
+	for i, event := range events {
+		if event.WorkspaceID != "project-a" || event.Record.ID != result.ThreadID || event.Record.ParentSessionID != "parent-1" || event.Record.Status != wantStatuses[i] {
+			t.Fatalf("lifecycle event %d = %#v", i, event)
+		}
+	}
+	if events[2].Record.CompletedAt == "" || events[2].Record.Name != "reviewer" || events[2].Record.Kind != "review" || events[2].Record.Model != "local-model" {
+		t.Fatalf("terminal lifecycle record = %#v", events[2].Record)
+	}
+}
+
+func Test_Runner_RunSubagent_observerFailureDoesNotFailTurn(t *testing.T) {
+	observer := &captureSubagentLifecycle{err: errors.New("registry unavailable")}
+	runner, err := NewRunner(Config{
+		Store: &fakeStore{}, Loader: fakeLoader{}, Provider: &fakeProvider{},
+		Assembler:        contextpack.NewAssembler(contextpack.Config{MaxHistoryMessages: 8}),
+		SubagentObserver: observer, SubagentDefaultWorkspace: "project-a",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runner.RunSubagent(context.Background(), subagent.Request{
+		Task: "review", Depth: 1, Parent: protocol.MessageAddress{ThreadID: "parent-1"},
+	}); err != nil {
+		t.Fatalf("observer failure broke subagent turn: %v", err)
 	}
 }
 

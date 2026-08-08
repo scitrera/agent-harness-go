@@ -66,7 +66,7 @@ func runAetherStandalone(cfg appConfig) error {
 		return err
 	}
 	sessionTransport, err := newSessionTransport(
-		cfg.stateDir, st.history, workspaceResolver, wireWorkspaceID,
+		cfg.stateDir, st, workspaceResolver, wireWorkspaceID,
 		hasAdditionalVisibleWorkspace(wireWorkspaceID, cfg.visibleWorkspaces), worker, worker,
 	)
 	if err != nil {
