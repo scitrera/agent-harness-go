@@ -42,9 +42,8 @@ type TaskOperations interface {
 // SubagentTaskBackend maps the neutral child execution contract to real Aether
 // tasks. The task is self-assigned because this harness still executes the
 // child in-process; task identity nevertheless owns admission and lifecycle.
-// Native parent_task_id remains available only when the creator is connected as
-// the parent task principal, so agent-identity turns retain parent correlation in
-// metadata without pretending that it is Aether task parentage.
+// When the triggering turn is an active Aether task, ParentTaskID asks Aether
+// to validate the caller's ownership and persist native task hierarchy.
 type SubagentTaskBackend struct {
 	tasks          TaskOperations
 	workspace      string
@@ -115,6 +114,7 @@ func (b *SubagentTaskBackend) Admit(ctx context.Context, admission subagent.Task
 		TaskType:       subagentTaskType,
 		Workspace:      b.workspace,
 		AssignmentMode: sdk.TaskAssignmentSelfAssign,
+		ParentTaskID:   admission.ParentTaskID,
 		Metadata:       metadata,
 		Authorization:  authorization,
 		RetryPolicy:    &pb.RetryPolicy{MaxAttempts: 1},

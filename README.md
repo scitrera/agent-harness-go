@@ -185,12 +185,14 @@ before the corresponding lifecycle projection; an ambiguous terminal result is
 projected as `interrupted` and is never automatically replayed. Restart recovery
 queries terminal tasks and terminates abandoned non-terminal in-process work.
 
-The reference worker currently receives parent turns as its stable agent
-identity, so these child tasks retain the parent task ID as correlation metadata
-rather than claiming native Aether `parent_task_id`. Native task hierarchy
-requires executing the parent turn under its task principal. The shared session
-protocol needs no extra field for this: revision 3 already carries the child
-`task_id`, while Aether owns task identity, idempotency, and parentage semantics.
+When the triggering turn is an active Aether task assigned to the worker, child
+creation also requests native Aether `parent_task_id`. Aether validates the
+request-scoped parent against the caller, workspace, and active lifecycle before
+persisting the hierarchy; this works even though the long-lived worker remains
+connected as its stable agent identity. The metadata copy remains useful for
+inspection and non-Aether backends. The shared session protocol needs no extra
+field for this: revision 3 already carries the child `task_id`, while Aether owns
+task identity, idempotency, authorization, and parentage semantics.
 
 By default each client keeps a local copy of the conversation it witnessed, so a
 second client attaching mid-conversation sees only what arrives after it

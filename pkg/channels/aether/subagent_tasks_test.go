@@ -118,6 +118,9 @@ func TestSubagentTaskBackendAdmitsIdempotentOBOExecution(t *testing.T) {
 	if first.TaskClass != pb.TaskClass_TASK_CLASS_BACKGROUND || first.ContextID == "" || first.RetryPolicy.GetMaxAttempts() != 1 {
 		t.Fatalf("task policy = class:%s context:%q retry:%+v", first.TaskClass, first.ContextID, first.RetryPolicy)
 	}
+	if first.ParentTaskID != "parent-task" {
+		t.Fatalf("native parent task = %q", first.ParentTaskID)
+	}
 	if first.Authorization.GetAuthorityMode() != "on_behalf_of" || first.Authorization.GetGrantId() != "grant-1" || first.Authorization.GetSubject().GetPrincipalId() != "alice" {
 		t.Fatalf("authorization = %+v", first.Authorization)
 	}
