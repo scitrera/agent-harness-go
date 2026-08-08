@@ -32,6 +32,7 @@ func newSessionWorkspaceResolver(defaultWorkspace string, visible []string) (*se
 }
 
 func newSessionTransport(
+	stateDir string,
 	history historyStore,
 	workspaces sessionlog.WorkspaceResolver,
 	defaultWorkspace string,
@@ -43,7 +44,10 @@ func newSessionTransport(
 	if err != nil {
 		return nil, fmt.Errorf("session history: %w", err)
 	}
-	eventLog := sessionlog.NewMemoryEventLog(sessionlog.MemoryEventLogConfig{})
+	eventLog, err := sessionlog.NewFileEventLog(sessionlog.FileEventLogConfig{StateDir: stateDir})
+	if err != nil {
+		return nil, fmt.Errorf("session events: %w", err)
+	}
 	capabilities := spec.DefaultSessionCapabilities()
 	if multiWorkspace {
 		capabilities = append(capabilities, spec.SessionCapabilityMultiWorkspace)

@@ -19,7 +19,7 @@ and is the open-source core that the Scitrera distribution ("sahara") builds on.
 | Catalog | `catalog` | fixed + filesystem | service-backed `catalog.Provider` |
 | Tool approval | `hooks` | allow-all | allow-lists, ACL/human approvers |
 | Tool observer | `hooks` | none | OTel/audit observers |
-| Session attach/replay | `sessionlog` | bounded in-memory event log | durable Aether/MemoryLayer implementations |
+| Session attach/replay | `sessionlog` | bounded memory/file event logs | Aether/MemoryLayer/distributed implementations |
 
 ## Quick start
 
@@ -93,9 +93,10 @@ default, and unlisted explicit workspaces fail closed.
 ### Session attachment library
 
 `pkg/sessionlog` is the transport-independent OSS reference for resumable
-clients. It provides a bounded event log keyed by `(workspace_id, session_id)`,
-generation-aware complete/partial/unavailable replay, an atomic attach capture,
-and a publisher wrapper that records the shared chat-stream vocabulary. Its
+clients. It provides bounded in-memory and atomically persisted event logs keyed
+by `(workspace_id, session_id)`, generation-aware complete/partial/unavailable
+replay, an atomic attach capture, and a publisher wrapper that records the
+shared chat-stream vocabulary. Its
 attach coordinator combines workspace-scoped durable history with any live
 stream projection so a client does not miss a finalized message during the
 short interval before transcript persistence.
@@ -107,8 +108,11 @@ web mode exposes the local integration at `POST /api/session/attach`. Its
 `session_attached`, then cursor-bearing `session_event` records; reconnectors can
 also pass `generation` and `sequence`. A detected reset or delivery gap closes
 the stream after a `session_reset` or `session_gap` marker so the client can
-attach again. Legacy single-workspace storage is preserved on disk while the
-wire API resolves it as workspace `default`.
+attach again. Legacy single-workspace history storage is preserved on disk while
+the wire API resolves it as workspace `default`. Web and Aether worker modes
+persist their session cursor, retained event suffix, and live message projection
+below `<state-dir>/sessionlog/workspaces`; reconnect replay therefore survives a
+worker restart. Each state directory supports one writing process at a time.
 
 Aether and other channels can adapt the same library without changing the
 protocol or local storage behavior.

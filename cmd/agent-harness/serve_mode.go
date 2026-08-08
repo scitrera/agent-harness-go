@@ -50,7 +50,7 @@ func runServe(cfg appConfig) error {
 		return err
 	}
 	sessionTransport, err := newSessionTransport(
-		st.history, workspaceResolver, wireWorkspaceID,
+		cfg.stateDir, st.history, workspaceResolver, wireWorkspaceID,
 		hasAdditionalVisibleWorkspace(wireWorkspaceID, cfg.visibleWorkspaces), ch, ch,
 	)
 	if err != nil {
