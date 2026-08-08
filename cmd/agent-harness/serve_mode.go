@@ -50,7 +50,11 @@ func runServe(cfg appConfig) error {
 	if err != nil {
 		return err
 	}
-	blobs, err := ch.SessionBlobStore(0)
+	blobs, err := ch.BlobStore(0)
+	if err != nil {
+		return err
+	}
+	st, err = withCASLifecycle(st, blobs)
 	if err != nil {
 		return err
 	}

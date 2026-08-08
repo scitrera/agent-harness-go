@@ -141,15 +141,7 @@ func (r *FileRegistry) path(workspaceID, parentSessionID string) string {
 }
 
 func (r *FileRegistry) loadLocked(workspaceID, parentSessionID string) (fileRegistryState, error) {
-	state := fileRegistryState{
-		SchemaVersion:   fileRegistrySchemaVersion,
-		WorkspaceID:     workspaceID,
-		ParentSessionID: parentSessionID,
-		State: spec.SessionSubagentsState{
-			SchemaRevision: spec.SessionSubagentsStateSchemaRevision,
-			Records:        []spec.SessionSubagentRecord{},
-		},
-	}
+	state := newRegistryState(workspaceID, parentSessionID)
 	data, err := os.ReadFile(r.path(workspaceID, parentSessionID))
 	if errors.Is(err, os.ErrNotExist) {
 		return state, nil
@@ -199,6 +191,25 @@ func (r *FileRegistry) ObserveSubagent(ctx context.Context, event LifecycleEvent
 	if err != nil {
 		return err
 	}
+	if err := putSubagentState(&state, record); err != nil {
+		return err
+	}
+	return r.persistLocked(state)
+}
+
+func newRegistryState(workspaceID, parentSessionID string) fileRegistryState {
+	return fileRegistryState{
+		SchemaVersion:   fileRegistrySchemaVersion,
+		WorkspaceID:     workspaceID,
+		ParentSessionID: parentSessionID,
+		State: spec.SessionSubagentsState{
+			SchemaRevision: spec.SessionSubagentsStateSchemaRevision,
+			Records:        []spec.SessionSubagentRecord{},
+		},
+	}
+}
+
+func putSubagentState(state *fileRegistryState, record spec.SessionSubagentRecord) error {
 	index := sort.Search(len(state.State.Records), func(i int) bool { return state.State.Records[i].ID >= record.ID })
 	if index < len(state.State.Records) && state.State.Records[index].ID == record.ID {
 		if state.State.Records[index].Status == spec.SessionSubagentDeleted && record.Status != spec.SessionSubagentDeleted {
@@ -214,7 +225,7 @@ func (r *FileRegistry) ObserveSubagent(ctx context.Context, event LifecycleEvent
 	if err := state.State.Validate(record.ParentSessionID); err != nil {
 		return fmt.Errorf("subagent: lifecycle transition: %w", err)
 	}
-	return r.persistLocked(state)
+	return nil
 }
 
 // ListSubagents returns a deterministic deep copy for snapshot projection.

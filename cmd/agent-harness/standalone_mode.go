@@ -66,7 +66,11 @@ func runAetherStandalone(cfg appConfig) error {
 	if err != nil {
 		return err
 	}
-	blobs, err := worker.SessionBlobStore(0)
+	blobs, err := worker.BlobStore(0)
+	if err != nil {
+		return err
+	}
+	st, err = withCASLifecycle(st, blobs)
 	if err != nil {
 		return err
 	}

@@ -19,9 +19,9 @@ type KVOperations interface {
 }
 
 // KVBlobStore adapts Aether's workspace-exclusive KV namespace to the neutral
-// compare-and-swap blob contract used by sessionlog.CASEventLog. The Aether
-// agent implementation+specifier provides host identity; logical workspace and
-// session identities remain encoded in each event-log key.
+// compare-and-swap blob contract used by distributed session and lifecycle
+// stores. The Aether agent implementation+specifier provides host identity;
+// logical workspace and session identities remain encoded in each store key.
 type KVBlobStore struct {
 	kv        KVOperations
 	workspace string
@@ -41,11 +41,18 @@ func NewKVBlobStore(kv KVOperations, workspace string, timeout time.Duration) (*
 	return &KVBlobStore{kv: kv, workspace: workspace, timeout: timeout}, nil
 }
 
-// SessionBlobStore returns a store bound to this agent's workspace-exclusive KV
+// BlobStore returns a store bound to this agent's workspace-exclusive KV
 // namespace. It is safe to construct before Start; operations require the
 // channel's SDK connection to be running.
-func (c *Channel) SessionBlobStore(timeout time.Duration) (*KVBlobStore, error) {
+func (c *Channel) BlobStore(timeout time.Duration) (*KVBlobStore, error) {
 	return NewKVBlobStore(c.client.KV(), c.workspace, timeout)
+}
+
+// SessionBlobStore is retained for source compatibility with the first event
+// log integration. New callers should use BlobStore because lifecycle and other
+// distributed state share the same neutral contract.
+func (c *Channel) SessionBlobStore(timeout time.Duration) (*KVBlobStore, error) {
+	return c.BlobStore(timeout)
 }
 
 func (s *KVBlobStore) Read(ctx context.Context, key string) ([]byte, bool, error) {

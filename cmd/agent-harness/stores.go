@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/scitrera/agent-harness-go/pkg/casblob"
 	"github.com/scitrera/agent-harness-go/pkg/goal"
 	"github.com/scitrera/agent-harness-go/pkg/harness"
 	"github.com/scitrera/agent-harness-go/pkg/memorylayer"
@@ -30,13 +31,31 @@ type stores struct {
 	// memory is the semantic-recall service, set only when MemoryLayer is
 	// configured. nil leaves the turn runner's memory hooks inert.
 	memory turn.MemoryService
-	// Lifecycle stores remain local OSS state even when transcripts use a remote
-	// MemoryLayer backend; distributed adapters can replace the same interfaces.
-	subagents *subagent.FileRegistry
-	goals     *goal.FileStore
+	// Lifecycle stores use local files by default. Aether worker modes replace
+	// them with CAS-backed implementations over the same interfaces.
+	subagents subagent.Registry
+	goals     goal.Store
 	// remote reports whether transcripts live outside this process, which is
 	// what makes them visible to other clients.
 	remote bool
+}
+
+// withCASLifecycle replaces the local single-writer lifecycle projections with
+// distributed CAS stores. Aether's stable agent identity is exclusive, so the
+// subagent registry defers startup interruption recovery until the first KV
+// operation after the channel has connected successfully.
+func withCASLifecycle(st stores, blobs casblob.Store) (stores, error) {
+	subagents, err := subagent.NewCASRegistry(subagent.CASRegistryConfig{Blobs: blobs, DeferRecovery: true})
+	if err != nil {
+		return stores{}, err
+	}
+	goals, err := goal.NewCASStore(goal.CASStoreConfig{Blobs: blobs})
+	if err != nil {
+		return stores{}, err
+	}
+	st.subagents = subagents
+	st.goals = goals
+	return st, nil
 }
 
 // historyStore is the transcript surface the modes need: the runner's

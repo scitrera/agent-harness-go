@@ -119,15 +119,19 @@ or overwriting one another while preserving the same `EventStore` behavior.
 
 Schema-revision-3 clients may additionally negotiate
 `session.state.subagents.v1` and `session.state.goals.v1`. The reference host
-projects workspace/session-isolated OSS file registries from
-`<state-dir>/session-state/workspaces` into those shared snapshot namespaces.
-The in-process subagent runner records admitted, running, and terminal child
-lifecycle plus child token usage; startup marks children left running by a prior
-process as `interrupted` rather than guessing their outcome. `pkg/goal` exposes
-the same typed atomic file-store seam for hosts and embedders; a remote
-MemoryLayer or Aether checkpoint adapter can replace either source without
-changing the session wire shape. Clients that do not request these capabilities
-do not load or receive the optional state.
+projects workspace/session-isolated lifecycle stores into those shared snapshot
+namespaces. Local web/CLI modes use atomic files below
+`<state-dir>/session-state/workspaces`; Aether worker/standalone modes store the
+same typed states in workspace-exclusive KV with atomic create and full-value
+compare-and-swap. The in-process subagent runner records admitted, running, and
+terminal child lifecycle plus child token usage. Local startup marks children
+left running by a prior single writer as `interrupted`; Aether defers that scan
+until its stable agent identity has connected successfully, proving a duplicate
+worker is not still active, then recovers every indexed parent projection. Goal
+and subagent CAS stores preserve deterministic ordering, deletion tombstones,
+workspace isolation, and the same strict corruption checks as their file
+counterparts. Clients that do not request these capabilities do not load or
+receive the optional state.
 
 Aether and other channels can adapt the same library without changing the
 protocol or local storage behavior.

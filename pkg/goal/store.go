@@ -115,6 +115,13 @@ func (s *FileStore) PutGoal(ctx context.Context, workspaceID, sessionID string, 
 	if err != nil {
 		return err
 	}
+	if err := putGoalState(&state, record); err != nil {
+		return err
+	}
+	return s.persistLocked(state)
+}
+
+func putGoalState(state *fileStoreState, record spec.SessionGoalRecord) error {
 	index := sort.Search(len(state.State.Records), func(i int) bool { return state.State.Records[i].ID >= record.ID })
 	if index < len(state.State.Records) && state.State.Records[index].ID == record.ID {
 		if state.State.Records[index].CreatedAt != "" {
@@ -129,7 +136,7 @@ func (s *FileStore) PutGoal(ctx context.Context, workspaceID, sessionID string, 
 	if err := state.State.Validate(); err != nil {
 		return fmt.Errorf("goal: lifecycle transition: %w", err)
 	}
-	return s.persistLocked(state)
+	return nil
 }
 
 // ListGoals returns a deterministic deep copy for snapshot projection.

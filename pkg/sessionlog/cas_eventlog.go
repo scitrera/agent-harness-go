@@ -9,6 +9,7 @@ import (
 
 	spec "github.com/scitrera/ecosystem-messaging-spec/go"
 
+	"github.com/scitrera/agent-harness-go/pkg/casblob"
 	"github.com/scitrera/agent-harness-go/pkg/ids"
 	workspacepkg "github.com/scitrera/agent-harness-go/pkg/workspace"
 )
@@ -20,15 +21,9 @@ const (
 
 var ErrCASRetryLimit = errors.New("sessionlog: distributed event update retry limit exceeded")
 
-// CASBlobStore is the minimal distributed persistence contract needed by the
-// session event log. Implementations must compare the complete current byte
-// value atomically; callers therefore do not depend on a backend-specific
-// revision, transaction, or lock representation.
-type CASBlobStore interface {
-	Read(ctx context.Context, key string) (value []byte, found bool, err error)
-	Create(ctx context.Context, key string, value []byte) (created bool, err error)
-	CompareAndSwap(ctx context.Context, key string, expected, value []byte) (swapped bool, err error)
-}
+// CASBlobStore remains as an alias for compatibility. New distributed stores
+// use the neutral casblob.Store contract directly.
+type CASBlobStore = casblob.Store
 
 // CASEventLogConfig configures a bounded distributed event log. Prefix
 // namespaces keys inside the supplied blob store; an empty value uses the
