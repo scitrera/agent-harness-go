@@ -9,6 +9,7 @@ import (
 	"github.com/scitrera/agent-harness-go/pkg/memorylayer"
 	"github.com/scitrera/agent-harness-go/pkg/store"
 	"github.com/scitrera/agent-harness-go/pkg/threadindex"
+	"github.com/scitrera/agent-harness-go/pkg/turn"
 )
 
 // stores bundles where a mode keeps conversations. Both the turn runner and the
@@ -21,6 +22,9 @@ type stores struct {
 	history historyStore
 	threads threadindex.Store
 	files   *store.FileStore
+	// memory is the semantic-recall service, set only when MemoryLayer is
+	// configured. nil leaves the turn runner's memory hooks inert.
+	memory turn.MemoryService
 	// remote reports whether transcripts live outside this process, which is
 	// what makes them visible to other clients.
 	remote bool
@@ -66,5 +70,13 @@ func openStores(ctx context.Context, cfg appConfig) (stores, error) {
 	if err := ml.Refresh(ctx); err != nil {
 		return stores{}, fmt.Errorf("memorylayer: load threads: %w", err)
 	}
-	return stores{history: ml, threads: ml, files: files, remote: true}, nil
+	recaller, err := memorylayer.NewRecaller(memorylayer.Config{
+		BaseURL:   cfg.memorylayerURL,
+		APIKey:    cfg.memorylayerKey,
+		Workspace: cfg.memorylayerWorkspace,
+	})
+	if err != nil {
+		return stores{}, err
+	}
+	return stores{history: ml, threads: ml, files: files, memory: recaller, remote: true}, nil
 }

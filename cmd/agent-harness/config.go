@@ -43,6 +43,10 @@ type appConfig struct {
 	memorylayerURL       string
 	memorylayerKey       string
 	memorylayerWorkspace string
+	// memoryRecall injects memories relevant to the user's message into the
+	// turn; memoryRecallLimit caps how many.
+	memoryRecall      bool
+	memoryRecallLimit int
 
 	// streamFlush is the token-delta coalescing interval handed to the turn
 	// runner; 0 streams every delta.

@@ -172,12 +172,18 @@ type messageListEnvelope struct {
 }
 
 // ensureWorkspace creates the configured workspace when the server does not
-// have it. This is load-bearing rather than tidy-up: appending to a thread in a
-// workspace that does not exist auto-creates the thread, and that insert then
-// fails a foreign-key constraint. The surfaced error is an opaque
-// 500 "Failed to append messages", so without this every write fails with no
-// indication that the workspace is the problem. MemoryLayer ships `_default`,
-// not `default`, so a stock configuration hits exactly this.
+// have it.
+//
+// Servers from before memorylayer oss 0e01496 resolve the workspace to
+// auto-create from the request body only, never the query string — so a write
+// that names its workspace as a query parameter (which is how the chat routes
+// take it) lands in a workspace that was never created, and the
+// chat_threads.workspace_id foreign key fails as an opaque
+// 500 "Failed to append messages". MemoryLayer ships `_default`, not `default`,
+// so a stock configuration hits it on every write.
+//
+// A fixed server makes this redundant but harmless; it stays so the harness
+// works against already-deployed ones.
 func (c *client) ensureWorkspace(ctx context.Context) error {
 	if c.workspace == "" {
 		return nil

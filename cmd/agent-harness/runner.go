@@ -115,6 +115,13 @@ func buildRunner(cfg appConfig, st stores, pub channel.Publisher, approvals appr
 		}),
 		Model:     cfg.model,
 		Streaming: true,
+		// Semantic recall from MemoryLayer, when configured. Auto-commit stays
+		// off: the history store already writes the transcript to MemoryLayer,
+		// and MemoryLayer distils memories from it on its own schedule.
+		Memory:                   st.memory,
+		MemoryAutoRecall:         st.memory != nil && cfg.memoryRecall,
+		MemoryRecallLimit:        cfg.memoryRecallLimit,
+		MemoryRecallIncludeInput: true,
 		// Bound the token-delta message rate on transports that pay per message
 		// (Aether); 0 on the in-process channels streams every delta.
 		StreamFlushInterval: cfg.streamFlush,

@@ -55,6 +55,7 @@ the browser, the terminal UI, or stdout in `--cli` mode).
 | `--aether` | `AETHER_ADDR` | — | Aether gateway address, e.g. `127.0.0.1:50051` |
 | `--aether-standalone` | — | `false` | run the worker and the terminal UI in one process |
 | `--memorylayer` | `MEMORYLAYER_BASE_URL` | — | store threads + transcripts in MemoryLayer instead of on disk |
+| `--memory-recall` | — | `true` | inject MemoryLayer memories relevant to each message |
 
 ### Over Aether
 
@@ -86,6 +87,11 @@ agent-harness --tui   --aether 127.0.0.1:50051 --memorylayer http://127.0.0.1:61
 
 The workspace (`--memorylayer-workspace`, default `default`) is created on first
 use if MemoryLayer does not have it.
+
+With MemoryLayer wired, each turn also gets the memories it has distilled from
+past conversations that are relevant to the current message (`--memory-recall`,
+on by default). The harness does not write memories itself — it stores the
+conversation, and MemoryLayer extracts from it.
 
 In the TUI, type `@` followed by a path and use Tab/arrow keys to complete files
 or directories. Paths resolve from `/pwd`; use `/cd <path>` to change that

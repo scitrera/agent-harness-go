@@ -34,6 +34,8 @@ func main() {
 	aetherTLSInsecure := flag.Bool("aether-tls-insecure", false, "skip Aether TLS certificate verification (testing only)")
 	memorylayerURL := flag.String("memorylayer", os.Getenv("MEMORYLAYER_BASE_URL"), "MemoryLayer server URL; stores threads + transcripts there instead of on local disk")
 	memorylayerWorkspace := flag.String("memorylayer-workspace", env("MEMORYLAYER_WORKSPACE", "default"), "MemoryLayer workspace")
+	memoryRecall := flag.Bool("memory-recall", true, "inject MemoryLayer memories relevant to each message (requires --memorylayer)")
+	memoryRecallLimit := flag.Int("memory-recall-limit", 5, "how many recalled memories to inject")
 	addr := flag.String("addr", env("SAHARA_WEB_ADDR", "127.0.0.1:8787"), "web UI listen address (NO auth - localhost only)")
 	noBrowser := flag.Bool("no-browser", false, "do not open a browser (web mode)")
 	exportThread := flag.String("export", "", "export thread history as JSONL to stdout and exit (a thread id, or 'all')")
@@ -117,6 +119,8 @@ func main() {
 		memorylayerURL:       *memorylayerURL,
 		memorylayerKey:       os.Getenv("MEMORYLAYER_API_KEY"),
 		memorylayerWorkspace: *memorylayerWorkspace,
+		memoryRecall:         *memoryRecall,
+		memoryRecallLimit:    *memoryRecallLimit,
 	}
 	if selectedMode == appModeServe || selectedMode == appModeStandalone {
 		cfg.streamFlush = aetherStreamFlush
