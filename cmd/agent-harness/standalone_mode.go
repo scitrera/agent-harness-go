@@ -45,17 +45,18 @@ func runAetherStandalone(cfg appConfig) error {
 	}
 	broker := approval.New()
 	worker, err := aetherchan.New(aetherchan.Config{
-		ServerAddr:            cfg.aetherAddr,
-		Workspace:             cfg.aetherWorkspace,
-		SessionWorkspace:      wireWorkspaceID,
-		WorkspaceResolver:     workspaceResolver,
-		Specifier:             cfg.aetherSpecifier,
-		SourceAgent:           cfg.sourceAgent(),
-		APIKey:                os.Getenv("AETHER_API_KEY"),
-		Token:                 os.Getenv("AETHER_TOKEN"),
-		Tenant:                os.Getenv("AETHER_TENANT"),
-		TLSEnabled:            cfg.aetherTLS,
-		TLSInsecureSkipVerify: cfg.aetherTLSInsecure,
+		ServerAddr:             cfg.aetherAddr,
+		Workspace:              cfg.aetherWorkspace,
+		SessionWorkspace:       wireWorkspaceID,
+		WorkspaceResolver:      workspaceResolver,
+		Specifier:              cfg.aetherSpecifier,
+		SourceAgent:            cfg.sourceAgent(),
+		APIKey:                 os.Getenv("AETHER_API_KEY"),
+		Token:                  os.Getenv("AETHER_TOKEN"),
+		Tenant:                 os.Getenv("AETHER_TENANT"),
+		TLSEnabled:             cfg.aetherTLS,
+		TLSInsecureSkipVerify:  cfg.aetherTLSInsecure,
+		PreferTaskMessageLanes: cfg.aetherTaskMessageLanes,
 	})
 	if err != nil {
 		return err

@@ -42,6 +42,10 @@ type appConfig struct {
 	aetherSpecifier   string
 	aetherTLS         bool
 	aetherTLSInsecure bool
+	// aetherTaskMessageLanes routes turn events onto a real Aether task's
+	// per-task message lane. It is opt-in because task-less OSS clients depend
+	// on direct replies to their user-session topic.
+	aetherTaskMessageLanes bool
 	// Client-session identity. WindowID distinguishes two frontends run by the
 	// same user; it is what the agent addresses its replies to.
 	aetherUser   string

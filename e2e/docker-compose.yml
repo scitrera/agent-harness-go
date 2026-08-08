@@ -113,6 +113,7 @@ services:
       - --serve
       - --aether=aether:50051
       - --aether-specifier=${AETHER_SPECIFIER:-e2e}
+      - --aether-task-message-lanes=${AETHER_TASK_MESSAGE_LANES:-false}
       - --memorylayer=http://memorylayer:61001
       - --memorylayer-workspace=${MEMORYLAYER_WORKSPACE:-default}
       - --workspace=/workspace

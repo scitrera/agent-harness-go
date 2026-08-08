@@ -59,6 +59,7 @@ the browser, the terminal UI, or stdout in `--cli` mode).
 | `--serve` | — | `false` | run as a headless agent worker over Aether |
 | `--aether` | `AETHER_ADDR` | — | Aether gateway address, e.g. `127.0.0.1:50051` |
 | `--aether-standalone` | — | `false` | run the worker and the terminal UI in one process |
+| `--aether-task-message-lanes` | — | `false` | route turns carrying real Aether task IDs to their subscribed per-task message lanes |
 | `--memorylayer` | `MEMORYLAYER_BASE_URL` | — | store threads + transcripts in MemoryLayer instead of on disk |
 | `--memory-recall` | — | `true` | inject MemoryLayer memories relevant to each message |
 
@@ -136,9 +137,10 @@ Go clients can call `AttachSession` and consume `SessionEvents` for
 cursor-bearing reconnects. Attach responses and session events return on the
 attaching client lane; per-turn `tk::<workspace>::<task>::msg` routing is an
 explicit library option reserved for real Aether tasks with subscribed
-recipients. Aether routing workspace and logical session workspace are kept
-separate, so a transport-specific `--aether-workspace` does not change project
-storage identity.
+recipients. Worker and standalone modes expose that option as
+`--aether-task-message-lanes`; leave it disabled for task-less clients. Aether
+routing workspace and logical session workspace are kept separate, so a
+transport-specific `--aether-workspace` does not change project storage identity.
 
 By default each client keeps a local copy of the conversation it witnessed, so a
 second client attaching mid-conversation sees only what arrives after it

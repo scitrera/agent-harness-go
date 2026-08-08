@@ -36,6 +36,7 @@ func main() {
 	aetherWindow := flag.String("aether-window", os.Getenv("AETHER_WINDOW"), "client window id; defaults to a fresh id per process")
 	aetherTLS := flag.Bool("aether-tls", false, "use TLS for the Aether connection")
 	aetherTLSInsecure := flag.Bool("aether-tls-insecure", false, "skip Aether TLS certificate verification (testing only)")
+	aetherTaskMessageLanes := flag.Bool("aether-task-message-lanes", false, "route real Aether task turns over their subscribed per-task message lanes")
 	memorylayerURL := flag.String("memorylayer", os.Getenv("MEMORYLAYER_BASE_URL"), "MemoryLayer server URL; stores threads + transcripts there instead of on local disk")
 	memorylayerWorkspace := flag.String("memorylayer-workspace", os.Getenv("MEMORYLAYER_WORKSPACE"), "MemoryLayer workspace (defaults to the resolved logical workspace)")
 	memoryRecall := flag.Bool("memory-recall", true, "inject MemoryLayer memories relevant to each message (requires --memorylayer)")
@@ -119,13 +120,14 @@ func main() {
 		seed:              *seed,
 		record:            *record,
 
-		aetherAddr:        *aetherAddr,
-		aetherWorkspace:   effectiveWorkspace(*aetherWorkspace, workspaceResolution.WorkspaceID),
-		aetherSpecifier:   *aetherSpecifier,
-		aetherTLS:         *aetherTLS,
-		aetherTLSInsecure: *aetherTLSInsecure,
-		aetherUser:        *aetherUser,
-		aetherWindow:      resolveWindowID(*aetherWindow),
+		aetherAddr:             *aetherAddr,
+		aetherWorkspace:        effectiveWorkspace(*aetherWorkspace, workspaceResolution.WorkspaceID),
+		aetherSpecifier:        *aetherSpecifier,
+		aetherTLS:              *aetherTLS,
+		aetherTLSInsecure:      *aetherTLSInsecure,
+		aetherTaskMessageLanes: *aetherTaskMessageLanes,
+		aetherUser:             *aetherUser,
+		aetherWindow:           resolveWindowID(*aetherWindow),
 
 		memorylayerURL:       *memorylayerURL,
 		memorylayerKey:       os.Getenv("MEMORYLAYER_API_KEY"),
