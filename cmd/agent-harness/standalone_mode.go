@@ -11,6 +11,7 @@ import (
 	"github.com/scitrera/agent-harness-go/pkg/approval"
 	aetherchan "github.com/scitrera/agent-harness-go/pkg/channels/aether"
 	"github.com/scitrera/agent-harness-go/pkg/ids"
+	"github.com/scitrera/agent-harness-go/pkg/protocol"
 	"github.com/scitrera/agent-harness-go/pkg/runtime"
 	"github.com/scitrera/agent-harness-go/pkg/turncancel"
 )
@@ -63,8 +64,8 @@ func runAetherStandalone(cfg appConfig) error {
 	canceller := turncancel.New()
 	worker.SetCanceller(canceller)
 	worker.SetApprovalBroker(broker)
-	worker.SetThreadClearer(func(threadID string) error {
-		return st.history.DeleteHistory(context.Background(), threadID)
+	worker.SetThreadClearer(func(addr protocol.MessageAddress) error {
+		return deleteAddressHistory(context.Background(), st.history, addr)
 	})
 	rt, err := runtime.NewRunner(worker, runner)
 	if err != nil {

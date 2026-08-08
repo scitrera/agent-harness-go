@@ -103,6 +103,21 @@ func Test_Runner_RunLoop_backs_off_after_transient_error(t *testing.T) {
 	}
 }
 
+func TestThreadKeyIncludesWorkspace(t *testing.T) {
+	first := channel.Inbound{Addr: protocol.MessageAddress{WorkspaceID: "project-a", ThreadID: "shared"}}
+	second := channel.Inbound{Addr: protocol.MessageAddress{WorkspaceID: "project-b", ThreadID: "shared"}}
+	if threadKey(first) == threadKey(second) {
+		t.Fatalf("workspace lanes collided: %q", threadKey(first))
+	}
+
+	// The prefix is unambiguous even when IDs themselves contain separators.
+	third := channel.Inbound{Addr: protocol.MessageAddress{WorkspaceID: "a", ThreadID: ":bc"}}
+	fourth := channel.Inbound{Addr: protocol.MessageAddress{WorkspaceID: "a:", ThreadID: "bc"}}
+	if threadKey(third) == threadKey(fourth) {
+		t.Fatalf("opaque workspace/thread pairs collided: %q", threadKey(third))
+	}
+}
+
 func taskEnvelope(t *testing.T, threadID string, messageID string) channel.Inbound {
 	t.Helper()
 	part, err := protocol.NewTextPart("hello")

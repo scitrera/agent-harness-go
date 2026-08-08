@@ -15,6 +15,9 @@ import (
 
 func main() {
 	workspace := flag.String("workspace", env("SAHARA_WORKING_DIRECTORY", "./workspace"), "workspace root")
+	workspaceMode := flag.String("workspace-mode", env("SAHARA_WORKSPACE_MODE", workspaceModeSingle), "workspace selection: single (legacy) or project (derive from cwd/Git)")
+	workspaceID := flag.String("workspace-id", os.Getenv("SAHARA_WORKSPACE_ID"), "pin the logical workspace ID (enables composite history keys)")
+	workspaceIndexDir := flag.String("workspace-index-dir", env("SAHARA_WORKSPACE_INDEX_DIR", defaultWorkspaceIndexDir()), "shared project path-to-workspace index directory")
 	thread := flag.String("thread", "cli", "chat thread id (CLI/TUI mode)")
 	baseURL := flag.String("base-url", os.Getenv("SAHARA_LLM_BASE_URL"), "OpenAI-compatible base URL")
 	model := flag.String("model", env("SAHARA_LLM_MODEL", "gpt-4o-mini"), "model id")
@@ -26,14 +29,14 @@ func main() {
 	serveMode := flag.Bool("serve", false, "run as a headless agent worker reachable over Aether (requires --aether)")
 	standalone := flag.Bool("aether-standalone", false, "run the agent worker and the terminal UI in one process, both over Aether (requires --aether)")
 	aetherAddr := flag.String("aether", os.Getenv("AETHER_ADDR"), "Aether gateway address, e.g. 127.0.0.1:50051")
-	aetherWorkspace := flag.String("aether-workspace", env("AETHER_WORKSPACE", "default"), "Aether workspace to join")
+	aetherWorkspace := flag.String("aether-workspace", os.Getenv("AETHER_WORKSPACE"), "Aether workspace to join (defaults to the resolved logical workspace)")
 	aetherSpecifier := flag.String("aether-specifier", os.Getenv("AETHER_SPECIFIER"), "Aether agent-topic specifier (distinguishes instances)")
 	aetherUser := flag.String("aether-user", env("AETHER_USER", defaultAetherUser()), "client user id (Aether client modes)")
 	aetherWindow := flag.String("aether-window", os.Getenv("AETHER_WINDOW"), "client window id; defaults to a fresh id per process")
 	aetherTLS := flag.Bool("aether-tls", false, "use TLS for the Aether connection")
 	aetherTLSInsecure := flag.Bool("aether-tls-insecure", false, "skip Aether TLS certificate verification (testing only)")
 	memorylayerURL := flag.String("memorylayer", os.Getenv("MEMORYLAYER_BASE_URL"), "MemoryLayer server URL; stores threads + transcripts there instead of on local disk")
-	memorylayerWorkspace := flag.String("memorylayer-workspace", env("MEMORYLAYER_WORKSPACE", "default"), "MemoryLayer workspace")
+	memorylayerWorkspace := flag.String("memorylayer-workspace", os.Getenv("MEMORYLAYER_WORKSPACE"), "MemoryLayer workspace (defaults to the resolved logical workspace)")
 	memoryRecall := flag.Bool("memory-recall", true, "inject MemoryLayer memories relevant to each message (requires --memorylayer)")
 	memoryRecallLimit := flag.Int("memory-recall-limit", 5, "how many recalled memories to inject")
 	addr := flag.String("addr", env("SAHARA_WEB_ADDR", "127.0.0.1:8787"), "web UI listen address (NO auth - localhost only)")
@@ -60,12 +63,17 @@ func main() {
 		fmt.Printf("agent-harness %s\n", version.String())
 		return
 	}
+	stateDir := env("SAHARA_STATE_DIR", filepath.Join(*workspace, ".agent-harness"))
+	workspaceResolution, err := resolveAppWorkspace(context.Background(), *workspaceMode, *workspaceID, *workspaceIndexDir, "")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error: resolve workspace:", err)
+		os.Exit(2)
+	}
 
 	// Export mode reads local state only (no provider needed): dump thread history
 	// as JSONL and exit, before the base-url requirement below.
 	if *exportThread != "" {
-		stateDir := env("SAHARA_STATE_DIR", filepath.Join(*workspace, ".agent-harness"))
-		if err := runExport(stateDir, *exportThread, *exportFormat, os.Stdout); err != nil {
+		if err := runWorkspaceExport(stateDir, workspaceResolution.WorkspaceID, *exportThread, *exportFormat, os.Stdout); err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			os.Exit(1)
 		}
@@ -101,7 +109,8 @@ func main() {
 
 	cfg := appConfig{
 		workspaceRoot: *workspace,
-		stateDir:      env("SAHARA_STATE_DIR", filepath.Join(*workspace, ".agent-harness")),
+		workspaceID:   workspaceResolution.WorkspaceID,
+		stateDir:      stateDir,
 		thread:        *thread,
 		baseURL:       *baseURL,
 		model:         *model,
@@ -109,7 +118,7 @@ func main() {
 		record:        *record,
 
 		aetherAddr:        *aetherAddr,
-		aetherWorkspace:   *aetherWorkspace,
+		aetherWorkspace:   effectiveWorkspace(*aetherWorkspace, workspaceResolution.WorkspaceID),
 		aetherSpecifier:   *aetherSpecifier,
 		aetherTLS:         *aetherTLS,
 		aetherTLSInsecure: *aetherTLSInsecure,
@@ -118,7 +127,7 @@ func main() {
 
 		memorylayerURL:       *memorylayerURL,
 		memorylayerKey:       os.Getenv("MEMORYLAYER_API_KEY"),
-		memorylayerWorkspace: *memorylayerWorkspace,
+		memorylayerWorkspace: effectiveWorkspace(*memorylayerWorkspace, workspaceResolution.WorkspaceID),
 		memoryRecall:         *memoryRecall,
 		memoryRecallLimit:    *memoryRecallLimit,
 	}

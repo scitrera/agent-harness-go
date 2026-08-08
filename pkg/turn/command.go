@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/scitrera/agent-harness-go/pkg/commands"
+	"github.com/scitrera/agent-harness-go/pkg/harness"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 )
 
@@ -45,7 +46,13 @@ func (r *Runner) runBuiltin(ctx context.Context, addr protocol.MessageAddress, n
 	case "help", "commands":
 		return r.emitReply(ctx, addr, r.helpText())
 	case "clear":
-		if err := r.store.SaveHistory(ctx, addr.ThreadID, nil); err != nil {
+		var err error
+		if scoped, ok := r.store.(harness.WorkspaceHistoryStore); ok && addr.WorkspaceID != "" {
+			err = scoped.SaveWorkspaceHistory(ctx, addr.WorkspaceID, addr.ThreadID, nil)
+		} else {
+			err = r.store.SaveHistory(ctx, addr.ThreadID, nil)
+		}
+		if err != nil {
 			return protocol.ChatMessage{}, fmt.Errorf("clear history: %w", err)
 		}
 		return r.emitReply(ctx, addr, "Thread history cleared.")

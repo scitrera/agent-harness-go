@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -10,7 +11,6 @@ import (
 
 	"github.com/scitrera/agent-harness-go/pkg/channel"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
-	"github.com/scitrera/agent-harness-go/pkg/store"
 	"github.com/scitrera/agent-harness-go/pkg/turncancel"
 )
 
@@ -28,15 +28,21 @@ const keepaliveInterval = 15 * time.Second
 // loopback without your own auth layer in front.
 type Server struct {
 	ch        *Channel
-	store     *store.FileStore
+	store     HistoryStore
 	sessions  *Index
 	canceller *turncancel.Canceller
 	mux       *http.ServeMux
 }
 
+// HistoryStore is the transcript surface used by the web REST handlers.
+type HistoryStore interface {
+	LoadHistory(ctx context.Context, threadID string) ([]protocol.ChatMessage, error)
+	DeleteHistory(ctx context.Context, threadID string) error
+}
+
 // New builds the HTTP server. canceller may be nil (the /api/cancel endpoint
 // then reports nothing cancelled).
-func New(ch *Channel, fs *store.FileStore, sessions *Index, canceller *turncancel.Canceller) *Server {
+func New(ch *Channel, fs HistoryStore, sessions *Index, canceller *turncancel.Canceller) *Server {
 	s := &Server{ch: ch, store: fs, sessions: sessions, canceller: canceller, mux: http.NewServeMux()}
 	s.routes()
 	return s

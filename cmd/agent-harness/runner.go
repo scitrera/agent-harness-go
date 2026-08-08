@@ -113,8 +113,9 @@ func buildRunner(cfg appConfig, st stores, pub channel.Publisher, approvals appr
 			Model:              cfg.model,
 			Now:                time.Now,
 		}),
-		Model:     cfg.model,
-		Streaming: true,
+		Model:              cfg.model,
+		DefaultWorkspaceID: cfg.workspaceID,
+		Streaming:          true,
 		// Semantic recall from MemoryLayer, when configured. Auto-commit stays
 		// off: the history store already writes the transcript to MemoryLayer,
 		// and MemoryLayer distils memories from it on its own schedule.

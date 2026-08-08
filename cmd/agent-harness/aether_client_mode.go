@@ -64,6 +64,7 @@ func runTUIClient(cfg appConfig) error {
 		return err
 	}
 	defer func() { _ = client.Close() }()
+	modeStateDir := workspaceStateDir(cfg)
 
 	fmt.Fprintf(os.Stderr, "agent-harness | connected to %s via aether %s (history: %s)\n",
 		client.AgentTopic(), cfg.aetherAddr, historyLabel(cfg))
@@ -77,8 +78,8 @@ func runTUIClient(cfg appConfig) error {
 		// No local runner to ask, so the status line shows the configured model
 		// and the command palette offers only the UI's own commands.
 		ModelStatus:     remoteModelStatus{model: cfg.model},
-		TaskStore:       store.NewTaskStateStore(cfg.stateDir),
-		TeamStore:       team.NewFileGraphStore(filepath.Join(cfg.stateDir, "team", "graph.json")),
+		TaskStore:       store.NewTaskStateStore(modeStateDir),
+		TeamStore:       team.NewFileGraphStore(filepath.Join(modeStateDir, "team", "graph.json")),
 		AgentCatalog:    agentCatalog,
 		InitialThreadID: cfg.thread,
 		WorkspaceRoot:   cfg.workspaceRoot,

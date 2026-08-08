@@ -51,11 +51,38 @@ the browser, the terminal UI, or stdout in `--cli` mode).
 | `--acp` | — | `false` | run as an ACP agent over stdio |
 | `--web` | — | `false` | run the localhost web UI |
 | `--no-browser` | — | `false` | don't auto-open a browser (web mode) |
+| `--workspace-mode` | `SAHARA_WORKSPACE_MODE` | `single` | `single` preserves the legacy layout; `project` derives a stable logical workspace from cwd/Git |
+| `--workspace-id` | `SAHARA_WORKSPACE_ID` | — | pin a logical workspace ID and enable composite workspace/thread state |
+| `--workspace-index-dir` | `SAHARA_WORKSPACE_INDEX_DIR` | user config dir | shared canonical project-path to workspace-ID index used by project mode |
 | `--serve` | — | `false` | run as a headless agent worker over Aether |
 | `--aether` | `AETHER_ADDR` | — | Aether gateway address, e.g. `127.0.0.1:50051` |
 | `--aether-standalone` | — | `false` | run the worker and the terminal UI in one process |
 | `--memorylayer` | `MEMORYLAYER_BASE_URL` | — | store threads + transcripts in MemoryLayer instead of on disk |
 | `--memory-recall` | — | `true` | inject MemoryLayer memories relevant to each message |
+
+### Project workspaces
+
+Multi-workspace state is optional. The default `single` mode retains the
+existing unscoped local history layout. For programming use, start the harness
+from a repository with project mode enabled:
+
+```bash
+cd /path/to/project
+agent-harness --workspace-mode project --workspace .
+```
+
+Project mode canonicalizes the current directory, prefers its Git worktree
+root, and persists a stable path-to-workspace assignment in the shared workspace
+index. Repositories with the same directory name receive distinct stable IDs.
+The logical workspace ID scopes transcripts, thread indexes, task/team state,
+model pins, and local runtime lanes. `--workspace` still selects the filesystem
+sandbox; it is deliberately separate from logical identity. Use
+`--workspace-id <id>` for containers or deployments where the host path is not
+stable.
+
+When Aether or MemoryLayer is enabled, the resolved logical ID is their default
+workspace too. Explicit `--aether-workspace` / `AETHER_WORKSPACE` and
+`--memorylayer-workspace` / `MEMORYLAYER_WORKSPACE` values take precedence.
 
 ### Over Aether
 
@@ -85,8 +112,8 @@ agent-harness --serve --aether 127.0.0.1:50051 --memorylayer http://127.0.0.1:61
 agent-harness --tui   --aether 127.0.0.1:50051 --memorylayer http://127.0.0.1:61001
 ```
 
-The workspace (`--memorylayer-workspace`, default `default`) is created on first
-use if MemoryLayer does not have it.
+The workspace (`--memorylayer-workspace`, defaulting to the resolved logical
+workspace or `default`) is created on first use if MemoryLayer does not have it.
 
 With MemoryLayer wired, each turn also gets the memories it has distilled from
 past conversations that are relevant to the current message (`--memory-recall`,

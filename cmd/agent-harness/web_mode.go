@@ -28,9 +28,9 @@ func runWeb(cfg appConfig, addr string, openBrowser bool) error {
 	if err != nil {
 		return err
 	}
-	// The web server still takes the concrete filesystem types, so it keeps
-	// local transcripts even when MemoryLayer is configured.
-	sessions, err := threadindex.NewIndex(cfg.stateDir, time.Now)
+	// The REST history surface uses the same bound store as the runner so project
+	// mode cannot display or delete another workspace's transcript.
+	sessions, err := threadindex.NewIndex(workspaceStateDir(cfg), time.Now)
 	if err != nil {
 		return fmt.Errorf("sessions: %w", err)
 	}
@@ -41,7 +41,7 @@ func runWeb(cfg appConfig, addr string, openBrowser bool) error {
 	}
 	rt.SetCanceller(canceller)
 
-	srv := web.New(wc, st.files, sessions, canceller)
+	srv := web.New(wc, st.history, sessions, canceller)
 	httpSrv := &http.Server{Addr: addr, Handler: srv.Handler()}
 
 	done := make(chan struct{})

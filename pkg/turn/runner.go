@@ -100,15 +100,18 @@ type ContextManager interface {
 type EventPublisher = channel.Publisher
 
 type Runner struct {
-	store         harness.HistoryStore
-	loader        BootstrapLoader
-	registry      *tools.Registry
-	provider      Provider
-	publisher     EventPublisher
-	ctxMgr        ContextManager
-	model         string
-	modelRegistry *modelpkg.Registry
-	modelSelector modelpkg.Selector
+	store     harness.HistoryStore
+	loader    BootstrapLoader
+	registry  *tools.Registry
+	provider  Provider
+	publisher EventPublisher
+	ctxMgr    ContextManager
+	model     string
+	// defaultWorkspaceID is applied only when an inbound turn omits its
+	// workspace. Explicit transport/request workspace IDs always win.
+	defaultWorkspaceID string
+	modelRegistry      *modelpkg.Registry
+	modelSelector      modelpkg.Selector
 	// providerResolver, when set, maps the per-turn model to a distinct Provider
 	// (multi-provider config/models.yaml). nil → the single r.provider is always
 	// used; a per-model miss also falls back to r.provider.
@@ -255,6 +258,9 @@ type Config struct {
 	Assembler      contextpack.Assembler
 	ContextManager ContextManager
 	Model          string
+	// DefaultWorkspaceID resolves workspace-less local/client turns. A non-empty
+	// workspace carried by the turn is never replaced.
+	DefaultWorkspaceID string
 	// ModelRegistry is the set of available models + default. When set, the runner
 	// selects the per-turn model from it (capability-matched), honoring an
 	// explicit /command override first. nil → the single Model is always used.
@@ -523,6 +529,7 @@ func NewRunner(cfg Config) (*Runner, error) {
 		publisher:                 cfg.Publisher,
 		ctxMgr:                    ctxMgr,
 		model:                     cfg.Model,
+		defaultWorkspaceID:        strings.TrimSpace(cfg.DefaultWorkspaceID),
 		modelRegistry:             cfg.ModelRegistry,
 		skillRealizer:             cfg.SkillRealizer,
 		recorder:                  cfg.TurnRecorder,
@@ -735,6 +742,9 @@ const metaCancelledKey = "cancelled"
 const metaErrorKey = "error"
 
 func (r *Runner) Run(ctx context.Context, addr protocol.MessageAddress, user protocol.ChatMessage) (_ protocol.ChatMessage, err error) {
+	if addr.WorkspaceID == "" {
+		addr.WorkspaceID = r.defaultWorkspaceID
+	}
 	// Optional ctx decorator (e.g. the ACP channel attaches per-session fs/terminal
 	// client delegates keyed by addr.ThreadID). Applied once at entry so it covers
 	// the whole turn; nil → ctx untouched (behavior unchanged).
@@ -932,7 +942,7 @@ func (r *Runner) Run(ctx context.Context, addr protocol.MessageAddress, user pro
 		if _, ok := r.modelRegistry.Get(name); !ok {
 			return false
 		}
-		r.setStickyModel(addr.ThreadID, name)
+		r.setStickyModel(addr, name)
 		return true
 	})
 	// Per-turn skill-realizer seam: load_skill materializes a loaded skill's bundle
@@ -1099,7 +1109,7 @@ func (r *Runner) resolveTurnModel(ctx context.Context, addr protocol.MessageAddr
 	// A model pinned via /model <name> wins for the thread, as long as it can
 	// handle this turn's modality; otherwise fall through to auto-routing so an
 	// image (etc.) still reaches a capable model.
-	if sticky := r.stickyModel(addr.ThreadID); sticky != "" {
+	if sticky := r.stickyModel(addr); sticky != "" {
 		if m, ok := r.modelRegistry.Get(sticky); ok && m.Capabilities.Satisfies(req) {
 			return sticky
 		}

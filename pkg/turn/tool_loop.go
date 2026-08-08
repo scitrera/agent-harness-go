@@ -63,7 +63,7 @@ func (r *Runner) runProviderLoop(ctx context.Context, session *harness.Session, 
 		// Only adopt it when it can satisfy the current required capabilities so a
 		// vision escalation (below / pre-turn) isn't undone by a text-only pin.
 		if r.modelRegistry != nil {
-			if sticky := r.stickyModel(addr.ThreadID); sticky != "" && sticky != model {
+			if sticky := r.stickyModel(addr); sticky != "" && sticky != model {
 				if m, ok := r.modelRegistry.Get(sticky); ok && m.Capabilities.Satisfies(required) {
 					slog.InfoContext(ctx, "turn: adopting pinned model mid-turn",
 						slog.String("model", sticky), slog.String("was", model))

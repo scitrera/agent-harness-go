@@ -18,6 +18,15 @@ type HistoryStore interface {
 	SaveHistory(ctx context.Context, threadID string, messages []protocol.ChatMessage) error
 }
 
+// WorkspaceHistoryStore is the additive multi-workspace form of HistoryStore.
+// NewSession uses it whenever the message address carries a workspace ID, while
+// retaining HistoryStore as the compatibility surface for existing backends.
+// Implementations must key data by the composite (workspaceID, threadID).
+type WorkspaceHistoryStore interface {
+	LoadWorkspaceHistory(ctx context.Context, workspaceID, threadID string) ([]protocol.ChatMessage, error)
+	SaveWorkspaceHistory(ctx context.Context, workspaceID, threadID string, messages []protocol.ChatMessage) error
+}
+
 type Session struct {
 	addr      protocol.MessageAddress
 	store     HistoryStore
@@ -42,7 +51,14 @@ func NewSession(ctx context.Context, addr protocol.MessageAddress, store History
 	}
 	// Carry the per-turn OBO authority on ctx so an authority-aware history store
 	// can apply the user's grant on the load; local stores ignore it.
-	history, err := store.LoadHistory(tools.WithMemoryAuthority(ctx, authority), addr.ThreadID)
+	loadCtx := tools.WithMemoryAuthority(ctx, authority)
+	var history []protocol.ChatMessage
+	var err error
+	if scoped, ok := store.(WorkspaceHistoryStore); ok && addr.WorkspaceID != "" {
+		history, err = scoped.LoadWorkspaceHistory(loadCtx, addr.WorkspaceID, addr.ThreadID)
+	} else {
+		history, err = store.LoadHistory(loadCtx, addr.ThreadID)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("load history: %w", err)
 	}
@@ -74,7 +90,13 @@ func (s *Session) Append(ctx context.Context, msg protocol.ChatMessage) error {
 	// Ephemeral turns never touch the durable store: keep the message in-memory
 	// (so the tool loop + context assembly see it) but do not persist it.
 	if !s.ephemeral {
-		if err := s.store.SaveHistory(ctx, s.addr.ThreadID, next); err != nil {
+		var err error
+		if scoped, ok := s.store.(WorkspaceHistoryStore); ok && s.addr.WorkspaceID != "" {
+			err = scoped.SaveWorkspaceHistory(ctx, s.addr.WorkspaceID, s.addr.ThreadID, next)
+		} else {
+			err = s.store.SaveHistory(ctx, s.addr.ThreadID, next)
+		}
+		if err != nil {
 			return fmt.Errorf("save history: %w", err)
 		}
 	}

@@ -20,6 +20,33 @@ type fakeStore struct {
 	messages []protocol.ChatMessage
 }
 
+type workspaceRecordingStore struct {
+	workspaceID string
+	threadID    string
+	messages    []protocol.ChatMessage
+}
+
+func (s *workspaceRecordingStore) LoadHistory(context.Context, string) ([]protocol.ChatMessage, error) {
+	return nil, errors.New("legacy load should not be used")
+}
+
+func (s *workspaceRecordingStore) SaveHistory(context.Context, string, []protocol.ChatMessage) error {
+	return errors.New("legacy save should not be used")
+}
+
+func (s *workspaceRecordingStore) LoadWorkspaceHistory(_ context.Context, workspaceID, threadID string) ([]protocol.ChatMessage, error) {
+	s.workspaceID = workspaceID
+	s.threadID = threadID
+	return append([]protocol.ChatMessage(nil), s.messages...), nil
+}
+
+func (s *workspaceRecordingStore) SaveWorkspaceHistory(_ context.Context, workspaceID, threadID string, messages []protocol.ChatMessage) error {
+	s.workspaceID = workspaceID
+	s.threadID = threadID
+	s.messages = append([]protocol.ChatMessage(nil), messages...)
+	return nil
+}
+
 func (s *fakeStore) LoadHistory(_ context.Context, _ string) ([]protocol.ChatMessage, error) {
 	out := make([]protocol.ChatMessage, len(s.messages))
 	copy(out, s.messages)
@@ -130,6 +157,57 @@ func Test_NewRunner_defaultsMaxToolIterationsTo250(t *testing.T) {
 	}
 	if runner.maxToolIterations != 250 {
 		t.Fatalf("max tool iterations = %d, want 250", runner.maxToolIterations)
+	}
+}
+
+func Test_Runner_Run_appliesDefaultWorkspaceToWorkspaceLessTurn(t *testing.T) {
+	store := &workspaceRecordingStore{}
+	runner, err := NewRunner(Config{
+		Store:              store,
+		Loader:             fakeLoader{},
+		Provider:           &fakeProvider{},
+		Publisher:          &fakePublisher{},
+		Assembler:          contextpack.NewAssembler(contextpack.Config{}),
+		Model:              "test-model",
+		DefaultWorkspaceID: " project-a ",
+	})
+	if err != nil {
+		t.Fatalf("new runner: %v", err)
+	}
+
+	assistant, err := runner.Run(context.Background(), protocol.MessageAddress{ThreadID: "shared"}, userMsg(t, "hello"))
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if store.workspaceID != "project-a" || store.threadID != "shared" {
+		t.Fatalf("store key = (%q, %q)", store.workspaceID, store.threadID)
+	}
+	if assistant.Addr.WorkspaceID != "project-a" {
+		t.Fatalf("assistant workspace = %q", assistant.Addr.WorkspaceID)
+	}
+}
+
+func Test_Runner_Run_preservesExplicitWorkspace(t *testing.T) {
+	store := &workspaceRecordingStore{}
+	runner, err := NewRunner(Config{
+		Store:              store,
+		Loader:             fakeLoader{},
+		Provider:           &fakeProvider{},
+		Publisher:          &fakePublisher{},
+		Assembler:          contextpack.NewAssembler(contextpack.Config{}),
+		Model:              "test-model",
+		DefaultWorkspaceID: "project-a",
+	})
+	if err != nil {
+		t.Fatalf("new runner: %v", err)
+	}
+
+	_, err = runner.Run(context.Background(), protocol.MessageAddress{WorkspaceID: "project-b", ThreadID: "shared"}, userMsg(t, "hello"))
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if store.workspaceID != "project-b" {
+		t.Fatalf("workspace = %q, want project-b", store.workspaceID)
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 
 	"github.com/scitrera/agent-harness-go/pkg/commands"
 	"github.com/scitrera/agent-harness-go/pkg/contextpack"
+	"github.com/scitrera/agent-harness-go/pkg/harness"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 )
 
@@ -57,6 +58,44 @@ func Test_Runner_Run_builtin_clear_wipes_history(t *testing.T) {
 	}
 	if provider.request.Model != "" {
 		t.Fatal("provider should not be called for /clear")
+	}
+}
+
+func Test_Runner_Run_builtin_clearOnlyWipesAddressedWorkspace(t *testing.T) {
+	ctx := context.Background()
+	store := harness.NewMemoryStore()
+	seed := []protocol.ChatMessage{{ID: "old", Role: protocol.RoleUser}}
+	if err := store.SaveWorkspaceHistory(ctx, "project-a", "shared", seed); err != nil {
+		t.Fatalf("seed project-a: %v", err)
+	}
+	if err := store.SaveWorkspaceHistory(ctx, "project-b", "shared", seed); err != nil {
+		t.Fatalf("seed project-b: %v", err)
+	}
+	runner, err := NewRunner(Config{
+		Store:     store,
+		Loader:    fakeLoader{},
+		Provider:  &fakeProvider{},
+		Assembler: contextpack.NewAssembler(contextpack.Config{}),
+		Model:     "base-model",
+		Commands:  commands.New(nil),
+	})
+	if err != nil {
+		t.Fatalf("runner: %v", err)
+	}
+
+	if _, err := runner.Run(ctx, protocol.MessageAddress{WorkspaceID: "project-a", ThreadID: "shared"}, userMessage(t, "/clear")); err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	projectA, err := store.LoadWorkspaceHistory(ctx, "project-a", "shared")
+	if err != nil {
+		t.Fatalf("load project-a: %v", err)
+	}
+	projectB, err := store.LoadWorkspaceHistory(ctx, "project-b", "shared")
+	if err != nil {
+		t.Fatalf("load project-b: %v", err)
+	}
+	if len(projectA) != 0 || len(projectB) != 1 {
+		t.Fatalf("histories after clear: project-a=%+v project-b=%+v", projectA, projectB)
 	}
 }
 

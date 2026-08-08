@@ -7,9 +7,12 @@ import (
 
 	"github.com/scitrera/agent-harness-go/pkg/harness"
 	"github.com/scitrera/agent-harness-go/pkg/memorylayer"
+	"github.com/scitrera/agent-harness-go/pkg/protocol"
 	"github.com/scitrera/agent-harness-go/pkg/store"
 	"github.com/scitrera/agent-harness-go/pkg/threadindex"
+	"github.com/scitrera/agent-harness-go/pkg/tools"
 	"github.com/scitrera/agent-harness-go/pkg/turn"
+	workspacepkg "github.com/scitrera/agent-harness-go/pkg/workspace"
 )
 
 // stores bundles where a mode keeps conversations. Both the turn runner and the
@@ -37,6 +40,115 @@ type historyStore interface {
 	DeleteHistory(ctx context.Context, threadID string) error
 }
 
+type workspaceHistoryDeleter interface {
+	DeleteWorkspaceHistory(ctx context.Context, workspaceID, threadID string) error
+}
+
+// boundHistoryStore lets legacy UI surfaces address the process-selected
+// workspace while still allowing the turn runner to pass an explicit workspace
+// through the additive harness.WorkspaceHistoryStore capability.
+type boundHistoryStore struct {
+	base               historyStore
+	workspaceID        string
+	backendWorkspaceID string
+}
+
+func bindHistory(base historyStore, workspaceID string) historyStore {
+	return bindHistoryBackend(base, workspaceID, workspaceID)
+}
+
+func bindHistoryBackend(base historyStore, workspaceID, backendWorkspaceID string) historyStore {
+	if workspaceID == "" {
+		return base
+	}
+	return &boundHistoryStore{base: base, workspaceID: workspaceID, backendWorkspaceID: backendWorkspaceID}
+}
+
+func (s *boundHistoryStore) LoadHistory(ctx context.Context, threadID string) ([]protocol.ChatMessage, error) {
+	return s.LoadWorkspaceHistory(ctx, s.workspaceID, threadID)
+}
+
+func (s *boundHistoryStore) SaveHistory(ctx context.Context, threadID string, messages []protocol.ChatMessage) error {
+	return s.SaveWorkspaceHistory(ctx, s.workspaceID, threadID, messages)
+}
+
+func (s *boundHistoryStore) DeleteHistory(ctx context.Context, threadID string) error {
+	return s.DeleteWorkspaceHistory(ctx, s.workspaceID, threadID)
+}
+
+func (s *boundHistoryStore) LoadWorkspaceHistory(ctx context.Context, workspaceID, threadID string) ([]protocol.ChatMessage, error) {
+	if scoped, ok := s.base.(harness.WorkspaceHistoryStore); ok {
+		return scoped.LoadWorkspaceHistory(ctx, workspaceID, threadID)
+	}
+	if !s.accepts(workspaceID) {
+		return nil, fmt.Errorf("history backend is bound to workspace %q, cannot load %q", s.workspaceID, workspaceID)
+	}
+	return s.base.LoadHistory(ctx, threadID)
+}
+
+func (s *boundHistoryStore) SaveWorkspaceHistory(ctx context.Context, workspaceID, threadID string, messages []protocol.ChatMessage) error {
+	if scoped, ok := s.base.(harness.WorkspaceHistoryStore); ok {
+		return scoped.SaveWorkspaceHistory(ctx, workspaceID, threadID, messages)
+	}
+	if !s.accepts(workspaceID) {
+		return fmt.Errorf("history backend is bound to workspace %q, cannot save %q", s.workspaceID, workspaceID)
+	}
+	return s.base.SaveHistory(ctx, threadID, messages)
+}
+
+func (s *boundHistoryStore) DeleteWorkspaceHistory(ctx context.Context, workspaceID, threadID string) error {
+	if scoped, ok := s.base.(workspaceHistoryDeleter); ok {
+		return scoped.DeleteWorkspaceHistory(ctx, workspaceID, threadID)
+	}
+	if !s.accepts(workspaceID) {
+		return fmt.Errorf("history backend is bound to workspace %q, cannot delete %q", s.workspaceID, workspaceID)
+	}
+	return s.base.DeleteHistory(ctx, threadID)
+}
+
+func (s *boundHistoryStore) accepts(workspaceID string) bool {
+	return workspaceID == s.workspaceID || workspaceID == s.backendWorkspaceID
+}
+
+type boundMemoryService struct {
+	base               turn.MemoryService
+	workspaceID        string
+	backendWorkspaceID string
+}
+
+func bindMemory(base turn.MemoryService, workspaceID, backendWorkspaceID string) turn.MemoryService {
+	if base == nil || workspaceID == "" || workspaceID == backendWorkspaceID {
+		return base
+	}
+	return &boundMemoryService{base: base, workspaceID: workspaceID, backendWorkspaceID: backendWorkspaceID}
+}
+
+func (s *boundMemoryService) backendWorkspace(workspaceID string) string {
+	if workspaceID == "" || workspaceID == s.workspaceID {
+		return s.backendWorkspaceID
+	}
+	return workspaceID
+}
+
+func (s *boundMemoryService) Recall(ctx context.Context, auth tools.MemoryAuthority, workspaceID, query string, limit int) ([]tools.MemoryHit, error) {
+	return s.base.Recall(ctx, auth, s.backendWorkspace(workspaceID), query, limit)
+}
+
+func (s *boundMemoryService) AppendThreadMessages(ctx context.Context, auth tools.MemoryAuthority, workspaceID, threadID, ownership string, messages []protocol.ChatMessage) error {
+	return s.base.AppendThreadMessages(ctx, auth, s.backendWorkspace(workspaceID), threadID, ownership, messages)
+}
+
+func workspaceStateDir(cfg appConfig) string {
+	return workspacepkg.StateDir(cfg.stateDir, cfg.workspaceID)
+}
+
+func deleteAddressHistory(ctx context.Context, history historyStore, addr protocol.MessageAddress) error {
+	if scoped, ok := history.(workspaceHistoryDeleter); ok && addr.WorkspaceID != "" {
+		return scoped.DeleteWorkspaceHistory(ctx, addr.WorkspaceID, addr.ThreadID)
+	}
+	return history.DeleteHistory(ctx, addr.ThreadID)
+}
+
 // historyLabel describes where transcripts live, for the startup banner.
 func historyLabel(cfg appConfig) string {
 	if cfg.memorylayerURL != "" {
@@ -50,11 +162,11 @@ func historyLabel(cfg appConfig) string {
 func openStores(ctx context.Context, cfg appConfig) (stores, error) {
 	files := store.NewFileStore(cfg.workspaceRoot, cfg.stateDir)
 	if cfg.memorylayerURL == "" {
-		index, err := threadindex.NewIndex(cfg.stateDir, time.Now)
+		index, err := threadindex.NewIndex(workspaceStateDir(cfg), time.Now)
 		if err != nil {
 			return stores{}, fmt.Errorf("threads: %w", err)
 		}
-		return stores{history: files, threads: index, files: files}, nil
+		return stores{history: bindHistory(files, cfg.workspaceID), threads: index, files: files}, nil
 	}
 
 	ml, err := memorylayer.New(memorylayer.Config{
@@ -78,5 +190,11 @@ func openStores(ctx context.Context, cfg appConfig) (stores, error) {
 	if err != nil {
 		return stores{}, err
 	}
-	return stores{history: ml, threads: ml, files: files, memory: recaller, remote: true}, nil
+	return stores{
+		history: bindHistoryBackend(ml, cfg.workspaceID, cfg.memorylayerWorkspace),
+		threads: ml,
+		files:   files,
+		memory:  bindMemory(recaller, cfg.workspaceID, cfg.memorylayerWorkspace),
+		remote:  true,
+	}, nil
 }

@@ -20,12 +20,15 @@ const aetherStreamFlush = 50 * time.Millisecond
 
 type appConfig struct {
 	workspaceRoot string
-	stateDir      string
-	thread        string
-	baseURL       string
-	model         string
-	seed          bool
-	record        string // --record path: opt-in per-LLM-call JSONL trace log ("" = off)
+	// workspaceID is empty in legacy single-workspace mode. A non-empty value
+	// activates composite workspace/thread history keys for local turns.
+	workspaceID string
+	stateDir    string
+	thread      string
+	baseURL     string
+	model       string
+	seed        bool
+	record      string // --record path: opt-in per-LLM-call JSONL trace log ("" = off)
 
 	// Aether transport. Empty aetherAddr means no Aether (the in-process
 	// channels).

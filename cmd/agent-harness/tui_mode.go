@@ -36,8 +36,9 @@ func runTUI(cfg appConfig) error {
 	if err != nil {
 		return err
 	}
-	taskStore := store.NewTaskStateStore(cfg.stateDir)
-	teamStore := team.NewFileGraphStore(filepath.Join(cfg.stateDir, "team", "graph.json"))
+	modeStateDir := workspaceStateDir(cfg)
+	taskStore := store.NewTaskStateStore(modeStateDir)
+	teamStore := team.NewFileGraphStore(filepath.Join(modeStateDir, "team", "graph.json"))
 	canceller := turncancel.New()
 	rt, err := runtime.NewRunner(tc, runner)
 	if err != nil {

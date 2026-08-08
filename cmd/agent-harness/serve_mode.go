@@ -9,6 +9,7 @@ import (
 
 	"github.com/scitrera/agent-harness-go/pkg/approval"
 	aetherchan "github.com/scitrera/agent-harness-go/pkg/channels/aether"
+	"github.com/scitrera/agent-harness-go/pkg/protocol"
 	"github.com/scitrera/agent-harness-go/pkg/runtime"
 	"github.com/scitrera/agent-harness-go/pkg/turncancel"
 )
@@ -49,8 +50,8 @@ func runServe(cfg appConfig) error {
 	ch.SetApprovalBroker(broker)
 	// A `clear` control drops the thread's persisted transcript, so a client-side
 	// clear is not resurrected from local history on the next turn.
-	ch.SetThreadClearer(func(threadID string) error {
-		return st.history.DeleteHistory(context.Background(), threadID)
+	ch.SetThreadClearer(func(addr protocol.MessageAddress) error {
+		return deleteAddressHistory(context.Background(), st.history, addr)
 	})
 
 	rt, err := runtime.NewRunner(ch, runner)

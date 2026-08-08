@@ -3,40 +3,43 @@ package turn
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 
 	modelpkg "github.com/scitrera/agent-harness-go/pkg/model"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 )
 
-// stickyModel returns the model pinned for a thread via /model <name>, or "".
-func (r *Runner) stickyModel(threadID string) string {
-	if threadID == "" {
+// stickyModel returns the model pinned for a workspace/thread via /model
+// <name>, or "".
+func (r *Runner) stickyModel(addr protocol.MessageAddress) string {
+	if addr.ThreadID == "" {
 		return ""
 	}
 	r.threadModelsMu.Lock()
 	defer r.threadModelsMu.Unlock()
-	return r.threadModels[threadID]
+	return r.threadModels[modelThreadKey(addr)]
 }
 
-// setStickyModel pins (or clears, when name == "") a thread's model.
-func (r *Runner) setStickyModel(threadID, name string) {
-	if threadID == "" {
+// setStickyModel pins (or clears, when name == "") a workspace/thread's model.
+func (r *Runner) setStickyModel(addr protocol.MessageAddress, name string) {
+	if addr.ThreadID == "" {
 		return
 	}
+	key := modelThreadKey(addr)
 	r.threadModelsMu.Lock()
 	defer r.threadModelsMu.Unlock()
 	if name == "" {
-		delete(r.threadModels, threadID)
+		delete(r.threadModels, key)
 		return
 	}
-	r.threadModels[threadID] = name
+	r.threadModels[key] = name
 }
 
 // activeModelName reports the thread's currently-selected model for display: the
 // pinned model if set, else the configured default.
-func (r *Runner) activeModelName(threadID string) string {
-	if sticky := r.stickyModel(threadID); sticky != "" {
+func (r *Runner) activeModelName(addr protocol.MessageAddress) string {
+	if sticky := r.stickyModel(addr); sticky != "" {
 		return sticky
 	}
 	return r.model
@@ -44,7 +47,7 @@ func (r *Runner) activeModelName(threadID string) string {
 
 // ActiveModelName reports the model selected for threadID.
 func (r *Runner) ActiveModelName(threadID string) string {
-	return r.activeModelName(threadID)
+	return r.activeModelName(protocol.MessageAddress{WorkspaceID: r.defaultWorkspaceID, ThreadID: threadID})
 }
 
 // runModelCommand handles /model: bare or "list" lists the available models;
@@ -65,14 +68,14 @@ func (r *Runner) runModelCommand(ctx context.Context, addr protocol.MessageAddre
 	if _, ok := r.modelRegistry.Get(name); !ok {
 		return r.emitReply(ctx, addr, fmt.Sprintf("Unknown model: %q.\n\n%s", name, r.modelListText(addr)))
 	}
-	r.setStickyModel(addr.ThreadID, name)
+	r.setStickyModel(addr, name)
 	return r.emitReply(ctx, addr, fmt.Sprintf("Switched to model %q for this thread.", name))
 }
 
 // modelListText renders the available models with the active one marked. Without
 // a registry it reports the single configured model.
 func (r *Runner) modelListText(addr protocol.MessageAddress) string {
-	active := r.activeModelName(addr.ThreadID)
+	active := r.activeModelName(addr)
 	if r.modelRegistry == nil {
 		return fmt.Sprintf("Active model: %s\n(no model registry configured — switching is unavailable)", active)
 	}
@@ -94,6 +97,10 @@ func (r *Runner) modelListText(addr protocol.MessageAddress) string {
 	}
 	_, _ = fmt.Fprintf(&b, "\n\nActive: %s. Switch with /model <name>.", active)
 	return b.String()
+}
+
+func modelThreadKey(addr protocol.MessageAddress) string {
+	return strconv.Itoa(len(addr.WorkspaceID)) + ":" + addr.WorkspaceID + addr.ThreadID
 }
 
 // modelTags renders a short capability/tier hint for the model list.

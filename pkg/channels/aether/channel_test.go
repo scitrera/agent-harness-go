@@ -218,6 +218,29 @@ func TestControlCancelIsNotDeliveredAsATurn(t *testing.T) {
 	}
 }
 
+func TestControlClearCarriesCompositeWorkspaceThreadAddress(t *testing.T) {
+	c, _ := newTestChannel(t)
+	want := protocol.MessageAddress{WorkspaceID: "project-a", ThreadID: "shared", TaskID: "task-1"}
+	var got protocol.MessageAddress
+	c.SetThreadClearer(func(addr protocol.MessageAddress) error {
+		got = addr
+		return nil
+	})
+
+	body := controlPayload(t, want, map[string]any{"type": "control", "kind": spec.ControlClear})
+	if err := c.onMessage(context.Background(), &sdk.Message{Payload: body}); err != nil {
+		t.Fatalf("onMessage: %v", err)
+	}
+	if got.WorkspaceID != want.WorkspaceID || got.ThreadID != want.ThreadID {
+		t.Fatalf("clear address = %+v, want %+v", got, want)
+	}
+	select {
+	case in := <-c.tasks:
+		t.Fatalf("clear control was delivered as a turn: %+v", in)
+	default:
+	}
+}
+
 // Approve/deny controls resolve the turn's pending approval prompt.
 func TestControlApproveResolvesPendingApproval(t *testing.T) {
 	c, _ := newTestChannel(t)

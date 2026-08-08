@@ -29,6 +29,85 @@ func TestFileStoreHistoryRoundTrip(t *testing.T) {
 	}
 }
 
+func TestFileStoreWorkspaceHistoryIsolation(t *testing.T) {
+	dir := t.TempDir()
+	s := NewFileStore(dir, dir)
+	ctx := context.Background()
+	partA, _ := protocol.NewTextPart("from a")
+	partB, _ := protocol.NewTextPart("from b")
+	messageA := protocol.ChatMessage{ID: "a", Role: protocol.RoleUser, Content: []protocol.ContentPart{partA}}
+	messageB := protocol.ChatMessage{ID: "b", Role: protocol.RoleUser, Content: []protocol.ContentPart{partB}}
+
+	if err := s.SaveWorkspaceHistory(ctx, "project/a", "shared", []protocol.ChatMessage{messageA}); err != nil {
+		t.Fatalf("save project a: %v", err)
+	}
+	if err := s.SaveWorkspaceHistory(ctx, "project\\a", "shared", []protocol.ChatMessage{messageB}); err != nil {
+		t.Fatalf("save project b: %v", err)
+	}
+	gotA, err := s.LoadWorkspaceHistory(ctx, "project/a", "shared")
+	if err != nil {
+		t.Fatalf("load project a: %v", err)
+	}
+	gotB, err := s.LoadWorkspaceHistory(ctx, "project\\a", "shared")
+	if err != nil {
+		t.Fatalf("load project b: %v", err)
+	}
+	legacy, err := s.LoadHistory(ctx, "shared")
+	if err != nil {
+		t.Fatalf("load legacy: %v", err)
+	}
+	if len(gotA) != 1 || gotA[0].ID != "a" || len(gotB) != 1 || gotB[0].ID != "b" || len(legacy) != 0 {
+		t.Fatalf("histories leaked: a=%+v b=%+v legacy=%+v", gotA, gotB, legacy)
+	}
+
+	if err := s.DeleteWorkspaceHistory(ctx, "project/a", "shared"); err != nil {
+		t.Fatalf("delete project a: %v", err)
+	}
+	gotA, err = s.LoadWorkspaceHistory(ctx, "project/a", "shared")
+	if err != nil || len(gotA) != 0 {
+		t.Fatalf("project a after delete: %v %+v", err, gotA)
+	}
+	gotB, err = s.LoadWorkspaceHistory(ctx, "project\\a", "shared")
+	if err != nil || len(gotB) != 1 || gotB[0].ID != "b" {
+		t.Fatalf("project b after project a delete: %v %+v", err, gotB)
+	}
+}
+
+func TestFileStoreListsWorkspaceHistoryWithoutCrossWorkspaceLeakage(t *testing.T) {
+	dir := t.TempDir()
+	s := NewFileStore(dir, dir)
+	ctx := context.Background()
+	part, _ := protocol.NewTextPart("hello")
+	for _, threadID := range []string{"thread-b", "thread-a"} {
+		message := protocol.ChatMessage{
+			ID:      "message-" + threadID,
+			Role:    protocol.RoleUser,
+			Addr:    protocol.MessageAddress{WorkspaceID: "project-a", ThreadID: threadID},
+			Content: []protocol.ContentPart{part},
+		}
+		if err := s.SaveWorkspaceHistory(ctx, "project-a", threadID, []protocol.ChatMessage{message}); err != nil {
+			t.Fatalf("save %s: %v", threadID, err)
+		}
+	}
+	other := protocol.ChatMessage{ID: "other", Role: protocol.RoleUser, Addr: protocol.MessageAddress{WorkspaceID: "project-b", ThreadID: "thread-a"}, Content: []protocol.ContentPart{part}}
+	if err := s.SaveWorkspaceHistory(ctx, "project-b", "thread-a", []protocol.ChatMessage{other}); err != nil {
+		t.Fatalf("save other workspace: %v", err)
+	}
+
+	histories, err := s.ListWorkspaceHistory(ctx, "project-a")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(histories) != 2 || histories[0].ThreadID != "thread-a" || histories[1].ThreadID != "thread-b" {
+		t.Fatalf("histories = %+v", histories)
+	}
+	for _, history := range histories {
+		if history.Messages[0].Addr.WorkspaceID != "project-a" {
+			t.Fatalf("cross-workspace history leaked: %+v", history)
+		}
+	}
+}
+
 func TestFileStoreSanitizesThreadID(t *testing.T) {
 	dir := t.TempDir()
 	s := NewFileStore(dir, dir)

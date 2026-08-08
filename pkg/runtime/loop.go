@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"errors"
+	"strconv"
 	"sync"
 	"time"
 
@@ -136,7 +137,10 @@ func (r *Runner) runLoopConcurrent(ctx context.Context, cfg LoopConfig) (LoopSta
 }
 
 func threadKey(env channel.Inbound) string {
-	return turnAddress(env).ThreadID
+	addr := turnAddress(env)
+	// Length-prefix the workspace so arbitrary opaque IDs cannot make two
+	// composite (workspace, thread) pairs share a dispatcher lane.
+	return strconv.Itoa(len(addr.WorkspaceID)) + ":" + addr.WorkspaceID + addr.ThreadID
 }
 
 func normalizeLoopConfig(cfg LoopConfig) LoopConfig {

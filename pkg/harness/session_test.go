@@ -50,6 +50,45 @@ func Test_Session_DropTrailingUserDuplicate_matches_by_id(t *testing.T) {
 	}
 }
 
+func Test_Session_HistoryIsScopedByWorkspace(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryStore()
+	registry := tools.NewRegistry()
+	first, err := NewSession(ctx, protocol.MessageAddress{WorkspaceID: "project-a", ThreadID: "shared"}, store, registry, tools.MemoryAuthority{})
+	if err != nil {
+		t.Fatalf("first session: %v", err)
+	}
+	second, err := NewSession(ctx, protocol.MessageAddress{WorkspaceID: "project-b", ThreadID: "shared"}, store, registry, tools.MemoryAuthority{})
+	if err != nil {
+		t.Fatalf("second session: %v", err)
+	}
+	if err := first.Append(ctx, userMsg(t, "a", "from a")); err != nil {
+		t.Fatalf("append first: %v", err)
+	}
+	if err := second.Append(ctx, userMsg(t, "b", "from b")); err != nil {
+		t.Fatalf("append second: %v", err)
+	}
+
+	firstAgain, err := NewSession(ctx, protocol.MessageAddress{WorkspaceID: "project-a", ThreadID: "shared"}, store, registry, tools.MemoryAuthority{})
+	if err != nil {
+		t.Fatalf("reload first: %v", err)
+	}
+	secondAgain, err := NewSession(ctx, protocol.MessageAddress{WorkspaceID: "project-b", ThreadID: "shared"}, store, registry, tools.MemoryAuthority{})
+	if err != nil {
+		t.Fatalf("reload second: %v", err)
+	}
+	if got := firstAgain.History(); len(got) != 1 || got[0].ID != "a" {
+		t.Fatalf("project-a history = %+v", got)
+	}
+	if got := secondAgain.History(); len(got) != 1 || got[0].ID != "b" {
+		t.Fatalf("project-b history = %+v", got)
+	}
+	legacy, err := store.LoadHistory(ctx, "shared")
+	if err != nil || len(legacy) != 0 {
+		t.Fatalf("legacy history leaked: %v %+v", err, legacy)
+	}
+}
+
 func Test_Session_DropTrailingUserDuplicate_matches_by_text_when_ids_differ(t *testing.T) {
 	session := newSeededSession(t, userMsg(t, "host-committed-id", "hello there"))
 	incoming := userMsg(t, "task-delivered-id", "hello there")

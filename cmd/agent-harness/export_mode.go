@@ -7,6 +7,7 @@ package main
 // convenient way to pull training/analysis data out of a TUI/CLI session.
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -17,23 +18,27 @@ import (
 
 	"github.com/scitrera/agent-harness-go/pkg/compaction"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
+	"github.com/scitrera/agent-harness-go/pkg/store"
 )
+
+type exportHistory struct {
+	workspaceID string
+	threadID    string
+	messages    []protocol.ChatMessage
+}
 
 // runExport writes thread history under stateDir as JSONL to out. thread is a
 // specific thread id or "all"; format is "openai" or "trace".
 func runExport(stateDir, thread, format string, out io.Writer) error {
-	switch format {
-	case "openai", "trace":
-	default:
-		return fmt.Errorf("unknown --export-format %q (want openai|trace)", format)
+	if err := validateExportFormat(format); err != nil {
+		return err
 	}
 	historyDir := filepath.Join(stateDir, "history")
 	files, err := exportFiles(historyDir, thread)
 	if err != nil {
 		return err
 	}
-	enc := json.NewEncoder(out)
-	exported := 0
+	histories := make([]exportHistory, 0, len(files))
 	for _, f := range files {
 		data, err := os.ReadFile(f)
 		if err != nil {
@@ -47,19 +52,70 @@ func runExport(stateDir, thread, format string, out io.Writer) error {
 			continue
 		}
 		id := strings.TrimSuffix(filepath.Base(f), ".json")
-		var rec any
-		if format == "openai" {
-			rec = toOpenAIExport(id, msgs)
-		} else {
-			rec = toTraceExport(id, msgs)
-		}
-		if err := enc.Encode(rec); err != nil {
-			return fmt.Errorf("encode %s: %w", id, err)
-		}
-		exported++
+		histories = append(histories, exportHistory{threadID: id, messages: msgs})
 	}
-	if exported == 0 {
+	if len(histories) == 0 {
 		return fmt.Errorf("no thread history to export under %s", historyDir)
+	}
+	return writeExport(histories, format, out)
+}
+
+// runWorkspaceExport is the composite-key counterpart to runExport. It uses
+// FileStore's workspace-aware enumeration so callers never depend on its safe
+// on-disk identifier encoding.
+func runWorkspaceExport(stateDir, workspaceID, thread, format string, out io.Writer) error {
+	if workspaceID == "" {
+		return runExport(stateDir, thread, format, out)
+	}
+	if err := validateExportFormat(format); err != nil {
+		return err
+	}
+	files := store.NewFileStore("", stateDir)
+	var histories []exportHistory
+	if thread == "all" {
+		listed, err := files.ListWorkspaceHistory(context.Background(), workspaceID)
+		if err != nil {
+			return err
+		}
+		for _, history := range listed {
+			histories = append(histories, exportHistory{workspaceID: workspaceID, threadID: history.ThreadID, messages: history.Messages})
+		}
+	} else {
+		messages, err := files.LoadWorkspaceHistory(context.Background(), workspaceID, thread)
+		if err != nil {
+			return err
+		}
+		if len(messages) > 0 {
+			histories = append(histories, exportHistory{workspaceID: workspaceID, threadID: thread, messages: messages})
+		}
+	}
+	if len(histories) == 0 {
+		return fmt.Errorf("no thread history to export for workspace %q", workspaceID)
+	}
+	return writeExport(histories, format, out)
+}
+
+func validateExportFormat(format string) error {
+	switch format {
+	case "openai", "trace":
+		return nil
+	default:
+		return fmt.Errorf("unknown --export-format %q (want openai|trace)", format)
+	}
+}
+
+func writeExport(histories []exportHistory, format string, out io.Writer) error {
+	enc := json.NewEncoder(out)
+	for _, history := range histories {
+		var record any
+		if format == "openai" {
+			record = toOpenAIWorkspaceExport(history.workspaceID, history.threadID, history.messages)
+		} else {
+			record = toTraceWorkspaceExport(history.workspaceID, history.threadID, history.messages)
+		}
+		if err := enc.Encode(record); err != nil {
+			return fmt.Errorf("encode %s: %w", history.threadID, err)
+		}
 	}
 	return nil
 }
@@ -156,17 +212,22 @@ type oaiMessage struct {
 }
 
 type openAIExport struct {
-	Thread   string       `json:"thread"`
-	Messages []oaiMessage `json:"messages"`
-	Usage    exportUsage  `json:"usage"`
+	Workspace string       `json:"workspace,omitempty"`
+	Thread    string       `json:"thread"`
+	Messages  []oaiMessage `json:"messages"`
+	Usage     exportUsage  `json:"usage"`
 }
 
 func toOpenAIExport(thread string, msgs []protocol.ChatMessage) openAIExport {
+	return toOpenAIWorkspaceExport("", thread, msgs)
+}
+
+func toOpenAIWorkspaceExport(workspace, thread string, msgs []protocol.ChatMessage) openAIExport {
 	out := make([]oaiMessage, 0, len(msgs))
 	for _, m := range msgs {
 		out = append(out, lowerToOAI(m)...)
 	}
-	return openAIExport{Thread: thread, Messages: out, Usage: sumUsage(msgs)}
+	return openAIExport{Workspace: workspace, Thread: thread, Messages: out, Usage: sumUsage(msgs)}
 }
 
 // lowerToOAI maps one persisted message to one or more OpenAI messages: text +
@@ -212,11 +273,16 @@ func lowerToOAI(m protocol.ChatMessage) []oaiMessage {
 // --- Lossless trace export shape ---
 
 type traceExport struct {
-	Thread   string                 `json:"thread"`
-	Messages []protocol.ChatMessage `json:"messages"`
-	Usage    exportUsage            `json:"usage"`
+	Workspace string                 `json:"workspace,omitempty"`
+	Thread    string                 `json:"thread"`
+	Messages  []protocol.ChatMessage `json:"messages"`
+	Usage     exportUsage            `json:"usage"`
 }
 
 func toTraceExport(thread string, msgs []protocol.ChatMessage) traceExport {
-	return traceExport{Thread: thread, Messages: msgs, Usage: sumUsage(msgs)}
+	return toTraceWorkspaceExport("", thread, msgs)
+}
+
+func toTraceWorkspaceExport(workspace, thread string, msgs []protocol.ChatMessage) traceExport {
+	return traceExport{Workspace: workspace, Thread: thread, Messages: msgs, Usage: sumUsage(msgs)}
 }

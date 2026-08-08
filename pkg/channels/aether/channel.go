@@ -85,7 +85,7 @@ type Channel struct {
 
 	canceller   *turncancel.Canceller
 	approvals   *approval.Broker
-	clearThread func(threadID string) error
+	clearThread func(addr protocol.MessageAddress) error
 
 	// replyTo maps an in-flight turn's task id to the topic the turn arrived
 	// from, so stream events go back to that client. Captured at ingress and
@@ -179,7 +179,7 @@ func (c *Channel) SetApprovalBroker(b *approval.Broker) { c.approvals = b }
 
 // SetThreadClearer wires the handler invoked on an inbound `clear` control to
 // drop a thread's persisted/cached history.
-func (c *Channel) SetThreadClearer(fn func(threadID string) error) { c.clearThread = fn }
+func (c *Channel) SetThreadClearer(fn func(addr protocol.MessageAddress) error) { c.clearThread = fn }
 
 // Topic reports the agent topic this channel receives turns on.
 func (c *Channel) Topic() string { return c.client.Topic() }
@@ -265,9 +265,9 @@ func (c *Channel) applyControl(ctx context.Context, ctrl *aetherwire.InboundCont
 		if c.clearThread == nil || addr.ThreadID == "" {
 			return
 		}
-		if err := c.clearThread(addr.ThreadID); err != nil {
+		if err := c.clearThread(addr); err != nil {
 			slog.WarnContext(ctx, "aether: clear thread history failed",
-				slog.String("thread", addr.ThreadID), slog.Any("err", err))
+				slog.String("workspace", addr.WorkspaceID), slog.String("thread", addr.ThreadID), slog.Any("err", err))
 		}
 	case spec.ControlApprove, spec.ControlDeny:
 		if c.approvals == nil {

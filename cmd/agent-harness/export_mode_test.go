@@ -10,6 +10,7 @@ import (
 
 	"github.com/scitrera/agent-harness-go/pkg/compaction"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
+	"github.com/scitrera/agent-harness-go/pkg/store"
 )
 
 // mkPart returns a helper that unwraps a (ContentPart, error) constructor result,
@@ -140,5 +141,34 @@ func TestRunExportAll(t *testing.T) {
 	}
 	if n := len(strings.Split(strings.TrimSpace(buf.String()), "\n")); n != 1 {
 		t.Fatalf("export all lines = %d, want 1", n)
+	}
+}
+
+func TestRunWorkspaceExportIsScopedAndLabelsRecords(t *testing.T) {
+	stateDir := t.TempDir()
+	files := store.NewFileStore("", stateDir)
+	part := mkPart(t)(protocol.NewTextPart("hello"))
+	for _, workspaceID := range []string{"project-a", "project-b"} {
+		message := protocol.ChatMessage{
+			ID:      "message-" + workspaceID,
+			Role:    protocol.RoleUser,
+			Addr:    protocol.MessageAddress{WorkspaceID: workspaceID, ThreadID: "shared"},
+			Content: []protocol.ContentPart{part},
+		}
+		if err := files.SaveWorkspaceHistory(t.Context(), workspaceID, "shared", []protocol.ChatMessage{message}); err != nil {
+			t.Fatalf("save %s: %v", workspaceID, err)
+		}
+	}
+
+	var buf bytes.Buffer
+	if err := runWorkspaceExport(stateDir, "project-a", "all", "trace", &buf); err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	var record traceExport
+	if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &record); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if record.Workspace != "project-a" || record.Thread != "shared" || len(record.Messages) != 1 || record.Messages[0].ID != "message-project-a" {
+		t.Fatalf("record = %+v", record)
 	}
 }
