@@ -21,10 +21,17 @@ func runServe(cfg appConfig) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	wireWorkspaceID := effectiveWorkspace("", cfg.workspaceID)
+	workspaceResolver, err := newSessionWorkspaceResolver(wireWorkspaceID, cfg.visibleWorkspaces)
+	if err != nil {
+		return err
+	}
 	broker := approval.New()
 	ch, err := aetherchan.New(aetherchan.Config{
 		ServerAddr:            cfg.aetherAddr,
 		Workspace:             cfg.aetherWorkspace,
+		SessionWorkspace:      wireWorkspaceID,
+		WorkspaceResolver:     workspaceResolver,
 		Specifier:             cfg.aetherSpecifier,
 		SourceAgent:           cfg.sourceAgent(),
 		APIKey:                os.Getenv("AETHER_API_KEY"),
@@ -41,7 +48,15 @@ func runServe(cfg appConfig) error {
 	if err != nil {
 		return err
 	}
-	runner, _, err := buildRunner(cfg, st, ch, broker, nil)
+	sessionTransport, err := newSessionTransport(
+		st.history, workspaceResolver, wireWorkspaceID,
+		hasAdditionalVisibleWorkspace(wireWorkspaceID, cfg.visibleWorkspaces), ch, ch,
+	)
+	if err != nil {
+		return err
+	}
+	ch.SetSessionService(sessionTransport.Coordinator)
+	runner, _, err := buildRunner(cfg, st, sessionTransport.Publisher, broker, nil)
 	if err != nil {
 		return err
 	}
@@ -51,6 +66,9 @@ func runServe(cfg appConfig) error {
 	// A `clear` control drops the thread's persisted transcript, so a client-side
 	// clear is not resurrected from local history on the next turn.
 	ch.SetThreadClearer(func(addr protocol.MessageAddress) error {
+		if _, err := sessionTransport.Coordinator.ResetSession(context.Background(), addr.WorkspaceID, addr.ThreadID); err != nil {
+			return err
+		}
 		return deleteAddressHistory(context.Background(), st.history, addr)
 	})
 

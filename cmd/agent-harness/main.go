@@ -17,6 +17,7 @@ func main() {
 	workspace := flag.String("workspace", env("SAHARA_WORKING_DIRECTORY", "./workspace"), "workspace root")
 	workspaceMode := flag.String("workspace-mode", env("SAHARA_WORKSPACE_MODE", workspaceModeSingle), "workspace selection: single (legacy) or project (derive from cwd/Git)")
 	workspaceID := flag.String("workspace-id", os.Getenv("SAHARA_WORKSPACE_ID"), "pin the logical workspace ID (enables composite history keys)")
+	visibleWorkspaces := flag.String("visible-workspaces", os.Getenv("SAHARA_VISIBLE_WORKSPACES"), "comma-separated additional logical workspaces clients may address")
 	workspaceIndexDir := flag.String("workspace-index-dir", env("SAHARA_WORKSPACE_INDEX_DIR", defaultWorkspaceIndexDir()), "shared project path-to-workspace index directory")
 	thread := flag.String("thread", "cli", "chat thread id (CLI/TUI mode)")
 	baseURL := flag.String("base-url", os.Getenv("SAHARA_LLM_BASE_URL"), "OpenAI-compatible base URL")
@@ -108,14 +109,15 @@ func main() {
 	}
 
 	cfg := appConfig{
-		workspaceRoot: *workspace,
-		workspaceID:   workspaceResolution.WorkspaceID,
-		stateDir:      stateDir,
-		thread:        *thread,
-		baseURL:       *baseURL,
-		model:         *model,
-		seed:          *seed,
-		record:        *record,
+		workspaceRoot:     *workspace,
+		workspaceID:       workspaceResolution.WorkspaceID,
+		visibleWorkspaces: parseVisibleWorkspaces(*visibleWorkspaces),
+		stateDir:          stateDir,
+		thread:            *thread,
+		baseURL:           *baseURL,
+		model:             *model,
+		seed:              *seed,
+		record:            *record,
 
 		aetherAddr:        *aetherAddr,
 		aetherWorkspace:   effectiveWorkspace(*aetherWorkspace, workspaceResolution.WorkspaceID),

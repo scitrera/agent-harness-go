@@ -36,7 +36,22 @@ const (
 	// inboxBuffer bounds turns accepted from the gateway before FetchTask
 	// consumes them. Mirrors the in-process channels' inbox.
 	inboxBuffer = 16
+	// sessionAttachBuffer bounds live events retained while an attach snapshot
+	// is being assembled and its result is sent.
+	sessionAttachBuffer = 512
 )
+
+// SessionService is the transport-neutral attach surface implemented by
+// sessionlog.Coordinator.
+type SessionService interface {
+	Attach(ctx context.Context, request spec.SessionAttachRequest) (spec.SessionAttachResult, error)
+}
+
+// WorkspaceResolver applies the host's application-level default and
+// visibility policy independently from Aether's transport workspace.
+type WorkspaceResolver interface {
+	ResolveWorkspace(ctx context.Context, requested string) (string, error)
+}
 
 // Config configures the agent-side Aether transport.
 type Config struct {
@@ -54,6 +69,16 @@ type Config struct {
 	// messages at meta.scitrera.agent_name. Invoked per message so a rename mid
 	// session takes effect without a restart. Nil, or "" , omits the stamp.
 	AgentName func() string
+	// SessionWorkspace is the application-level default used when an attach
+	// request omits workspace_id. It may differ from the Aether routing
+	// workspace. Empty falls back to Workspace.
+	SessionWorkspace  string
+	WorkspaceResolver WorkspaceResolver
+	// PreferTaskMessageLanes routes turn stream envelopes to
+	// tk::<workspace>::<task>::msg when both identities are present. Enable this
+	// only when task IDs name real Aether tasks whose recipients are subscribed;
+	// the default direct-reply path supports task-less OSS deployments.
+	PreferTaskMessageLanes bool
 
 	// Credentials. All optional: an aetherlite gateway in dev mode accepts an
 	// unauthenticated connection, which is the zero-setup path.
@@ -75,10 +100,13 @@ type Config struct {
 // OnMessage delivery into the harness's pull-based FetchTask, and publishes a
 // turn's stream events back to the client that sent the turn.
 type Channel struct {
-	client      *sdk.AgentClient
-	sourceAgent string
-	agentNameFn func() string
-	workspace   string
+	client                 *sdk.AgentClient
+	sourceAgent            string
+	agentNameFn            func() string
+	workspace              string
+	sessionWorkspace       string
+	preferTaskMessageLanes bool
+	workspaceResolver      WorkspaceResolver
 
 	tasks  chan channel.Inbound
 	runErr chan error
@@ -93,11 +121,27 @@ type Channel struct {
 	mu      sync.Mutex
 	replyTo map[string]string
 
+	sessionMu          sync.Mutex
+	sessionService     SessionService
+	sessionSubscribers map[string]map[string]*sessionSubscriber
+
 	closeOnce sync.Once
 
 	// sendMessage sends a CHAT payload to a topic. A seam so egress is testable
 	// without a live connection.
 	sendMessage func(topic string, payload []byte) error
+}
+
+type sessionSubscriber struct {
+	mu          sync.Mutex
+	requestID   string
+	clientID    string
+	workspaceID string
+	sessionID   string
+	topic       string
+	ready       bool
+	overflow    bool
+	pending     []spec.SessionEvent
 }
 
 var (
@@ -139,13 +183,20 @@ func New(cfg Config) (*Channel, error) {
 		return nil, fmt.Errorf("aether: new agent client: %w", err)
 	}
 	c := &Channel{
-		client:      client,
-		sourceAgent: cfg.SourceAgent,
-		agentNameFn: cfg.AgentName,
-		workspace:   cfg.Workspace,
-		tasks:       make(chan channel.Inbound, inboxBuffer),
-		runErr:      make(chan error, 1),
-		replyTo:     map[string]string{},
+		client:                 client,
+		sourceAgent:            cfg.SourceAgent,
+		agentNameFn:            cfg.AgentName,
+		workspace:              cfg.Workspace,
+		sessionWorkspace:       cfg.SessionWorkspace,
+		preferTaskMessageLanes: cfg.PreferTaskMessageLanes,
+		workspaceResolver:      cfg.WorkspaceResolver,
+		tasks:                  make(chan channel.Inbound, inboxBuffer),
+		runErr:                 make(chan error, 1),
+		replyTo:                map[string]string{},
+		sessionSubscribers:     map[string]map[string]*sessionSubscriber{},
+	}
+	if c.sessionWorkspace == "" {
+		c.sessionWorkspace = c.workspace
 	}
 	c.sendMessage = client.SendChatMessage
 	client.OnMessage(c.onMessage)
@@ -181,6 +232,14 @@ func (c *Channel) SetApprovalBroker(b *approval.Broker) { c.approvals = b }
 // drop a thread's persisted/cached history.
 func (c *Channel) SetThreadClearer(fn func(addr protocol.MessageAddress) error) { c.clearThread = fn }
 
+// SetSessionService enables framed attach/snapshot/replay requests on the agent
+// topic. It may be set after construction, before Start.
+func (c *Channel) SetSessionService(service SessionService) {
+	c.sessionMu.Lock()
+	c.sessionService = service
+	c.sessionMu.Unlock()
+}
+
 // Topic reports the agent topic this channel receives turns on.
 func (c *Channel) Topic() string { return c.client.Topic() }
 
@@ -215,11 +274,31 @@ func (c *Channel) onMessage(ctx context.Context, msg *sdk.Message) error {
 	if msg == nil || len(msg.Payload) == 0 {
 		return nil
 	}
+	if frame, ok, frameErr := aetherwire.ParseSessionFrame(msg.Payload); ok {
+		c.handleSessionFrame(ctx, msg.SourceTopic, frame, frameErr)
+		return nil
+	}
 	chatMsg, ctrl, err := aetherwire.ParseInbound(msg.Payload)
 	if err != nil {
 		// Non-turn / unparseable payloads are ignored, not fatal: this topic can
 		// carry traffic we are not the intended reader of.
 		return nil
+	}
+	if c.workspaceResolver != nil {
+		requestedWorkspace := chatMsg.Addr.WorkspaceID
+		// Older clients stamped the Aether routing workspace into the logical
+		// address. Preserve that path when the host now separates the two by
+		// treating the transport workspace as an omitted/default request.
+		if requestedWorkspace == c.workspace && c.workspace != c.sessionWorkspace {
+			requestedWorkspace = ""
+		}
+		workspaceID, resolveErr := c.workspaceResolver.ResolveWorkspace(ctx, requestedWorkspace)
+		if resolveErr != nil {
+			slog.WarnContext(ctx, "aether: inbound workspace unavailable",
+				slog.String("workspace", chatMsg.Addr.WorkspaceID))
+			return nil
+		}
+		chatMsg.Addr.WorkspaceID = workspaceID
 	}
 	if ctrl != nil {
 		c.applyControl(ctx, ctrl, chatMsg.Addr)
@@ -332,7 +411,7 @@ func (c *Channel) PublishEvent(_ context.Context, event channel.Event) error {
 // false when the event is not routable (no known reply target) or is not a wire
 // event.
 func (c *Channel) streamMessage(event channel.Event) (topic string, payload []byte, ok bool, err error) {
-	topic = c.replyTopic(event.Addr)
+	topic = c.streamTopic(event.Addr)
 	if topic == "" {
 		return "", nil, false, nil
 	}
@@ -352,6 +431,15 @@ func (c *Channel) streamMessage(event channel.Event) (topic string, payload []by
 		return "", nil, false, err
 	}
 	return topic, body, true, nil
+}
+
+func (c *Channel) streamTopic(addr protocol.MessageAddress) string {
+	if c.preferTaskMessageLanes && addr.TaskID != "" {
+		if workspaceID := c.workspaceFor(addr); workspaceID != "" {
+			return aetherwire.TaskMessageTopic(workspaceID, addr.TaskID)
+		}
+	}
+	return c.replyTopic(addr)
 }
 
 // replyTopic resolves where a turn's events go: the topic the turn arrived from,
@@ -379,4 +467,213 @@ func (c *Channel) workspaceFor(addr protocol.MessageAddress) string {
 		return addr.WorkspaceID
 	}
 	return c.workspace
+}
+
+func (c *Channel) handleSessionFrame(ctx context.Context, topic string, frame spec.SessionFrame, frameErr error) {
+	if frameErr != nil {
+		c.sendSessionError(topic, frame.RequestID, "invalid_request", "invalid session request", false)
+		return
+	}
+	if frame.Type != spec.SessionFrameAttachRequest {
+		return
+	}
+	request, err := frame.DecodeAttachRequest()
+	if err != nil || request == nil {
+		c.sendSessionError(topic, frame.RequestID, "invalid_request", "invalid session attach request", false)
+		return
+	}
+	if topic == "" {
+		return
+	}
+	c.sessionMu.Lock()
+	service := c.sessionService
+	c.sessionMu.Unlock()
+	if service == nil {
+		c.sendSessionError(topic, frame.RequestID, "not_supported", "session attachment is not configured", false)
+		return
+	}
+	workspaceID := request.WorkspaceID
+	if c.workspaceResolver != nil {
+		workspaceID, err = c.workspaceResolver.ResolveWorkspace(ctx, request.WorkspaceID)
+		if err != nil {
+			c.sendSessionError(topic, frame.RequestID, "workspace_unavailable", "workspace is not visible", false)
+			return
+		}
+	} else if workspaceID == "" {
+		workspaceID = c.sessionWorkspace
+	}
+	subscriber := &sessionSubscriber{
+		requestID:   frame.RequestID,
+		clientID:    request.ClientID,
+		workspaceID: workspaceID,
+		sessionID:   request.SessionID,
+		topic:       topic,
+	}
+	c.addSessionSubscriber(subscriber)
+
+	result, err := service.Attach(ctx, *request)
+	if err != nil {
+		c.removeSessionSubscriber(subscriber)
+		c.sendSessionError(topic, frame.RequestID, "attach_failed", "session attach failed", true)
+		return
+	}
+	if result.WorkspaceID != workspaceID {
+		c.removeSessionSubscriber(subscriber)
+		c.sendSessionError(topic, frame.RequestID, "attach_failed", "session attach resolved an inconsistent workspace", false)
+		return
+	}
+	resultFrame, err := spec.NewSessionFrame(spec.SessionFrameAttachResult, frame.RequestID, result)
+	if err != nil {
+		c.removeSessionSubscriber(subscriber)
+		c.sendSessionError(topic, frame.RequestID, "attach_failed", "session attach failed", true)
+		return
+	}
+	resultPayload, err := aetherwire.SessionFramePayload(resultFrame)
+	if err != nil {
+		c.removeSessionSubscriber(subscriber)
+		c.sendSessionError(topic, frame.RequestID, "attach_failed", "session attach failed", true)
+		return
+	}
+	if err := c.activateSessionSubscriber(subscriber, result.WorkspaceID, resultPayload); err != nil {
+		c.removeSessionSubscriber(subscriber)
+		slog.WarnContext(ctx, "aether: deliver session attach failed", slog.Any("err", err))
+		return
+	}
+	subscriber.mu.Lock()
+	ready := subscriber.ready
+	subscriber.mu.Unlock()
+	if !ready {
+		c.removeSessionSubscriber(subscriber)
+		return
+	}
+	c.replacePriorSessionSubscriber(subscriber)
+}
+
+func (c *Channel) addSessionSubscriber(subscriber *sessionSubscriber) {
+	c.sessionMu.Lock()
+	byRequest := c.sessionSubscribers[subscriber.sessionID]
+	if byRequest == nil {
+		byRequest = map[string]*sessionSubscriber{}
+		c.sessionSubscribers[subscriber.sessionID] = byRequest
+	}
+	byRequest[subscriber.requestID] = subscriber
+	c.sessionMu.Unlock()
+}
+
+func (c *Channel) removeSessionSubscriber(subscriber *sessionSubscriber) {
+	c.sessionMu.Lock()
+	byRequest := c.sessionSubscribers[subscriber.sessionID]
+	if byRequest[subscriber.requestID] == subscriber {
+		delete(byRequest, subscriber.requestID)
+	}
+	if len(byRequest) == 0 {
+		delete(c.sessionSubscribers, subscriber.sessionID)
+	}
+	c.sessionMu.Unlock()
+}
+
+func (c *Channel) replacePriorSessionSubscriber(current *sessionSubscriber) {
+	c.sessionMu.Lock()
+	for requestID, subscriber := range c.sessionSubscribers[current.sessionID] {
+		if subscriber == current {
+			continue
+		}
+		subscriber.mu.Lock()
+		sameClient := subscriber.clientID == current.clientID && subscriber.workspaceID == current.workspaceID
+		subscriber.mu.Unlock()
+		if sameClient {
+			delete(c.sessionSubscribers[current.sessionID], requestID)
+		}
+	}
+	c.sessionMu.Unlock()
+}
+
+func (c *Channel) activateSessionSubscriber(subscriber *sessionSubscriber, resolvedWorkspace string, resultPayload []byte) error {
+	subscriber.mu.Lock()
+	defer subscriber.mu.Unlock()
+	subscriber.workspaceID = resolvedWorkspace
+	if subscriber.overflow {
+		c.sendSessionError(subscriber.topic, subscriber.requestID, "session_gap", "live session events exceeded the attach buffer; attach again", true)
+		return nil
+	}
+	if err := c.sendMessage(subscriber.topic, resultPayload); err != nil {
+		return err
+	}
+	for _, event := range subscriber.pending {
+		if event.WorkspaceID != resolvedWorkspace {
+			continue
+		}
+		if err := c.sendSessionEvent(subscriber.topic, event); err != nil {
+			return err
+		}
+	}
+	subscriber.pending = nil
+	subscriber.ready = true
+	return nil
+}
+
+// PublishSessionEvent implements sessionlog.SessionEventPublisher. An attach
+// result is always delivered before events captured while it was assembled;
+// each subscriber's subsequent sends remain cursor ordered.
+func (c *Channel) PublishSessionEvent(ctx context.Context, event spec.SessionEvent) error {
+	c.sessionMu.Lock()
+	subscribers := make([]*sessionSubscriber, 0, len(c.sessionSubscribers[event.SessionID]))
+	for _, subscriber := range c.sessionSubscribers[event.SessionID] {
+		subscribers = append(subscribers, subscriber)
+	}
+	c.sessionMu.Unlock()
+	for _, subscriber := range subscribers {
+		subscriber.mu.Lock()
+		if subscriber.workspaceID != event.WorkspaceID {
+			subscriber.mu.Unlock()
+			continue
+		}
+		if !subscriber.ready {
+			if len(subscriber.pending) < sessionAttachBuffer {
+				subscriber.pending = append(subscriber.pending, event)
+			} else {
+				subscriber.overflow = true
+			}
+			subscriber.mu.Unlock()
+			continue
+		}
+		err := c.sendSessionEvent(subscriber.topic, event)
+		subscriber.mu.Unlock()
+		if err != nil {
+			c.removeSessionSubscriber(subscriber)
+			slog.WarnContext(ctx, "aether: publish live session event failed", slog.Any("err", err))
+		}
+	}
+	return nil
+}
+
+func (c *Channel) sendSessionEvent(topic string, event spec.SessionEvent) error {
+	frame, err := spec.NewSessionFrame(spec.SessionFrameEvent, "", event)
+	if err != nil {
+		return err
+	}
+	payload, err := aetherwire.SessionFramePayload(frame)
+	if err != nil {
+		return err
+	}
+	return c.sendMessage(topic, payload)
+}
+
+func (c *Channel) sendSessionError(topic, requestID, code, message string, retryable bool) {
+	if topic == "" || requestID == "" {
+		return
+	}
+	frame, err := spec.NewSessionFrame(spec.SessionFrameError, requestID, spec.SessionErrorPayload{
+		Code: code, Message: message, Retryable: retryable,
+	})
+	if err != nil {
+		return
+	}
+	payload, err := aetherwire.SessionFramePayload(frame)
+	if err != nil {
+		return
+	}
+	if err := c.sendMessage(topic, payload); err != nil {
+		slog.Warn("aether: send session error failed", slog.Any("err", err))
+	}
 }

@@ -13,6 +13,7 @@ import (
 	"github.com/scitrera/agent-harness-go/pkg/aetherwire"
 	"github.com/scitrera/agent-harness-go/pkg/approval"
 	"github.com/scitrera/agent-harness-go/pkg/channel"
+	"github.com/scitrera/agent-harness-go/pkg/ids"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 )
 
@@ -26,6 +27,9 @@ type ClientConfig struct {
 	ServerAddr string
 	// Workspace is the Aether workspace the target agent lives in.
 	Workspace string
+	// SessionWorkspace is the default application-level workspace stamped on
+	// turns. Empty falls back to the Aether routing Workspace.
+	SessionWorkspace string
 	// AgentImplementation and AgentSpecifier address the agent: together with
 	// Workspace they form ag::<workspace>::<implementation>::<specifier>.
 	AgentImplementation string
@@ -56,22 +60,26 @@ type ClientConfig struct {
 // decisions to that agent, so a UI can drive a remote turn exactly as it drives
 // a local one.
 type Client struct {
-	client    *sdk.UserClient
-	workspace string
-	impl      string
-	specifier string
-	userID    string
-	windowID  string
+	client           *sdk.UserClient
+	workspace        string
+	sessionWorkspace string
+	impl             string
+	specifier        string
+	userID           string
+	windowID         string
 
-	events  chan channel.Event
-	dropped atomic.Int64
+	events        chan channel.Event
+	sessionEvents chan spec.SessionEvent
+	sessionErrors chan SessionRemoteError
+	dropped       atomic.Int64
 
 	// threadTask remembers the task a thread's turn was submitted under, so
 	// events that carry no address of their own (token deltas, part updates)
 	// can still be attributed to the right thread and turn. Without it the UI
 	// treats every delta as background activity for another thread.
-	mu         sync.Mutex
-	threadTask map[string]string
+	mu            sync.Mutex
+	threadTask    map[string]string
+	pendingAttach map[string]chan sessionAttachResponse
 
 	closeOnce sync.Once
 
@@ -85,6 +93,24 @@ type Client struct {
 	// sendToAgent is the egress seam, so ingress/egress are testable without a
 	// live gateway.
 	sendToAgent func(payload []byte) error
+}
+
+type sessionAttachResponse struct {
+	result *spec.SessionAttachResult
+	err    *SessionRemoteError
+}
+
+// SessionRemoteError is a structured error returned by the remote session
+// service. RequestID correlates attach failures and post-attach gap notices.
+type SessionRemoteError struct {
+	RequestID string
+	Code      string
+	Message   string
+	Retryable bool
+}
+
+func (e SessionRemoteError) Error() string {
+	return fmt.Sprintf("aether: session %s: %s", e.Code, e.Message)
 }
 
 // HistoryProjection is the local transcript copy a client may keep. It is the
@@ -133,14 +159,21 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		return nil, fmt.Errorf("aether: new user client: %w", err)
 	}
 	c := &Client{
-		client:     user,
-		workspace:  cfg.Workspace,
-		impl:       impl,
-		specifier:  cfg.AgentSpecifier,
-		userID:     cfg.UserID,
-		windowID:   cfg.WindowID,
-		events:     make(chan channel.Event, eventBuffer),
-		threadTask: map[string]string{},
+		client:           user,
+		workspace:        cfg.Workspace,
+		sessionWorkspace: cfg.SessionWorkspace,
+		impl:             impl,
+		specifier:        cfg.AgentSpecifier,
+		userID:           cfg.UserID,
+		windowID:         cfg.WindowID,
+		events:           make(chan channel.Event, eventBuffer),
+		sessionEvents:    make(chan spec.SessionEvent, eventBuffer),
+		sessionErrors:    make(chan SessionRemoteError, eventBuffer),
+		threadTask:       map[string]string{},
+		pendingAttach:    map[string]chan sessionAttachResponse{},
+	}
+	if c.sessionWorkspace == "" {
+		c.sessionWorkspace = c.workspace
 	}
 	c.sendToAgent = func(payload []byte) error {
 		return user.SendToAgent(c.workspace, c.impl, c.specifier, payload)
@@ -217,6 +250,67 @@ func (c *Client) AgentTopic() string {
 	return sdk.AgentTopic(c.workspace, c.impl, c.specifier)
 }
 
+// AttachSession requests a coherent snapshot and optional replay over the same
+// Aether connection used for turns. The stable client_id belongs to the caller;
+// when omitted, this frontend window is used as the stable reconnect identity.
+func (c *Client) AttachSession(ctx context.Context, request spec.SessionAttachRequest) (spec.SessionAttachResult, error) {
+	if request.ClientID == "" {
+		request.ClientID = c.windowID
+	}
+	if err := request.Validate(); err != nil {
+		return spec.SessionAttachResult{}, fmt.Errorf("aether: session attach request: %w", err)
+	}
+	requestID, err := ids.New("attach-")
+	if err != nil {
+		return spec.SessionAttachResult{}, fmt.Errorf("aether: session attach id: %w", err)
+	}
+	frame, err := spec.NewSessionFrame(spec.SessionFrameAttachRequest, requestID, request)
+	if err != nil {
+		return spec.SessionAttachResult{}, fmt.Errorf("aether: session attach frame: %w", err)
+	}
+	payload, err := aetherwire.SessionFramePayload(frame)
+	if err != nil {
+		return spec.SessionAttachResult{}, err
+	}
+	response := make(chan sessionAttachResponse, 1)
+	c.mu.Lock()
+	c.pendingAttach[requestID] = response
+	c.mu.Unlock()
+	defer func() {
+		c.mu.Lock()
+		if c.pendingAttach[requestID] == response {
+			delete(c.pendingAttach, requestID)
+		}
+		c.mu.Unlock()
+	}()
+	if err := c.sendToAgent(payload); err != nil {
+		return spec.SessionAttachResult{}, fmt.Errorf("aether: send session attach: %w", err)
+	}
+	select {
+	case <-ctx.Done():
+		return spec.SessionAttachResult{}, ctx.Err()
+	case received := <-response:
+		if received.err != nil {
+			return spec.SessionAttachResult{}, *received.err
+		}
+		if received.result == nil {
+			return spec.SessionAttachResult{}, fmt.Errorf("aether: empty session attach response")
+		}
+		if err := received.result.Validate(request); err != nil {
+			return spec.SessionAttachResult{}, fmt.Errorf("aether: invalid session attach result: %w", err)
+		}
+		return *received.result, nil
+	}
+}
+
+// SessionEvents exposes cursor-bearing events for sessions attached by this
+// client. They are distinct from the legacy per-turn Events stream.
+func (c *Client) SessionEvents() <-chan spec.SessionEvent { return c.sessionEvents }
+
+// SessionErrors exposes asynchronous gap/not-supported notices that no longer
+// have a waiting AttachSession caller.
+func (c *Client) SessionErrors() <-chan SessionRemoteError { return c.sessionErrors }
+
 // Enqueue submits a turn to the agent. It stamps this session's identity on the
 // address so the agent can route the reply back even if the transport does not
 // report a source topic.
@@ -230,7 +324,7 @@ func (c *Client) Enqueue(ctx context.Context, in channel.Inbound) error {
 		msg.Addr.RequestID = c.windowID
 	}
 	if msg.Addr.WorkspaceID == "" {
-		msg.Addr.WorkspaceID = c.workspace
+		msg.Addr.WorkspaceID = c.sessionWorkspace
 	}
 	if msg.Addr.ThreadID != "" && msg.Addr.TaskID != "" {
 		c.mu.Lock()
@@ -323,7 +417,7 @@ func (c *Client) sendControlForThread(threadID, taskID string, body map[string]a
 		TaskID:      taskID,
 		UserID:      c.userID,
 		RequestID:   c.windowID,
-		WorkspaceID: c.workspace,
+		WorkspaceID: c.sessionWorkspace,
 	}
 	payload, err := json.Marshal(map[string]any{
 		"id":      "control-" + c.windowID,
@@ -340,6 +434,12 @@ func (c *Client) sendControlForThread(threadID, taskID string, body map[string]a
 // onMessage decodes an inbound envelope into a stream event for the UI.
 func (c *Client) onMessage(_ context.Context, msg *sdk.Message) error {
 	if msg == nil || len(msg.Payload) == 0 {
+		return nil
+	}
+	if frame, ok, frameErr := aetherwire.ParseSessionFrame(msg.Payload); ok {
+		if frameErr == nil {
+			c.handleSessionFrame(frame)
+		}
 		return nil
 	}
 	meta, streamEvent, ok, err := aetherwire.ParseStreamEnvelope(msg.Payload)
@@ -368,6 +468,55 @@ func (c *Client) onMessage(_ context.Context, msg *sdk.Message) error {
 	}
 	c.events <- event
 	return nil
+}
+
+func (c *Client) handleSessionFrame(frame spec.SessionFrame) {
+	switch frame.Type {
+	case spec.SessionFrameAttachResult:
+		result, err := frame.DecodeAttachResult()
+		if err != nil || result == nil {
+			return
+		}
+		c.mu.Lock()
+		pending := c.pendingAttach[frame.RequestID]
+		c.mu.Unlock()
+		if pending != nil {
+			select {
+			case pending <- sessionAttachResponse{result: result}:
+			default:
+			}
+		}
+	case spec.SessionFrameError:
+		payload, err := frame.DecodeError()
+		if err != nil || payload == nil {
+			return
+		}
+		remoteErr := SessionRemoteError{
+			RequestID: frame.RequestID,
+			Code:      payload.Code,
+			Message:   payload.Message,
+			Retryable: payload.Retryable,
+		}
+		c.mu.Lock()
+		pending := c.pendingAttach[frame.RequestID]
+		c.mu.Unlock()
+		if pending != nil {
+			select {
+			case pending <- sessionAttachResponse{err: &remoteErr}:
+			default:
+			}
+			return
+		}
+		select {
+		case c.sessionErrors <- remoteErr:
+		default:
+		}
+	case spec.SessionFrameEvent:
+		event, err := frame.DecodeEvent()
+		if err == nil && event != nil {
+			c.sessionEvents <- *event
+		}
+	}
 }
 
 // toChannelEvent maps a spec stream event onto the harness event the UIs

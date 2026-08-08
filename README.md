@@ -54,6 +54,7 @@ the browser, the terminal UI, or stdout in `--cli` mode).
 | `--no-browser` | — | `false` | don't auto-open a browser (web mode) |
 | `--workspace-mode` | `SAHARA_WORKSPACE_MODE` | `single` | `single` preserves the legacy layout; `project` derives a stable logical workspace from cwd/Git |
 | `--workspace-id` | `SAHARA_WORKSPACE_ID` | — | pin a logical workspace ID and enable composite workspace/thread state |
+| `--visible-workspaces` | `SAHARA_VISIBLE_WORKSPACES` | — | comma-separated additional logical workspaces clients may explicitly address |
 | `--workspace-index-dir` | `SAHARA_WORKSPACE_INDEX_DIR` | user config dir | shared canonical project-path to workspace-ID index used by project mode |
 | `--serve` | — | `false` | run as a headless agent worker over Aether |
 | `--aether` | `AETHER_ADDR` | — | Aether gateway address, e.g. `127.0.0.1:50051` |
@@ -84,6 +85,9 @@ stable.
 When Aether or MemoryLayer is enabled, the resolved logical ID is their default
 workspace too. Explicit `--aether-workspace` / `AETHER_WORKSPACE` and
 `--memorylayer-workspace` / `MEMORYLAYER_WORKSPACE` values take precedence.
+Hosts that intentionally serve more than one project can list additional IDs in
+`--visible-workspaces`; omitted request workspace still selects the configured
+default, and unlisted explicit workspaces fail closed.
 
 ### Session attachment library
 
@@ -125,6 +129,16 @@ agent-harness --tui --aether 127.0.0.1:50051
 gateway — when you want the real transport without two terminals. A local
 `aetherlite --dev` gateway accepts unauthenticated connections, so no token
 setup is needed to try it.
+
+The Aether worker accepts the same versioned attach/snapshot/replay protocol as
+the web reference, carried in the messaging spec's multiplexed session frame.
+Go clients can call `AttachSession` and consume `SessionEvents` for
+cursor-bearing reconnects. Attach responses and session events return on the
+attaching client lane; per-turn `tk::<workspace>::<task>::msg` routing is an
+explicit library option reserved for real Aether tasks with subscribed
+recipients. Aether routing workspace and logical session workspace are kept
+separate, so a transport-specific `--aether-workspace` does not change project
+storage identity.
 
 By default each client keeps a local copy of the conversation it witnessed, so a
 second client attaching mid-conversation sees only what arrives after it

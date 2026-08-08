@@ -85,6 +85,37 @@ func TestEnqueueStampsSessionIdentity(t *testing.T) {
 	}
 }
 
+func TestEnqueueSeparatesAetherRouteFromLogicalWorkspace(t *testing.T) {
+	c, err := NewClient(ClientConfig{
+		ServerAddr: "127.0.0.1:1", Workspace: "aether-route", SessionWorkspace: "project-a",
+		AgentSpecifier: "test", UserID: "drew", WindowID: "w1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload []byte
+	c.sendToAgent = func(sent []byte) error {
+		payload = append([]byte(nil), sent...)
+		return nil
+	}
+	if got := c.AgentTopic(); got != "ag::aether-route::agent-harness::test" {
+		t.Fatalf("agent topic = %q", got)
+	}
+	if err := c.Enqueue(context.Background(), channel.Inbound{
+		Addr:    protocol.MessageAddress{ThreadID: "thread-1", TaskID: "task-1"},
+		Message: protocol.ChatMessage{ID: "m1", Role: protocol.RoleUser},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var message protocol.ChatMessage
+	if err := json.Unmarshal(payload, &message); err != nil {
+		t.Fatal(err)
+	}
+	if message.Addr.WorkspaceID != "project-a" {
+		t.Fatalf("logical workspace = %q", message.Addr.WorkspaceID)
+	}
+}
+
 // Round-trip: what the agent publishes is what the client decodes. A token
 // delta carries no address of its own, so the client must attribute it to the
 // thread and task it submitted — otherwise the UI files it as background
@@ -265,6 +296,119 @@ func TestCancelAndResolveSendControls(t *testing.T) {
 	}
 	if envelope.Addr.ThreadID != "thread-1" {
 		t.Fatalf("control thread = %q, want thread-1", envelope.Addr.ThreadID)
+	}
+}
+
+func TestAttachSessionCorrelatesResultAndReceivesLiveEvents(t *testing.T) {
+	c, _ := newTestClient(t)
+	outbound := make(chan []byte, 1)
+	c.sendToAgent = func(payload []byte) error {
+		outbound <- payload
+		return nil
+	}
+	request := spec.NewSessionAttachRequest("thread-1", "client-1")
+	request.WorkspaceID = "project-a"
+	type attachOutcome struct {
+		result spec.SessionAttachResult
+		err    error
+	}
+	outcome := make(chan attachOutcome, 1)
+	go func() {
+		result, err := c.AttachSession(context.Background(), request)
+		outcome <- attachOutcome{result: result, err: err}
+	}()
+
+	requestFrame, ok, err := aetherwire.ParseSessionFrame(<-outbound)
+	if err != nil || !ok || requestFrame.Type != spec.SessionFrameAttachRequest {
+		t.Fatalf("request frame = %+v, %v, %v", requestFrame, ok, err)
+	}
+	result := spec.SessionAttachResult{
+		ProtocolVersion: spec.SessionProtocolVersion,
+		SchemaRevision:  spec.SessionSchemaRevision,
+		WorkspaceID:     "project-a",
+		SessionID:       "thread-1",
+		Capabilities:    spec.DefaultSessionCapabilities(),
+		Snapshot: spec.SessionSnapshot{
+			WorkspaceID: "project-a",
+			SessionID:   "thread-1",
+			Cursor:      spec.SessionCursor{Generation: "worker-a", Sequence: 0},
+			Messages:    []spec.ChatMessage{},
+			State:       map[string]json.RawMessage{},
+		},
+	}
+	resultFrame, err := spec.NewSessionFrame(spec.SessionFrameAttachResult, requestFrame.RequestID, result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resultPayload, err := aetherwire.SessionFramePayload(resultFrame)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.onMessage(context.Background(), testMessage(resultPayload)); err != nil {
+		t.Fatal(err)
+	}
+	got := <-outcome
+	if got.err != nil || got.result.WorkspaceID != "project-a" {
+		t.Fatalf("AttachSession() = %+v, %v", got.result, got.err)
+	}
+
+	event := spec.SessionEvent{
+		ProtocolVersion: spec.SessionProtocolVersion,
+		SchemaRevision:  spec.SessionSchemaRevision,
+		WorkspaceID:     "project-a",
+		SessionID:       "thread-1",
+		Cursor:          spec.SessionCursor{Generation: "worker-a", Sequence: 1},
+		Kind:            spec.SessionEventChatStream,
+		Payload:         json.RawMessage(`{"event":"token_delta","message_id":"m1","index":0,"text":"hi"}`),
+	}
+	eventFrame, err := spec.NewSessionFrame(spec.SessionFrameEvent, "", event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventPayload, err := aetherwire.SessionFramePayload(eventFrame)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.onMessage(context.Background(), testMessage(eventPayload)); err != nil {
+		t.Fatal(err)
+	}
+	if live := <-c.SessionEvents(); live.Cursor.Sequence != 1 || live.SessionID != "thread-1" {
+		t.Fatalf("live session event = %+v", live)
+	}
+}
+
+func TestAttachSessionReturnsStructuredRemoteError(t *testing.T) {
+	c, _ := newTestClient(t)
+	outbound := make(chan []byte, 1)
+	c.sendToAgent = func(payload []byte) error {
+		outbound <- payload
+		return nil
+	}
+	outcome := make(chan error, 1)
+	go func() {
+		_, err := c.AttachSession(context.Background(), spec.NewSessionAttachRequest("thread-1", "client-1"))
+		outcome <- err
+	}()
+	requestFrame, ok, err := aetherwire.ParseSessionFrame(<-outbound)
+	if err != nil || !ok {
+		t.Fatalf("request frame = %+v, %v, %v", requestFrame, ok, err)
+	}
+	errorFrame, err := spec.NewSessionFrame(spec.SessionFrameError, requestFrame.RequestID, spec.SessionErrorPayload{
+		Code: "workspace_unavailable", Message: "workspace is not visible",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	errorPayload, err := aetherwire.SessionFramePayload(errorFrame)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.onMessage(context.Background(), testMessage(errorPayload)); err != nil {
+		t.Fatal(err)
+	}
+	remoteErr, ok := (<-outcome).(SessionRemoteError)
+	if !ok || remoteErr.Code != "workspace_unavailable" || remoteErr.Retryable {
+		t.Fatalf("remote error = %#v", remoteErr)
 	}
 }
 

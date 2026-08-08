@@ -38,10 +38,17 @@ func runAetherStandalone(cfg appConfig) error {
 		cfg.aetherSpecifier = specifier
 	}
 
+	wireWorkspaceID := effectiveWorkspace("", cfg.workspaceID)
+	workspaceResolver, err := newSessionWorkspaceResolver(wireWorkspaceID, cfg.visibleWorkspaces)
+	if err != nil {
+		return err
+	}
 	broker := approval.New()
 	worker, err := aetherchan.New(aetherchan.Config{
 		ServerAddr:            cfg.aetherAddr,
 		Workspace:             cfg.aetherWorkspace,
+		SessionWorkspace:      wireWorkspaceID,
+		WorkspaceResolver:     workspaceResolver,
 		Specifier:             cfg.aetherSpecifier,
 		SourceAgent:           cfg.sourceAgent(),
 		APIKey:                os.Getenv("AETHER_API_KEY"),
@@ -57,7 +64,15 @@ func runAetherStandalone(cfg appConfig) error {
 	if err != nil {
 		return err
 	}
-	runner, _, err := buildRunner(cfg, st, worker, broker, nil)
+	sessionTransport, err := newSessionTransport(
+		st.history, workspaceResolver, wireWorkspaceID,
+		hasAdditionalVisibleWorkspace(wireWorkspaceID, cfg.visibleWorkspaces), worker, worker,
+	)
+	if err != nil {
+		return err
+	}
+	worker.SetSessionService(sessionTransport.Coordinator)
+	runner, _, err := buildRunner(cfg, st, sessionTransport.Publisher, broker, nil)
 	if err != nil {
 		return err
 	}
@@ -65,6 +80,9 @@ func runAetherStandalone(cfg appConfig) error {
 	worker.SetCanceller(canceller)
 	worker.SetApprovalBroker(broker)
 	worker.SetThreadClearer(func(addr protocol.MessageAddress) error {
+		if _, err := sessionTransport.Coordinator.ResetSession(context.Background(), addr.WorkspaceID, addr.ThreadID); err != nil {
+			return err
+		}
 		return deleteAddressHistory(context.Background(), st.history, addr)
 	})
 	rt, err := runtime.NewRunner(worker, runner)

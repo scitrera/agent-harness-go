@@ -31,6 +31,7 @@ func runTUIClient(cfg appConfig) error {
 	client, err := aetherchan.NewClient(aetherchan.ClientConfig{
 		ServerAddr:            cfg.aetherAddr,
 		Workspace:             cfg.aetherWorkspace,
+		SessionWorkspace:      effectiveWorkspace("", cfg.workspaceID),
 		AgentSpecifier:        cfg.aetherSpecifier,
 		UserID:                cfg.aetherUser,
 		WindowID:              cfg.aetherWindow,

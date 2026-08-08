@@ -12,7 +12,6 @@ import (
 	"github.com/scitrera/agent-harness-go/pkg/channel"
 	"github.com/scitrera/agent-harness-go/pkg/channels/web"
 	"github.com/scitrera/agent-harness-go/pkg/runtime"
-	"github.com/scitrera/agent-harness-go/pkg/sessionlog"
 	"github.com/scitrera/agent-harness-go/pkg/threadindex"
 	"github.com/scitrera/agent-harness-go/pkg/turncancel"
 )
@@ -27,35 +26,20 @@ func runWeb(cfg appConfig, addr string, openBrowser bool) error {
 		return err
 	}
 	wireWorkspaceID := effectiveWorkspace("", cfg.workspaceID)
-	attachHistory, err := sessionlog.BindDefaultHistory(st.history, wireWorkspaceID)
+	workspaceResolver, err := newSessionWorkspaceResolver(wireWorkspaceID, cfg.visibleWorkspaces)
 	if err != nil {
-		return fmt.Errorf("session history: %w", err)
+		return err
 	}
-	workspaceResolver, err := sessionlog.NewStaticWorkspaceResolver(wireWorkspaceID, nil)
+	sessionTransport, err := newSessionTransport(
+		st.history, workspaceResolver, wireWorkspaceID,
+		hasAdditionalVisibleWorkspace(wireWorkspaceID, cfg.visibleWorkspaces), wc, wc,
+	)
 	if err != nil {
-		return fmt.Errorf("session workspace: %w", err)
-	}
-	eventLog := sessionlog.NewMemoryEventLog(sessionlog.MemoryEventLogConfig{})
-	sessionService, err := sessionlog.NewCoordinator(sessionlog.CoordinatorConfig{
-		Workspaces: workspaceResolver,
-		History:    attachHistory,
-		Events:     eventLog,
-	})
-	if err != nil {
-		return fmt.Errorf("session coordinator: %w", err)
-	}
-	recordingPublisher, err := sessionlog.NewRecordingPublisher(sessionlog.RecordingPublisherConfig{
-		Events:           eventLog,
-		Next:             wc,
-		SessionEvents:    wc,
-		DefaultWorkspace: wireWorkspaceID,
-	})
-	if err != nil {
-		return fmt.Errorf("session publisher: %w", err)
+		return err
 	}
 	// Preserve the web channel's inbound Enqueue capability while wrapping only
 	// its publisher side with cursor-bearing recording.
-	runnerChannel := publisherEnqueuer{Publisher: recordingPublisher, Enqueuer: wc}
+	runnerChannel := publisherEnqueuer{Publisher: sessionTransport.Publisher, Enqueuer: wc}
 	runner, _, err := buildRunner(cfg, st, runnerChannel, nil, nil)
 	if err != nil {
 		return err
@@ -73,7 +57,7 @@ func runWeb(cfg appConfig, addr string, openBrowser bool) error {
 	}
 	rt.SetCanceller(canceller)
 
-	srv := web.NewWithSessionService(wc, st.history, sessions, canceller, sessionService)
+	srv := web.NewWithSessionService(wc, st.history, sessions, canceller, sessionTransport.Coordinator)
 	httpSrv := &http.Server{Addr: addr, Handler: srv.Handler()}
 
 	done := make(chan struct{})

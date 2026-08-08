@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"os"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/scitrera/agent-harness-go/pkg/ids"
@@ -23,12 +25,15 @@ type appConfig struct {
 	// workspaceID is empty in legacy single-workspace mode. A non-empty value
 	// activates composite workspace/thread history keys for local turns.
 	workspaceID string
-	stateDir    string
-	thread      string
-	baseURL     string
-	model       string
-	seed        bool
-	record      string // --record path: opt-in per-LLM-call JSONL trace log ("" = off)
+	// visibleWorkspaces are additional logical workspaces this host permits an
+	// explicit client to address. The selected/default workspace is implicit.
+	visibleWorkspaces []string
+	stateDir          string
+	thread            string
+	baseURL           string
+	model             string
+	seed              bool
+	record            string // --record path: opt-in per-LLM-call JSONL trace log ("" = off)
 
 	// Aether transport. Empty aetherAddr means no Aether (the in-process
 	// channels).
@@ -54,6 +59,21 @@ type appConfig struct {
 	// streamFlush is the token-delta coalescing interval handed to the turn
 	// runner; 0 streams every delta.
 	streamFlush time.Duration
+}
+
+func parseVisibleWorkspaces(value string) []string {
+	seen := map[string]struct{}{}
+	for _, workspaceID := range strings.Split(value, ",") {
+		if workspaceID = strings.TrimSpace(workspaceID); workspaceID != "" {
+			seen[workspaceID] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for workspaceID := range seen {
+		out = append(out, workspaceID)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // defaultAetherUser names the human driving a client session. It is a routing
