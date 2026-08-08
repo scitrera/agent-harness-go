@@ -19,6 +19,7 @@ and is the open-source core that the Scitrera distribution ("sahara") builds on.
 | Catalog | `catalog` | fixed + filesystem | service-backed `catalog.Provider` |
 | Tool approval | `hooks` | allow-all | allow-lists, ACL/human approvers |
 | Tool observer | `hooks` | none | OTel/audit observers |
+| Session attach/replay | `sessionlog` | bounded in-memory event log | durable Aether/MemoryLayer implementations |
 
 ## Quick start
 
@@ -83,6 +84,21 @@ stable.
 When Aether or MemoryLayer is enabled, the resolved logical ID is their default
 workspace too. Explicit `--aether-workspace` / `AETHER_WORKSPACE` and
 `--memorylayer-workspace` / `MEMORYLAYER_WORKSPACE` values take precedence.
+
+### Session attachment library
+
+`pkg/sessionlog` is the transport-independent OSS reference for resumable
+clients. It provides a bounded event log keyed by `(workspace_id, session_id)`,
+generation-aware complete/partial/unavailable replay, an atomic attach capture,
+and a publisher wrapper that records the shared chat-stream vocabulary. Its
+attach coordinator combines workspace-scoped durable history with any live
+stream projection so a client does not miss a finalized message during the
+short interval before transcript persistence.
+
+The wire types, version, capabilities, and validation rules come from the
+ecosystem messaging spec rather than a Sahara-specific duplicate. The reference
+CLI does not expose a new attach transport yet; Aether and other channels can
+adapt this library without changing the protocol or local storage behavior.
 
 ### Over Aether
 

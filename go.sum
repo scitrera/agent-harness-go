@@ -89,8 +89,6 @@ github.com/scitrera/aether/api v0.2.2 h1:43n8S6Zan15ZrFawg3G7UN62av01WqugGkJDh9b
 github.com/scitrera/aether/api v0.2.2/go.mod h1:CumIxf6irIe+Uqd5aXvJlWDXfH/4EtbAlDzql5DdSZM=
 github.com/scitrera/aether/sdk/go v0.2.2 h1:lFdtUeKC7pDQF0+AjKcpXaUfyo0wMjMcs7nxq8OQe94=
 github.com/scitrera/aether/sdk/go v0.2.2/go.mod h1:xqKFEu+q+oH5U4tQDtCN8jvsdAe2Iep/Gst2dnivdGc=
-github.com/scitrera/ecosystem-messaging-spec/go v1.2.5 h1:UXOUqMvXDn0WB03SHB98Dk4fTmvGv3ErInyCkkKxd3A=
-github.com/scitrera/ecosystem-messaging-spec/go v1.2.5/go.mod h1:KtiRSHiYbBIcFwFOPEmJnypg39C1AR4zFEyGwjoHt3k=
 github.com/scitrera/go-backpressure v0.1.1 h1:MhLWsg0qAVjF43/yQ6JHlrvT6sWpRIIPSu/58XjMbo0=
 github.com/scitrera/go-backpressure v0.1.1/go.mod h1:2bK7pLzy0LE3BPQ029FflI06VvjHQNAevkS4pTUGYmQ=
 github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu7U=

@@ -8,7 +8,7 @@ require (
 	charm.land/glamour/v2 v2.0.1
 	charm.land/lipgloss/v2 v2.0.4
 	github.com/charmbracelet/x/ansi v0.11.7
-	github.com/scitrera/ecosystem-messaging-spec/go v1.2.5
+	github.com/scitrera/ecosystem-messaging-spec/go v1.3.0
 	go.opentelemetry.io/otel v1.43.0
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp v1.43.0
 	go.opentelemetry.io/otel/sdk v1.43.0
@@ -16,6 +16,9 @@ require (
 	golang.org/x/image v0.43.0
 	gopkg.in/yaml.v3 v3.0.1
 )
+
+// Local integration until ecosystem-messaging-spec v1.3.0 is published.
+replace github.com/scitrera/ecosystem-messaging-spec/go => ../../scitrera-ecosystem-messaging-spec/go
 
 require (
 	github.com/bradenaw/juniper v0.10.0 // indirect
