@@ -261,6 +261,11 @@ func (a Assembler) Build(ctx context.Context, bootstrap []bootstrap.File, histor
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	if resolved, ok := skillCatalogFrom(ctx); ok {
+		a.cfg.Skills = resolved.Skills
+		a.cfg.SkillBodies = resolved.Bodies
+		a.cfg.SkillLoadWarnings = resolved.LoadWarnings
+	}
 	messages := make([]protocol.ChatMessage, 0, len(history)+1)
 
 	var now time.Time

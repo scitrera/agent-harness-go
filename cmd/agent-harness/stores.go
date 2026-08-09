@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/scitrera/agent-harness-go/pkg/casblob"
+	"github.com/scitrera/agent-harness-go/pkg/catalog"
 	"github.com/scitrera/agent-harness-go/pkg/goal"
 	"github.com/scitrera/agent-harness-go/pkg/harness"
 	"github.com/scitrera/agent-harness-go/pkg/memorylayer"
@@ -32,6 +33,10 @@ type stores struct {
 	// memory is the semantic-recall service, set only when MemoryLayer is
 	// configured. nil leaves the turn runner's memory hooks inert.
 	memory turn.MemoryService
+	// catalogs is the optional workspace-aware remote catalog source. The runner
+	// combines it with filesystem skills and caches compiled entries per logical
+	// workspace; nil preserves filesystem-only behavior.
+	catalogs catalog.WorkspaceProvider
 	// Lifecycle stores use local files by default. Aether worker modes replace
 	// them with CAS-backed implementations over the same interfaces.
 	subagents subagent.Registry
@@ -266,11 +271,20 @@ func openStores(ctx context.Context, cfg appConfig) (stores, error) {
 	if err != nil {
 		return stores{}, err
 	}
+	catalogProvider, err := memorylayer.NewCatalogProvider(memorylayer.Config{
+		BaseURL:   cfg.memorylayerURL,
+		APIKey:    cfg.memorylayerKey,
+		Workspace: cfg.memorylayerWorkspace,
+	})
+	if err != nil {
+		return stores{}, err
+	}
 	return stores{
 		history:   bindHistoryBackend(ml, cfg.workspaceID, cfg.memorylayerWorkspace),
 		threads:   ml,
 		files:     files,
 		memory:    bindMemory(recaller, cfg.workspaceID, cfg.memorylayerWorkspace),
+		catalogs:  catalog.BindWorkspaceProvider(catalogProvider, cfg.workspaceID, cfg.memorylayerWorkspace),
 		subagents: subagents,
 		goals:     goals,
 		turns:     turns,

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/scitrera/agent-harness-go/pkg/catalog"
@@ -180,5 +181,35 @@ func TestBuildRegistry_LoadsInlineContentWithoutPath(t *testing.T) {
 	}
 	if sk.Path != "" {
 		t.Fatalf("path = %q, want empty for inline content", sk.Path)
+	}
+}
+
+func TestLoadTool_UsesContextualWorkspaceRegistry(t *testing.T) {
+	defaultRegistry := BuildRegistry([]catalog.SkillSpec{{
+		Name: "default-skill", Content: "default body", Enabled: true,
+	}}, t.TempDir())
+	projectRegistry := BuildRegistry([]catalog.SkillSpec{{
+		Name: "project-skill", Content: "project body", Enabled: true,
+	}}, t.TempDir())
+	handler := LoadTool(defaultRegistry)
+	ctx := WithRegistry(context.Background(), projectRegistry)
+
+	result, err := handler(ctx, tools.Request{
+		CallID: "call-1", Name: LoadToolName,
+		Arguments: json.RawMessage(`{"name":"project-skill"}`),
+	})
+	if err != nil || result.IsError {
+		t.Fatalf("load contextual skill: result=%s err=%v", result.Payload, err)
+	}
+	if !strings.Contains(string(result.Payload), "project body") || strings.Contains(string(result.Payload), "default body") {
+		t.Fatalf("contextual payload = %s", result.Payload)
+	}
+
+	missing, err := handler(ctx, tools.Request{
+		CallID: "call-2", Name: LoadToolName,
+		Arguments: json.RawMessage(`{"name":"default-skill"}`),
+	})
+	if err != nil || !missing.IsError {
+		t.Fatalf("cross-workspace skill leaked: result=%s err=%v", missing.Payload, err)
 	}
 }

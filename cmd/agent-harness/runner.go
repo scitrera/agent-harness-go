@@ -91,7 +91,19 @@ func buildRunner(cfg appConfig, st stores, pub channel.Publisher, approvals appr
 	if err := reg.Register(skills.LoadToolName, skills.LoadTool(skillReg)); err != nil {
 		return nil, nil, fmt.Errorf("register load_skill: %w", err)
 	}
+	reg.Describe(skills.LoadDescriptor())
 	cmdSpecs, _ := commands.Discover(cfg.workspaceRoot, []string{"commands", ".agent-harness-commands"})
+
+	// MemoryLayer catalogs are resolved only after the turn's logical workspace
+	// has been defaulted. Successful skill registries and MCP managers are cached
+	// independently per workspace; a cold remote failure falls back to this local
+	// filesystem catalog for that turn and is retried later.
+	var toolProviders []turn.ToolProvider
+	if st.catalogs != nil {
+		catalogRuntime := newWorkspaceCatalogRuntime(st.catalogs, cfg.workspaceRoot, skillSpecs, skillWarnings)
+		decorator = composeContextDecorators(decorator, catalogRuntime.decorate)
+		toolProviders = append(toolProviders, workspaceCatalogToolProvider{runtime: catalogRuntime})
+	}
 
 	// Pluggable compaction: default to the evict→classic composite (evicts oversized
 	// tool results/text to a workspace file the model can read_file, then classic
@@ -148,6 +160,7 @@ func buildRunner(cfg appConfig, st stores, pub channel.Publisher, approvals appr
 		Commands:            commands.New(cmdSpecs),
 		Now:                 time.Now,
 		Approvals:           approvals,
+		ToolProviders:       toolProviders,
 		// Notifier wakes a fresh parent turn with a background sub-agent's completion
 		// notice; nil (cli) → background spawns fall back to synchronous.
 		Notifier:                 notifier,

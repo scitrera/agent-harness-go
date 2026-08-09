@@ -21,7 +21,7 @@ func seedDefaults(root string) {
 func skillSummaries(specs []catalog.SkillSpec) []sysprompt.SkillSummary {
 	out := make([]sysprompt.SkillSummary, 0, len(specs))
 	for _, s := range specs {
-		if !s.Enabled {
+		if !s.Enabled || (s.Path == "" && s.Content == "") {
 			continue
 		}
 		out = append(out, sysprompt.SkillSummary{Name: s.Name, Description: s.Description, Path: s.Path})

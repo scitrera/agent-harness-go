@@ -252,15 +252,27 @@ the harness adopts that canonical ID for lifecycle events, transcript storage,
 kernel isolation, and resume handles. Without MemoryLayer, the same runner keeps
 the local `<parent>::sub::<sequence>` fallback.
 
-Library users can also construct `memorylayer.NewCatalogProvider` and call
-`Load` or `LoadWorkspace` to map enabled MemoryLayer skills (including accepted
-addenda, allowed tools, prerequisites, and preferred model metadata) and enabled
-stdio MCP servers into the neutral `catalog.Catalog` types. Results are sorted
-deterministically and scoped per requested workspace. The reference process does
-not implicitly merge one default workspace's remote catalog into all visible
-workspaces; multi-workspace hosts should load/cache a catalog per resolved
-workspace so project-specific skills and MCP configuration cannot leak across
-turns.
+When MemoryLayer is configured, the reference process uses
+`memorylayer.NewCatalogProvider` on the first turn in each resolved logical
+workspace. It merges enabled MemoryLayer skills (including accepted addenda,
+allowed tools, prerequisites, and preferred-model metadata) with filesystem
+skills, then exposes enabled stdio MCP servers through the normal dynamic MCP
+tool path. Filesystem skills win a same-name conflict. MCP processes start lazily
+when their tools are discovered or called.
+
+Each successful catalog is cached independently for the process lifetime; restart
+the reference process to force a refresh after changing a remote catalog. A cold
+catalog error is explicitly fail-open to filesystem skills for that turn and is
+retried on the next turn. It is never satisfied from another workspace's cached
+entry. An explicit `--memorylayer-workspace` maps only the selected logical
+default to that backend workspace; other visible logical workspaces remain
+independently addressable. Library users can apply the same mapping through
+`catalog.BindWorkspaceProvider` or call `LoadWorkspace` directly.
+
+MemoryLayer MCP entries are executable host configuration: anyone allowed to
+change an enabled stdio server can choose a command and environment inherited by
+the harness process. Give catalog-management authority only to principals that
+are already trusted to configure code execution on that host.
 
 With MemoryLayer wired, each turn also gets the memories it has distilled from
 past conversations that are relevant to the current message (`--memory-recall`,

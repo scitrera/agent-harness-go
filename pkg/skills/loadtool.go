@@ -279,6 +279,10 @@ type loadedSkillOut struct {
 // survives compaction.
 func LoadTool(reg *Registry) tools.HandlerFunc {
 	return func(ctx context.Context, req tools.Request) (tools.Result, error) {
+		active := reg
+		if contextual, ok := registryFrom(ctx); ok {
+			active = contextual
+		}
 		var args struct {
 			Name           string `json:"name"`
 			IncludePrereqs *bool  `json:"include_prereqs"`
@@ -292,21 +296,24 @@ func LoadTool(reg *Registry) tools.HandlerFunc {
 		if name == "" {
 			return errorResult(req, "load_skill requires a non-empty skill name")
 		}
-		if _, ok := reg.byName[name]; !ok {
+		if active == nil {
+			return errorResult(req, "no skill catalog is available")
+		}
+		if _, ok := active.byName[name]; !ok {
 			return errorResult(req, fmt.Sprintf("unknown skill %q; available skills: %s",
-				name, strings.Join(reg.Names(), ", ")))
+				name, strings.Join(active.Names(), ", ")))
 		}
 		includePrereqs := true
 		if args.IncludePrereqs != nil {
 			includePrereqs = *args.IncludePrereqs
 		}
-		order, warnings := reg.loadOrder(name, includePrereqs)
+		order, warnings := active.loadOrder(name, includePrereqs)
 
 		sink, hasSink := tools.WorldStateSinkFrom(ctx)
 		out := make([]loadedSkillOut, 0, len(order))
 		prereqs := make([]string, 0, len(order))
 		for _, n := range order {
-			sk := reg.byName[n]
+			sk := active.byName[n]
 			if sk == nil {
 				continue
 			}
@@ -344,7 +351,7 @@ func LoadTool(reg *Registry) tools.HandlerFunc {
 		// Honor the TARGET skill's preferred_model: pin the thread's model when it's
 		// available (best-effort — no-op without a model registry / preference fn, or
 		// if the model isn't registered). Effective from the next turn, like /model.
-		if target := reg.byName[name]; target != nil {
+		if target := active.byName[name]; target != nil {
 			preferred := target.PreferredModel
 			switched := false
 			if preferred != "" {
