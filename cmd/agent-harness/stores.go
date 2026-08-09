@@ -15,6 +15,7 @@ import (
 	"github.com/scitrera/agent-harness-go/pkg/threadindex"
 	"github.com/scitrera/agent-harness-go/pkg/tools"
 	"github.com/scitrera/agent-harness-go/pkg/turn"
+	"github.com/scitrera/agent-harness-go/pkg/turnjournal"
 	workspacepkg "github.com/scitrera/agent-harness-go/pkg/workspace"
 )
 
@@ -35,6 +36,7 @@ type stores struct {
 	// them with CAS-backed implementations over the same interfaces.
 	subagents subagent.Registry
 	goals     goal.Store
+	turns     turnjournal.Store
 	// remote reports whether transcripts live outside this process, which is
 	// what makes them visible to other clients.
 	remote bool
@@ -55,6 +57,11 @@ func withCASLifecycle(st stores, blobs casblob.Store) (stores, error) {
 	}
 	st.subagents = subagents
 	st.goals = goals
+	turns, err := turnjournal.NewCASStore(turnjournal.CASStoreConfig{Blobs: blobs})
+	if err != nil {
+		return stores{}, err
+	}
+	st.turns = turns
 	return st, nil
 }
 
@@ -219,6 +226,10 @@ func openStores(ctx context.Context, cfg appConfig) (stores, error) {
 	if err != nil {
 		return stores{}, err
 	}
+	turns, err := turnjournal.NewFileStore(cfg.stateDir)
+	if err != nil {
+		return stores{}, err
+	}
 	if cfg.memorylayerURL == "" {
 		index, err := threadindex.NewIndex(workspaceStateDir(cfg), time.Now)
 		if err != nil {
@@ -230,6 +241,7 @@ func openStores(ctx context.Context, cfg appConfig) (stores, error) {
 			files:     files,
 			subagents: subagents,
 			goals:     goals,
+			turns:     turns,
 		}, nil
 	}
 
@@ -261,6 +273,7 @@ func openStores(ctx context.Context, cfg appConfig) (stores, error) {
 		memory:    bindMemory(recaller, cfg.workspaceID, cfg.memorylayerWorkspace),
 		subagents: subagents,
 		goals:     goals,
+		turns:     turns,
 		remote:    true,
 	}, nil
 }

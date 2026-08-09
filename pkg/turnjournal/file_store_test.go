@@ -79,7 +79,11 @@ func TestFileStore_RestartRoundTripAndRecoverableChildFlow(t *testing.T) {
 	*now = now.Add(time.Second)
 	record.Phase = PhaseWaitingExternalChild
 	record.Tool.Outcome = ToolOutcomeAdmitted
-	record.Tool.External = &ExternalChildRef{TaskID: "task-child", ExecutionID: "ahx-v1-child", ChildSessionID: "thread-child"}
+	external, err := NewExternalChildRef("task-child", "ahx-v1-child", "thread-child", []byte(`{"schema":"child.v1"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	record.Tool.External = &external
 	record, err = store.Update(ctx, record, record.Revision)
 	if err != nil {
 		t.Fatal(err)
@@ -270,7 +274,11 @@ func TestFileStore_ExternalChildIdentitySurvivesFailureAndCannotBeReplaced(t *te
 	}
 	record.Phase = PhaseWaitingExternalChild
 	record.Tool.Outcome = ToolOutcomeAdmitted
-	record.Tool.External = &ExternalChildRef{TaskID: "task-child", ExecutionID: "execution-child", ChildSessionID: "thread-child"}
+	external, err := NewExternalChildRef("task-child", "execution-child", "thread-child", []byte(`{"schema":"child.v1"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	record.Tool.External = &external
 	record, err = store.Update(ctx, record, record.Revision)
 	if err != nil {
 		t.Fatal(err)

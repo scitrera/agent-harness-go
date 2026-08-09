@@ -268,6 +268,7 @@ func cloneRecord(record Record) Record {
 		tool := *record.Tool
 		if tool.External != nil {
 			external := *tool.External
+			external.Descriptor = append(json.RawMessage(nil), external.Descriptor...)
 			tool.External = &external
 		}
 		if tool.Result != nil {

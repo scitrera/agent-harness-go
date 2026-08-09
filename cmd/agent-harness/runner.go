@@ -63,6 +63,10 @@ func buildRunner(cfg appConfig, st stores, pub channel.Publisher, approvals appr
 		notifier, _ = pub.(channel.Enqueuer)
 	}
 	allowBackground := notifier != nil
+	turnOwnerIdentity := cfg.sourceAgent()
+	if topic, ok := notifier.(interface{ Topic() string }); ok && topic.Topic() != "" {
+		turnOwnerIdentity = topic.Topic()
+	}
 	if err := registerReferenceSubagent(reg, subagentRef, agentCatalog, allowBackground); err != nil {
 		return nil, nil, fmt.Errorf("register subagent: %w", err)
 	}
@@ -150,6 +154,8 @@ func buildRunner(cfg appConfig, st stores, pub channel.Publisher, approvals appr
 		SubagentObserver:         st.subagents,
 		SubagentDefaultWorkspace: effectiveWorkspace("", cfg.workspaceID),
 		SubagentTasks:            subagentTasks,
+		TurnJournal:              st.turns,
+		TurnOwnerIdentity:        turnOwnerIdentity,
 		// Interactive web/TUI channels can use child-thread stream events to keep the
 		// blocking spawn_subagent row live with the child's latest activity.
 		StreamSubagents: allowBackground || subagentTasks != nil,

@@ -110,6 +110,9 @@ func RegisterSubagentWithConfig(reg *Registry, cfg SubagentConfig) error {
 		}
 		res, err := cfg.Runner.RunSubagent(subagent.WithDepth(ctx, depth+1), subReq)
 		if err != nil {
+			if errors.Is(err, subagent.ErrParentCheckpointUncertain) {
+				return Result{}, err
+			}
 			return errorResult(req, "sub-agent failed: "+err.Error())
 		}
 		// Record the sub-agent on the per-turn world-state sink (both new spawns and

@@ -140,6 +140,11 @@ func (r *Runner) admitSubagent(ctx context.Context, req subagent.Request, childT
 		if awaiter, ok := r.subagentTasks.(subagent.TaskAwaiter); ok {
 			execution.external = awaiter.ExecutesExternally()
 		}
+		if execution.external {
+			if err := checkpointExternalAdmission(ctx, execution.taskID, execution.envelope); err != nil {
+				return subagentExecution{}, fmt.Errorf("%w: %v", subagent.ErrParentCheckpointUncertain, err)
+			}
+		}
 	}
 	r.observeSubagent(ctx, req, childThreadID, execution.taskID, spec.SessionSubagentAdmitted, execution.admittedAt, execution.admittedAt, "", nil)
 	return execution, nil
@@ -445,7 +450,7 @@ func (r *Runner) runSubagentOn(ctx context.Context, req subagent.Request, childT
 		ctx = withToolIterationLimit(ctx, req.MaxTurns)
 	}
 	approvers := subagentApprovers(req)
-	assistant, err := r.runProviderLoop(ctx, session, addr, userMsg, bootstrap, streamer, nil, subModel, approvers, tt)
+	assistant, err := r.runProviderLoop(ctx, session, addr, userMsg, bootstrap, streamer, nil, subModel, approvers, tt, nil)
 	if err != nil {
 		if publisher != nil {
 			_ = publisher.PublishEvent(ctx, channel.Event{Type: channel.EventError, Addr: addr})

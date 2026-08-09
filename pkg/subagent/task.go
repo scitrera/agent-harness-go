@@ -9,7 +9,14 @@ import (
 // task backend could not confirm its terminal transition. Callers must not
 // automatically replay the child: its transcript or tool side effects may have
 // committed even though the task still appears non-terminal.
-var ErrTaskOutcomeUncertain = errors.New("subagent: execution task outcome is uncertain")
+var (
+	ErrTaskOutcomeUncertain = errors.New("subagent: execution task outcome is uncertain")
+	// ErrParentCheckpointUncertain means child admission may already be durable,
+	// but the parent turn could not confirm its own recovery checkpoint. The
+	// parent must stop immediately and must not turn this into an ordinary tool
+	// error that lets the model request another child.
+	ErrParentCheckpointUncertain = errors.New("subagent: parent admission checkpoint is uncertain")
+)
 
 // TaskAdmission is the non-secret identity and policy projection used to admit
 // one subagent invocation to an optional durable task backend. Task is

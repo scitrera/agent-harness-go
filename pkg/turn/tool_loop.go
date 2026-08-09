@@ -3,6 +3,7 @@ package turn
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/scitrera/agent-harness-go/pkg/harness"
 	"github.com/scitrera/agent-harness-go/pkg/hooks"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
+	"github.com/scitrera/agent-harness-go/pkg/subagent"
 	"github.com/scitrera/agent-harness-go/pkg/telemetry"
 	"github.com/scitrera/agent-harness-go/pkg/tools"
 )
@@ -35,7 +37,7 @@ func toolIterationLimit(ctx context.Context, fallback int) int {
 	return limit
 }
 
-func (r *Runner) runProviderLoop(ctx context.Context, session *harness.Session, addr protocol.MessageAddress, user protocol.ChatMessage, bootstrap []bootstrap.File, streamer *turnStreamer, injected []protocol.ChatMessage, model string, perTurnApprovers []hooks.ToolApprover, tt turnTools) (protocol.ChatMessage, error) {
+func (r *Runner) runProviderLoop(ctx context.Context, session *harness.Session, addr protocol.MessageAddress, user protocol.ChatMessage, bootstrap []bootstrap.File, streamer *turnStreamer, injected []protocol.ChatMessage, model string, perTurnApprovers []hooks.ToolApprover, tt turnTools, execution *turnExecution) (protocol.ChatMessage, error) {
 	required := requiredCapabilities(user)
 	// One-time pre-turn vision escalation: the loaded history (or injected messages)
 	// may ALREADY carry images — e.g. a persistent sub-agent thread that inspected an
@@ -51,10 +53,16 @@ func (r *Runner) runProviderLoop(ctx context.Context, session *harness.Session, 
 	}
 	maxToolIterations := toolIterationLimit(ctx, r.maxToolIterations)
 	toolIterations := 0
+	if execution != nil {
+		toolIterations = int(execution.record.Iteration)
+	}
 	// Sum token usage across this turn's provider calls; stamped onto the final
 	// assistant message so the persisted turn carries its own accounting.
 	var tu turnUsage
 	for {
+		if err := execution.providerPending(ctx, toolIterations); err != nil {
+			return protocol.ChatMessage{}, err
+		}
 		// A tool earlier THIS turn may have pinned a model — load_skill honoring a
 		// skill's preferred_model, or /model. Apply it to the rest of this turn's
 		// provider calls: the turn's model was resolved once up front (before any
@@ -99,6 +107,10 @@ func (r *Runner) runProviderLoop(ctx context.Context, session *harness.Session, 
 		stampTurnWorldState(ctx, &assistant)
 		if err := session.Append(ctx, assistant); err != nil {
 			return protocol.ChatMessage{}, fmt.Errorf("append assistant message: %w", err)
+		}
+		assistantRef, err := execution.assistantPersisted(ctx, session, assistant, toolIterations)
+		if err != nil {
+			return protocol.ChatMessage{}, err
 		}
 		calls, err := toolCallsFromMessage(assistant)
 		if err != nil {
@@ -160,6 +172,9 @@ func (r *Runner) runProviderLoop(ctx context.Context, session *harness.Session, 
 			if call.Addr.ThreadID == "" {
 				call.Addr = addr
 			}
+			if err := execution.toolPending(ctx, call, assistantRef, toolIterations); err != nil {
+				return protocol.ChatMessage{}, err
+			}
 			// Stream this call's tool_call part now (just before its approval +
 			// execution) so it renders immediately above its approval_request /
 			// result rather than being batched ahead of every approval.
@@ -183,6 +198,9 @@ func (r *Runner) runProviderLoop(ctx context.Context, session *harness.Session, 
 				if err := r.recordToolError(ctx, session, streamer, call.CallID, call.Name, errorOutput); err != nil {
 					return protocol.ChatMessage{}, err
 				}
+				if err := execution.toolConfirmed(ctx, session, call.CallID, toolIterations); err != nil {
+					return protocol.ChatMessage{}, err
+				}
 				continue
 			}
 
@@ -196,6 +214,9 @@ func (r *Runner) runProviderLoop(ctx context.Context, session *harness.Session, 
 			telemetry.AnnotateToolResult(toolSpan, result.Payload, result.IsError || err != nil)
 			telemetry.FinishErr(toolSpan, err)
 			r.publishToolEvent(toolCtx, finishToolEvent(call, toolStart, result, err))
+			if errors.Is(err, subagent.ErrParentCheckpointUncertain) {
+				return protocol.ChatMessage{}, err
+			}
 			// Canonical per-call log covering every tool — local/static, MCP,
 			// memory, subagent, and dynamic (bridge). The Go-error path below
 			// adds its own warn with the failure detail.
@@ -232,6 +253,9 @@ func (r *Runner) runProviderLoop(ctx context.Context, session *harness.Session, 
 				if perr := r.recordToolError(ctx, session, streamer, call.CallID, call.Name, toolErrorOutput(err.Error())); perr != nil {
 					return protocol.ChatMessage{}, perr
 				}
+				if err := execution.toolConfirmed(ctx, session, call.CallID, toolIterations); err != nil {
+					return protocol.ChatMessage{}, err
+				}
 				continue
 			}
 			part, err := result.ContentPart()
@@ -251,6 +275,9 @@ func (r *Runner) runProviderLoop(ctx context.Context, session *harness.Session, 
 				}
 			} else if err := session.AppendToolResult(ctx, call.CallID, part); err != nil {
 				return protocol.ChatMessage{}, fmt.Errorf("record tool result: %w", err)
+			}
+			if err := execution.toolConfirmed(ctx, session, call.CallID, toolIterations); err != nil {
+				return protocol.ChatMessage{}, err
 			}
 			if _, err := streamer.appendPart(ctx, part); err != nil {
 				return protocol.ChatMessage{}, fmt.Errorf("stream tool result: %w", err)

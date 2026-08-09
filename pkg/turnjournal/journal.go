@@ -5,7 +5,11 @@
 package turnjournal
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -14,8 +18,9 @@ import (
 )
 
 const (
-	Schema         = "agent-harness.turn.execution"
-	SchemaRevision = 1
+	Schema                     = "agent-harness.turn.execution"
+	SchemaRevision             = 1
+	maxExternalDescriptorBytes = 256 << 10
 )
 
 var (
@@ -70,9 +75,31 @@ type HistoryMessageRef struct {
 // ExternalChildRef binds one pending spawn invocation to the authoritative task
 // and immutable child execution descriptor/result location.
 type ExternalChildRef struct {
-	TaskID         string `json:"task_id"`
-	ExecutionID    string `json:"execution_id"`
-	ChildSessionID string `json:"child_session_id"`
+	TaskID           string          `json:"task_id"`
+	ExecutionID      string          `json:"execution_id"`
+	ChildSessionID   string          `json:"child_session_id"`
+	Descriptor       json.RawMessage `json:"descriptor"`
+	DescriptorDigest string          `json:"descriptor_digest"`
+}
+
+// NewExternalChildRef binds an admitted task to the exact opaque execution
+// descriptor needed to resolve its durable result after the original assignment
+// delivery has already been acknowledged. The journal never interprets the
+// descriptor and does not carry credentials in it.
+func NewExternalChildRef(taskID, executionID, childSessionID string, descriptor []byte) (ExternalChildRef, error) {
+	normalized, err := compactJSON(descriptor)
+	if err != nil {
+		return ExternalChildRef{}, fmt.Errorf("%w: invalid external execution descriptor", ErrInvalidRecord)
+	}
+	ref := ExternalChildRef{
+		TaskID: taskID, ExecutionID: executionID, ChildSessionID: childSessionID,
+		Descriptor:       normalized,
+		DescriptorDigest: digestBytes(normalized),
+	}
+	if err := validateExternalChildRef(ref); err != nil {
+		return ExternalChildRef{}, err
+	}
+	return ref, nil
 }
 
 // ToolCheckpoint is the durable parent-side boundary around one tool call.
@@ -225,15 +252,32 @@ func validateToolForPhase(r Record) error {
 		return fmt.Errorf("%w: unknown tool outcome %q", ErrInvalidRecord, t.Outcome)
 	}
 	if t.External != nil {
-		for name, value := range map[string]string{
-			"external task_id":          t.External.TaskID,
-			"external execution_id":     t.External.ExecutionID,
-			"external child_session_id": t.External.ChildSessionID,
-		} {
-			if err := validateIdentifier(name, value); err != nil {
-				return err
-			}
+		if err := validateExternalChildRef(*t.External); err != nil {
+			return err
 		}
+	}
+	return nil
+}
+
+func validateExternalChildRef(ref ExternalChildRef) error {
+	for name, value := range map[string]string{
+		"external task_id":          ref.TaskID,
+		"external execution_id":     ref.ExecutionID,
+		"external child_session_id": ref.ChildSessionID,
+	} {
+		if err := validateIdentifier(name, value); err != nil {
+			return err
+		}
+	}
+	if len(ref.Descriptor) == 0 || len(ref.Descriptor) > maxExternalDescriptorBytes || !json.Valid(ref.Descriptor) {
+		return fmt.Errorf("%w: invalid external execution descriptor", ErrInvalidRecord)
+	}
+	normalized, err := compactJSON(ref.Descriptor)
+	if err != nil {
+		return fmt.Errorf("%w: invalid external execution descriptor", ErrInvalidRecord)
+	}
+	if !validDigest(ref.DescriptorDigest) || ref.DescriptorDigest != digestBytes(normalized) {
+		return fmt.Errorf("%w: external execution descriptor digest mismatch", ErrInvalidRecord)
 	}
 	return nil
 }
@@ -300,7 +344,7 @@ func validateTransition(previous, next Record) error {
 		if identityChanged && !replacingConfirmed {
 			return fmt.Errorf("%w: tool invocation identity changed", ErrInvalidTransition)
 		}
-		if !replacingConfirmed && previous.Tool.External != nil && (next.Tool.External == nil || *previous.Tool.External != *next.Tool.External) {
+		if !replacingConfirmed && previous.Tool.External != nil && (next.Tool.External == nil || !sameExternalChild(*previous.Tool.External, *next.Tool.External)) {
 			return fmt.Errorf("%w: external child identity changed", ErrInvalidTransition)
 		}
 		if !replacingConfirmed && previous.Tool.Result != nil && (next.Tool.Result == nil || *previous.Tool.Result != *next.Tool.Result) {
@@ -311,6 +355,31 @@ func validateTransition(previous, next Record) error {
 		return fmt.Errorf("%w: unconfirmed tool checkpoint was removed", ErrInvalidTransition)
 	}
 	return nil
+}
+
+func sameExternalChild(left, right ExternalChildRef) bool {
+	return left.TaskID == right.TaskID && left.ExecutionID == right.ExecutionID &&
+		left.ChildSessionID == right.ChildSessionID && left.DescriptorDigest == right.DescriptorDigest &&
+		equalJSON(left.Descriptor, right.Descriptor)
+}
+
+func compactJSON(value []byte) (json.RawMessage, error) {
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, value); err != nil {
+		return nil, err
+	}
+	return append(json.RawMessage(nil), compact.Bytes()...), nil
+}
+
+func equalJSON(left, right []byte) bool {
+	leftCompact, leftErr := compactJSON(left)
+	rightCompact, rightErr := compactJSON(right)
+	return leftErr == nil && rightErr == nil && bytes.Equal(leftCompact, rightCompact)
+}
+
+func digestBytes(value []byte) string {
+	sum := sha256.Sum256(value)
+	return hex.EncodeToString(sum[:])
 }
 
 func allowedPhaseTransition(from, to Phase) bool {

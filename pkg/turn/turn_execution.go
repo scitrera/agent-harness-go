@@ -1,0 +1,384 @@
+package turn
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+
+	"github.com/scitrera/agent-harness-go/pkg/harness"
+	"github.com/scitrera/agent-harness-go/pkg/protocol"
+	"github.com/scitrera/agent-harness-go/pkg/subagent"
+	"github.com/scitrera/agent-harness-go/pkg/tools"
+	"github.com/scitrera/agent-harness-go/pkg/turncancel"
+	"github.com/scitrera/agent-harness-go/pkg/turnjournal"
+)
+
+// turnExecution advances the durable record for one live parent model/tool
+// loop. It is intentionally private to Runner: callers configure a neutral
+// turnjournal.Store, while the runner owns the exact persistence boundaries.
+type turnExecution struct {
+	store  turnjournal.Store
+	record turnjournal.Record
+}
+
+func normalizeJournalInput(addr protocol.MessageAddress, user protocol.ChatMessage) protocol.ChatMessage {
+	if strings.TrimSpace(user.ID) == "" {
+		user.ID = addr.TaskID + "-input"
+	}
+	// Session.Append merges this same resolved address. Stamping it before the
+	// journal create makes the future history reference hash exact even if the
+	// process exits between journal creation and transcript persistence.
+	user.Addr = addr
+	return user
+}
+
+func beginTurnExecution(ctx context.Context, store turnjournal.Store, owner string, addr protocol.MessageAddress, user protocol.ChatMessage) (*turnExecution, error) {
+	if store == nil || strings.TrimSpace(addr.TaskID) == "" {
+		return nil, nil
+	}
+	input, err := journalMessageRef(user, addr.WorkspaceID, addr.ThreadID)
+	if err != nil {
+		return nil, err
+	}
+	record, err := store.Create(ctx, turnjournal.Record{
+		WorkspaceID:   addr.WorkspaceID,
+		SessionID:     addr.ThreadID,
+		TaskID:        addr.TaskID,
+		OwnerIdentity: owner,
+		Phase:         turnjournal.PhasePrepared,
+		Input:         input,
+		LastMessageID: user.ID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("turn: create execution journal: %w", err)
+	}
+	return &turnExecution{store: store, record: record}, nil
+}
+
+func (e *turnExecution) update(ctx context.Context, mutate func(*turnjournal.Record)) error {
+	if e == nil {
+		return nil
+	}
+	next := cloneTurnExecutionRecord(e.record)
+	mutate(&next)
+	updated, err := e.store.Update(ctx, next, e.record.Revision)
+	if err != nil {
+		return fmt.Errorf("turn: update execution journal: %w", err)
+	}
+	e.record = updated
+	return nil
+}
+
+func (e *turnExecution) providerPending(ctx context.Context, iteration int) error {
+	if e == nil {
+		return nil
+	}
+	return e.update(ctx, func(record *turnjournal.Record) {
+		record.Phase = turnjournal.PhaseProviderPending
+		record.Iteration = uint32(max(iteration, 0))
+	})
+}
+
+func (e *turnExecution) assistantPersisted(ctx context.Context, session *harness.Session, assistant protocol.ChatMessage, iteration int) (turnjournal.HistoryMessageRef, error) {
+	if e == nil {
+		return turnjournal.HistoryMessageRef{}, nil
+	}
+	ref, err := journalPersistedMessageRef(session, assistant.ID)
+	if err != nil {
+		return turnjournal.HistoryMessageRef{}, err
+	}
+	err = e.update(ctx, func(record *turnjournal.Record) {
+		record.Iteration = uint32(max(iteration, 0))
+		record.LastMessageID = ref.MessageID
+	})
+	return ref, err
+}
+
+func (e *turnExecution) toolPending(ctx context.Context, call protocol.ToolInvokeEnvelope, assistant turnjournal.HistoryMessageRef, iteration int) error {
+	if e == nil {
+		return nil
+	}
+	// ChildResolved is a deliberately recoverable boundary. Once the live owner
+	// is about to expose another mutation, leave it before recording the next
+	// requested call so a crash cannot replay that mutation as child recovery.
+	if e.record.Phase == turnjournal.PhaseChildResolved {
+		if err := e.providerPending(ctx, iteration); err != nil {
+			return err
+		}
+	}
+	return e.update(ctx, func(record *turnjournal.Record) {
+		record.Phase = turnjournal.PhaseToolPending
+		record.Iteration = uint32(max(iteration, 0))
+		record.Tool = &turnjournal.ToolCheckpoint{
+			InvocationID: call.CallID,
+			Name:         call.Name,
+			ArgsDigest:   digestJournalBytes(protocol.ArgsToRaw(call.Args)),
+			Assistant:    assistant,
+			Outcome:      turnjournal.ToolOutcomeRequested,
+		}
+	})
+}
+
+func (e *turnExecution) externalAdmitted(ctx context.Context, taskID string, envelope subagent.ExecutionEnvelope) error {
+	if e == nil || envelope.Background {
+		return nil
+	}
+	if e.record.Tool == nil || e.record.Phase != turnjournal.PhaseToolPending || e.record.Tool.Outcome != turnjournal.ToolOutcomeRequested || e.record.Tool.InvocationID != envelope.InvocationID {
+		return errors.New("turn: external child admission does not match the pending tool invocation")
+	}
+	descriptor, err := subagent.MarshalExecutionEnvelope(envelope)
+	if err != nil {
+		return fmt.Errorf("turn: encode admitted child descriptor: %w", err)
+	}
+	external, err := turnjournal.NewExternalChildRef(taskID, envelope.ExecutionID, envelope.ChildSessionID, descriptor)
+	if err != nil {
+		return fmt.Errorf("turn: checkpoint admitted child descriptor: %w", err)
+	}
+	return e.update(ctx, func(record *turnjournal.Record) {
+		record.Phase = turnjournal.PhaseWaitingExternalChild
+		record.Tool.Outcome = turnjournal.ToolOutcomeAdmitted
+		record.Tool.External = &external
+	})
+}
+
+func (e *turnExecution) toolConfirmed(ctx context.Context, session *harness.Session, callID string, iteration int) error {
+	if e == nil {
+		return nil
+	}
+	if e.record.Tool == nil || e.record.Tool.InvocationID != callID {
+		return errors.New("turn: confirmed tool result does not match the pending journal invocation")
+	}
+	result, err := journalPersistedMessageRef(session, callID+"-result")
+	if err != nil {
+		return err
+	}
+	return e.update(ctx, func(record *turnjournal.Record) {
+		if record.Tool.External != nil {
+			record.Phase = turnjournal.PhaseChildResolved
+		} else {
+			record.Phase = turnjournal.PhaseProviderPending
+		}
+		record.Iteration = uint32(max(iteration, 0))
+		record.LastMessageID = result.MessageID
+		record.Tool.Outcome = turnjournal.ToolOutcomeConfirmed
+		record.Tool.Result = &result
+	})
+}
+
+func (e *turnExecution) finish(ctx context.Context, runErr error) error {
+	if e == nil || e.record.Terminal() {
+		return nil
+	}
+	phase := turnjournal.PhaseCompleted
+	reason := ""
+	if runErr != nil {
+		phase = turnjournal.PhaseFailed
+		reason = boundedJournalReason(runErr.Error())
+		if errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded) || errors.Is(runErr, turncancel.ErrTurnCancelled) || errors.Is(runErr, subagent.ErrParentCheckpointUncertain) || errors.Is(runErr, ErrRecoveryUnsafe) ||
+			(e.record.Tool != nil && e.record.Tool.Outcome == turnjournal.ToolOutcomeRequested) {
+			phase = turnjournal.PhaseInterrupted
+		}
+	}
+	return e.update(ctx, func(record *turnjournal.Record) {
+		record.Phase = phase
+		record.FailureReason = reason
+		if phase == turnjournal.PhaseInterrupted && record.Tool != nil && record.Tool.Outcome == turnjournal.ToolOutcomeRequested {
+			record.Tool.Outcome = turnjournal.ToolOutcomeUncertain
+		}
+	})
+}
+
+func (e *turnExecution) interrupt(ctx context.Context, reason string) error {
+	if e == nil || e.record.Terminal() {
+		return nil
+	}
+	return e.update(ctx, func(record *turnjournal.Record) {
+		record.Phase = turnjournal.PhaseInterrupted
+		record.FailureReason = boundedJournalReason(reason)
+		if record.Tool != nil && record.Tool.Outcome == turnjournal.ToolOutcomeRequested {
+			record.Tool.Outcome = turnjournal.ToolOutcomeUncertain
+		}
+	})
+}
+
+type recoveredTurnContextKey struct{}
+
+func withRecoveredTurn(ctx context.Context, record turnjournal.Record) context.Context {
+	return context.WithValue(ctx, recoveredTurnContextKey{}, record)
+}
+
+func recoveredTurnFrom(ctx context.Context) (turnjournal.Record, bool) {
+	record, ok := ctx.Value(recoveredTurnContextKey{}).(turnjournal.Record)
+	return record, ok
+}
+
+// ActiveTurnExecutions returns the deterministic owner-scoped startup scan.
+// Hosts with workspace routing can use each record's WorkspaceID to select the
+// same runner/catalog that owned the original turn.
+func (r *Runner) ActiveTurnExecutions(ctx context.Context) ([]turnjournal.Record, error) {
+	if r.turnJournal == nil {
+		return []turnjournal.Record{}, nil
+	}
+	return r.turnJournal.ListActive(ctx, r.turnOwnerIdentity)
+}
+
+// ResumeTurn resumes one journaled parent turn. Only an admitted external child
+// (or its already-persisted result) is recoverable. Every other active phase is
+// durably interrupted and returned as ErrRecoveryUnsafe.
+func (r *Runner) ResumeTurn(ctx context.Context, workspaceID, taskID string) (protocol.ChatMessage, error) {
+	if r.turnJournal == nil {
+		return protocol.ChatMessage{}, fmt.Errorf("%w: no execution journal is configured", ErrRecoveryUnsafe)
+	}
+	record, err := r.turnJournal.Get(ctx, workspaceID, taskID)
+	if err != nil {
+		return protocol.ChatMessage{}, fmt.Errorf("turn: load execution for recovery: %w", err)
+	}
+	if record.OwnerIdentity != r.turnOwnerIdentity {
+		return protocol.ChatMessage{}, fmt.Errorf("%w: execution owner does not match this runner", ErrRecoveryUnsafe)
+	}
+	if record.Terminal() {
+		return protocol.ChatMessage{}, fmt.Errorf("%w: execution is already terminal", ErrRecoveryUnsafe)
+	}
+	if record.Phase != turnjournal.PhaseWaitingExternalChild && record.Phase != turnjournal.PhaseChildResolved {
+		execution := &turnExecution{store: r.turnJournal, record: record}
+		reason := fmt.Sprintf("startup recovery cannot safely replay phase %q", record.Phase)
+		if err := execution.interrupt(ctx, reason); err != nil {
+			return protocol.ChatMessage{}, errors.Join(fmt.Errorf("%w: %s", ErrRecoveryUnsafe, reason), err)
+		}
+		return protocol.ChatMessage{}, fmt.Errorf("%w: %s", ErrRecoveryUnsafe, reason)
+	}
+	auth, _ := tools.MemoryAuthorityFrom(ctx)
+	addr := protocol.MessageAddress{WorkspaceID: record.WorkspaceID, ThreadID: record.SessionID, TaskID: record.TaskID}
+	session, err := harness.NewSession(ctx, addr, r.store, r.registry, auth)
+	if err != nil {
+		return protocol.ChatMessage{}, fmt.Errorf("turn: load recovery session: %w", err)
+	}
+	user, err := journalMessageByRef(session.History(), record.Input)
+	if err != nil {
+		return protocol.ChatMessage{}, err
+	}
+	addr = user.Addr
+	addr.WorkspaceID = record.WorkspaceID
+	addr.ThreadID = record.SessionID
+	addr.TaskID = record.TaskID
+	user.Addr = addr
+	return r.Run(withRecoveredTurn(ctx, record), addr, user)
+}
+
+// InterruptTurn durably closes an active execution that its host has proven
+// cannot be resumed (for example, the authoritative parent task is already
+// terminal). It never changes a terminal record.
+func (r *Runner) InterruptTurn(ctx context.Context, workspaceID, taskID, reason string) error {
+	if r.turnJournal == nil {
+		return fmt.Errorf("%w: no execution journal is configured", ErrRecoveryUnsafe)
+	}
+	record, err := r.turnJournal.Get(ctx, workspaceID, taskID)
+	if err != nil {
+		return fmt.Errorf("turn: load execution for interruption: %w", err)
+	}
+	if record.OwnerIdentity != r.turnOwnerIdentity {
+		return fmt.Errorf("%w: execution owner does not match this runner", ErrRecoveryUnsafe)
+	}
+	return (&turnExecution{store: r.turnJournal, record: record}).interrupt(ctx, reason)
+}
+
+func cloneTurnExecutionRecord(record turnjournal.Record) turnjournal.Record {
+	if record.CompletedAt != nil {
+		completed := *record.CompletedAt
+		record.CompletedAt = &completed
+	}
+	if record.Tool != nil {
+		tool := *record.Tool
+		if tool.External != nil {
+			external := *tool.External
+			external.Descriptor = append(json.RawMessage(nil), external.Descriptor...)
+			tool.External = &external
+		}
+		if tool.Result != nil {
+			result := *tool.Result
+			tool.Result = &result
+		}
+		record.Tool = &tool
+	}
+	return record
+}
+
+func journalPersistedMessageRef(session *harness.Session, messageID string) (turnjournal.HistoryMessageRef, error) {
+	var found *protocol.ChatMessage
+	for _, message := range session.History() {
+		if message.ID != messageID {
+			continue
+		}
+		if found != nil {
+			return turnjournal.HistoryMessageRef{}, fmt.Errorf("turn: journal message %q is duplicated", messageID)
+		}
+		copy := message
+		found = &copy
+	}
+	if found == nil {
+		return turnjournal.HistoryMessageRef{}, fmt.Errorf("turn: journal message %q was not persisted", messageID)
+	}
+	return journalMessageRef(*found, found.Addr.WorkspaceID, found.Addr.ThreadID)
+}
+
+func journalMessageByRef(messages []protocol.ChatMessage, ref turnjournal.HistoryMessageRef) (protocol.ChatMessage, error) {
+	var found *protocol.ChatMessage
+	for i := range messages {
+		if messages[i].ID != ref.MessageID {
+			continue
+		}
+		if found != nil {
+			return protocol.ChatMessage{}, fmt.Errorf("turn: journal message %q is duplicated", ref.MessageID)
+		}
+		message := messages[i]
+		found = &message
+	}
+	if found == nil {
+		return protocol.ChatMessage{}, fmt.Errorf("turn: journal message %q was not found", ref.MessageID)
+	}
+	actual, err := journalMessageRef(*found, found.Addr.WorkspaceID, found.Addr.ThreadID)
+	if err != nil {
+		return protocol.ChatMessage{}, err
+	}
+	if actual != ref {
+		return protocol.ChatMessage{}, fmt.Errorf("turn: journal message %q identity or digest mismatch", ref.MessageID)
+	}
+	return *found, nil
+}
+
+func journalMessageRef(message protocol.ChatMessage, workspaceID, sessionID string) (turnjournal.HistoryMessageRef, error) {
+	if strings.TrimSpace(message.ID) == "" || strings.TrimSpace(workspaceID) == "" || strings.TrimSpace(sessionID) == "" {
+		return turnjournal.HistoryMessageRef{}, errors.New("turn: journal message requires workspace, session, and message identity")
+	}
+	encoded, err := json.Marshal(message)
+	if err != nil {
+		return turnjournal.HistoryMessageRef{}, fmt.Errorf("turn: encode journal message: %w", err)
+	}
+	return turnjournal.HistoryMessageRef{
+		WorkspaceID: workspaceID,
+		SessionID:   sessionID,
+		MessageID:   message.ID,
+		Digest:      digestJournalBytes(encoded),
+	}, nil
+}
+
+func digestJournalBytes(value []byte) string {
+	sum := sha256.Sum256(value)
+	return hex.EncodeToString(sum[:])
+}
+
+func boundedJournalReason(reason string) string {
+	const maxRunes = 8192
+	runes := []rune(strings.TrimSpace(reason))
+	if len(runes) > maxRunes {
+		runes = runes[:maxRunes]
+	}
+	if len(runes) == 0 {
+		return "turn execution failed"
+	}
+	return string(runes)
+}

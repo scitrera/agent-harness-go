@@ -7,4 +7,5 @@ var (
 	ErrMissingLoader   = errors.New("turn: bootstrap loader required")
 	ErrMissingProvider = errors.New("turn: provider required")
 	ErrToolLoopLimit   = errors.New("turn: tool loop limit reached")
+	ErrRecoveryUnsafe  = errors.New("turn: execution recovery is unsafe")
 )

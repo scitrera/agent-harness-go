@@ -28,6 +28,7 @@ import (
 	"github.com/scitrera/agent-harness-go/pkg/telemetry"
 	"github.com/scitrera/agent-harness-go/pkg/tools"
 	"github.com/scitrera/agent-harness-go/pkg/turncancel"
+	"github.com/scitrera/agent-harness-go/pkg/turnjournal"
 )
 
 type Provider interface {
@@ -200,6 +201,8 @@ type Runner struct {
 	subagentObserver          subagent.LifecycleObserver
 	subagentDefaultWorkspace  string
 	subagentTasks             subagent.TaskBackend
+	turnJournal               turnjournal.Store
+	turnOwnerIdentity         string
 
 	// rubric, when set, runs the opt-in post-turn self-grading verifier at
 	// end-of-turn (nil → skipped; default behavior unchanged).
@@ -463,6 +466,11 @@ type Config struct {
 	// reconciliation. The lifecycle observer remains the session snapshot
 	// projection. Nil preserves the independently useful local runner.
 	SubagentTasks subagent.TaskBackend
+	// TurnJournal durably checkpoints parent model/tool execution. It is optional
+	// so embedders retain the prior in-memory behavior; when set, OwnerIdentity is
+	// required and active records are scoped to that stable runtime identity.
+	TurnJournal       turnjournal.Store
+	TurnOwnerIdentity string
 
 	// Rubric, when set, runs an OPT-IN post-turn self-grading verifier: after a
 	// turn finishes, an independent grader checks the just-produced result against
@@ -489,6 +497,9 @@ func NewRunner(cfg Config) (*Runner, error) {
 	}
 	if cfg.Provider == nil {
 		return nil, ErrMissingProvider
+	}
+	if cfg.TurnJournal != nil && strings.TrimSpace(cfg.TurnOwnerIdentity) == "" {
+		return nil, errors.New("turn: execution journal requires a stable owner identity")
 	}
 	if cfg.Registry == nil {
 		cfg.Registry = tools.NewRegistry()
@@ -598,6 +609,8 @@ func NewRunner(cfg Config) (*Runner, error) {
 		subagentObserver:          cfg.SubagentObserver,
 		subagentDefaultWorkspace:  strings.TrimSpace(cfg.SubagentDefaultWorkspace),
 		subagentTasks:             cfg.SubagentTasks,
+		turnJournal:               cfg.TurnJournal,
+		turnOwnerIdentity:         strings.TrimSpace(cfg.TurnOwnerIdentity),
 		rubric:                    cfg.Rubric,
 		ctxDecorator:              cfg.ContextDecorator,
 	}, nil
@@ -764,6 +777,12 @@ const metaCancelledKey = "cancelled"
 const metaErrorKey = "error"
 
 func (r *Runner) Run(ctx context.Context, addr protocol.MessageAddress, user protocol.ChatMessage) (_ protocol.ChatMessage, err error) {
+	recoveryRecord, recovering := recoveredTurnFrom(ctx)
+	if recovering {
+		if recoveryRecord.WorkspaceID != addr.WorkspaceID || recoveryRecord.SessionID != addr.ThreadID || recoveryRecord.TaskID != addr.TaskID {
+			return protocol.ChatMessage{}, fmt.Errorf("%w: recovered address does not match execution journal", ErrRecoveryUnsafe)
+		}
+	}
 	if addr.WorkspaceID == "" {
 		addr.WorkspaceID = r.defaultWorkspaceID
 	}
@@ -834,14 +853,20 @@ func (r *Runner) Run(ctx context.Context, addr protocol.MessageAddress, user pro
 	// Intercept OpenClaw-style slash commands. Built-ins short-circuit (reply
 	// without calling the model); workspace commands rewrite the user message
 	// into an expanded prompt and may override the model for this turn.
-	rewritten, reply, done, modelOverride, allowedTools, err := r.resolveCommand(ctx, addr, user)
-	if err != nil {
-		return protocol.ChatMessage{}, err
+	var modelOverride string
+	var allowedTools []string
+	if !recovering {
+		rewritten, reply, done, override, allowed, resolveErr := r.resolveCommand(ctx, addr, user)
+		if resolveErr != nil {
+			return protocol.ChatMessage{}, resolveErr
+		}
+		if done {
+			return reply, nil
+		}
+		user = rewritten
+		modelOverride = override
+		allowedTools = allowed
 	}
-	if done {
-		return reply, nil
-	}
-	user = rewritten
 	if cwd, ok := tools.MessageWorkingDirectory(user); ok {
 		ctx = tools.WithWorkingDirectory(ctx, cwd)
 	}
@@ -879,6 +904,24 @@ func (r *Runner) Run(ctx context.Context, addr protocol.MessageAddress, user pro
 	// act under the user's grant. Tools also receive it via req.Authority on the
 	// session; this covers the ctx path.
 	ctx = tools.WithMemoryAuthority(ctx, auth)
+	var execution *turnExecution
+	if recovering {
+		execution = &turnExecution{store: r.turnJournal, record: recoveryRecord}
+	} else if !ephemeral && r.turnJournal != nil && addr.TaskID != "" {
+		user = normalizeJournalInput(addr, user)
+		execution, err = beginTurnExecution(ctx, r.turnJournal, r.turnOwnerIdentity, addr, user)
+		if err != nil {
+			return protocol.ChatMessage{}, err
+		}
+	}
+	if execution != nil {
+		ctx = withExternalAdmissionCheckpoint(ctx, execution.externalAdmitted)
+		defer func() {
+			if journalErr := execution.finish(context.WithoutCancel(ctx), err); journalErr != nil {
+				err = errors.Join(err, journalErr)
+			}
+		}()
+	}
 	var session *harness.Session
 	if ephemeral {
 		// No durable history loaded; Append mutates in-memory only (never persists).
@@ -894,14 +937,16 @@ func (r *Runner) Run(ctx context.Context, addr protocol.MessageAddress, user pro
 	// history can already end with it. Drop that copy before appending the
 	// incoming turn so it isn't doubled — done before the newThread check so a
 	// thread whose only message is the pre-committed turn still bootstraps.
-	if r.dedupTrailingUser {
+	if !recovering && r.dedupTrailingUser {
 		if session.DropTrailingUserDuplicate(user) {
 			slog.InfoContext(ctx, "history: dropped duplicate trailing user message before append (host pre-commit)", slog.String("thread", addr.ThreadID))
 		}
 	}
-	newThread := len(session.History()) == 0
-	if err := session.Append(ctx, user); err != nil {
-		return protocol.ChatMessage{}, fmt.Errorf("append user message: %w", err)
+	newThread := !recovering && len(session.History()) == 0
+	if !recovering {
+		if err := session.Append(ctx, user); err != nil {
+			return protocol.ChatMessage{}, fmt.Errorf("append user message: %w", err)
+		}
 	}
 	bootstrap, err := r.loader.LoadBootstrap(ctx)
 	if err != nil {
@@ -913,7 +958,7 @@ func (r *Runner) Run(ctx context.Context, addr protocol.MessageAddress, user pro
 	prior := compaction.ExtractWorldState(session.History())
 	// Ephemeral turns take ONLY the inbound message as context: skip both the
 	// first-turn daily-notes background and memory auto-recall.
-	if !ephemeral {
+	if !ephemeral && !recovering {
 		if newThread {
 			if dn, ok := r.dailyNotesMessage(ctx, addr); ok {
 				injected = append(injected, dn)
@@ -943,6 +988,9 @@ func (r *Runner) Run(ctx context.Context, addr protocol.MessageAddress, user pro
 	// be aged; the counter survives compaction via ExtractWorldState. `prior` is
 	// the world state reconstructed above.
 	wsTurn := prior.Turn + 1
+	if recovering && prior.Turn > 0 {
+		wsTurn = prior.Turn
+	}
 	// Per-turn compaction-event counter: the assembler bumps it each time a context
 	// Build drops messages; the sink persists prior.Compactions + this turn's count.
 	ctx, compCounter := compaction.WithCompactionCounter(ctx)
@@ -981,7 +1029,12 @@ func (r *Runner) Run(ctx context.Context, addr protocol.MessageAddress, user pro
 	// Per-turn tool set: static tools plus any provider-discovered ones (each
 	// ToolProvider is queried with the user's message for relevant tools).
 	tt := r.assembleTurnTools(ctx, addr, user)
-	assistant, err := r.runProviderLoop(ctx, session, addr, user, bootstrap, streamer, injected, model, perTurnApprovers, tt)
+	if recovering {
+		if err := r.resolveRecoveredExternalTool(ctx, session, addr, streamer, execution); err != nil {
+			return protocol.ChatMessage{}, err
+		}
+	}
+	assistant, err := r.runProviderLoop(ctx, session, addr, user, bootstrap, streamer, injected, model, perTurnApprovers, tt, execution)
 	if err != nil {
 		// User cancellation: the out-of-band cancel control aborts the turn ctx,
 		// which cancels the in-flight provider HTTP call (so we stop paying for
