@@ -20,12 +20,13 @@ import (
 )
 
 const (
-	goalContinuationTaskType      = "agent-harness.goal-continuation.v1"
-	goalContinuationBackendName   = "aether"
-	goalContinuationKeyPrefix     = "ah-goal-continuation-v1-"
-	goalContinuationContextPrefix = "ah-goal-session-v1-"
-	goalContinuationMetadataKind  = "goal_continuation"
-	goalContinuationRecoveryPage  = 100
+	goalContinuationTaskType       = "agent-harness.goal-continuation.v1"
+	goalContinuationBackendName    = "aether"
+	goalContinuationKeyPrefix      = "ah-goal-continuation-v1-"
+	goalContinuationContextPrefix  = "ah-goal-session-v1-"
+	goalContinuationMetadataKind   = "goal_continuation"
+	goalContinuationRecoveryPage   = 100
+	goalContinuationMaxOffsetPages = 1000
 )
 
 type continuationTaskQueries interface {
@@ -268,12 +269,19 @@ func (e *AssignedContinuationExecutor) RecoverQueued(ctx context.Context) error 
 	if !ok {
 		return errors.New("aether: continuation task backend does not support task queries")
 	}
-	for offset := int32(0); ; {
+	var (
+		offset          int32
+		pageToken       string
+		offsetPageCount int
+		seenPageTokens  = make(map[string]struct{})
+	)
+	for {
 		response, err := queries.QueryTasks(ctx, &pb.TaskFilter{
 			Workspace: e.backend.workspace,
 			TaskType:  goalContinuationTaskType,
 			Limit:     goalContinuationRecoveryPage,
 			Offset:    offset,
+			PageToken: pageToken,
 		}, e.backend.timeout)
 		if err != nil {
 			return fmt.Errorf("aether: query queued continuation tasks: %w", err)
@@ -285,10 +293,9 @@ func (e *AssignedContinuationExecutor) RecoverQueued(ctx context.Context) error 
 			return fmt.Errorf("aether: queued continuation query rejected: %s", strings.TrimSpace(response.Error))
 		}
 		for _, info := range response.Tasks {
-			// Aether projects pending/assigned/starting as QUEUED, but its
-			// reverse QUEUED list filter currently selects only pending rows.
-			// Query the private task type and filter the projection here so
-			// online-assigned work remains recoverable across versions.
+			// Aether projects pending/assigned/starting as QUEUED. Query the
+			// private task type and filter the projection here so recovery also
+			// remains compatible with servers that predate grouped filters.
 			if info == nil || info.TaskType != goalContinuationTaskType ||
 				info.Status != pb.TaskStatus_TASK_STATUS_QUEUED.String() ||
 				strings.TrimSpace(info.AssignedTo) != e.assignedTo {
@@ -304,8 +311,26 @@ func (e *AssignedContinuationExecutor) RecoverQueued(ctx context.Context) error 
 		}
 		pageCount := int32(len(response.Tasks))
 		offset += pageCount
+		nextPageToken := strings.TrimSpace(response.NextPageToken)
+		if nextPageToken != "" {
+			if _, seen := seenPageTokens[nextPageToken]; seen {
+				return fmt.Errorf("aether: queued continuation query returned non-advancing page cursor %q", nextPageToken)
+			}
+			seenPageTokens[nextPageToken] = struct{}{}
+			pageToken = nextPageToken
+			continue
+		}
 		if pageCount == 0 || pageCount < goalContinuationRecoveryPage {
 			return nil
+		}
+
+		// Compatibility with servers that predate task-query cursors. A full
+		// page without a cursor falls back to the accumulated offset, but the
+		// path is bounded so a non-conforming server cannot spin forever.
+		pageToken = ""
+		offsetPageCount++
+		if offsetPageCount >= goalContinuationMaxOffsetPages {
+			return fmt.Errorf("aether: queued continuation query reached the limit of %d cursorless full pages", goalContinuationMaxOffsetPages)
 		}
 	}
 }

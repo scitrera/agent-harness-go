@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -237,7 +238,7 @@ func TestAssignedContinuationExecutorRecoveryPaginatesTaskTypeScan(t *testing.T)
 		}
 	}
 	operations := &fakeTaskOperations{listResponses: []*sdk.TaskQueryResponse{
-		{Success: true, Tasks: firstPage, TotalCount: goalContinuationRecoveryPage},
+		{Success: true, Tasks: firstPage, TotalCount: goalContinuationRecoveryPage, NextPageToken: "opaque-page-2"},
 		{Success: true},
 	}}
 	ledger, err := goal.NewFileLedger(t.TempDir(), time.Now)
@@ -254,7 +255,102 @@ func TestAssignedContinuationExecutorRecoveryPaginatesTaskTypeScan(t *testing.T)
 		t.Fatal(err)
 	}
 	if len(operations.listCalls) != 2 || operations.listCalls[0].GetOffset() != 0 ||
-		operations.listCalls[1].GetOffset() != goalContinuationRecoveryPage {
+		operations.listCalls[0].GetPageToken() != "" ||
+		operations.listCalls[1].GetOffset() != goalContinuationRecoveryPage ||
+		operations.listCalls[1].GetPageToken() != "opaque-page-2" {
 		t.Fatalf("recovery pages = %#v", operations.listCalls)
+	}
+}
+
+func TestAssignedContinuationExecutorRecoveryFallsBackToBoundedOffsets(t *testing.T) {
+	firstPage := make([]*sdk.TaskInfo, goalContinuationRecoveryPage)
+	for i := range firstPage {
+		firstPage[i] = &sdk.TaskInfo{
+			TaskID: "completed-task", TaskType: goalContinuationTaskType,
+			Status: pb.TaskStatus_TASK_STATUS_COMPLETED.String(), AssignedTo: "agent-topic",
+		}
+	}
+	operations := &fakeTaskOperations{listResponses: []*sdk.TaskQueryResponse{
+		{Success: true, Tasks: firstPage, TotalCount: goalContinuationRecoveryPage},
+		{Success: true},
+	}}
+	ledger, err := goal.NewFileLedger(t.TempDir(), time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor, err := NewAssignedContinuationExecutor(operations, "routing", "agent-topic", ContinuationExecutorConfig{
+		Enqueuer: &recordingContinuationEnqueuer{}, AuthHandoff: authhandoff.New(), Ledger: ledger,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := executor.RecoverQueued(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(operations.listCalls) != 2 || operations.listCalls[0].GetPageToken() != "" ||
+		operations.listCalls[1].GetPageToken() != "" ||
+		operations.listCalls[1].GetOffset() != goalContinuationRecoveryPage {
+		t.Fatalf("cursorless recovery pages = %#v", operations.listCalls)
+	}
+}
+
+func TestAssignedContinuationExecutorRecoveryBoundsCursorlessFullPages(t *testing.T) {
+	fullPage := make([]*sdk.TaskInfo, goalContinuationRecoveryPage)
+	for i := range fullPage {
+		fullPage[i] = &sdk.TaskInfo{
+			TaskID: "completed-task", TaskType: goalContinuationTaskType,
+			Status: pb.TaskStatus_TASK_STATUS_COMPLETED.String(), AssignedTo: "agent-topic",
+		}
+	}
+	fullResponse := &sdk.TaskQueryResponse{Success: true, Tasks: fullPage}
+	responses := make([]*sdk.TaskQueryResponse, goalContinuationMaxOffsetPages)
+	for i := range responses {
+		responses[i] = fullResponse
+	}
+	operations := &fakeTaskOperations{listResponses: responses}
+	ledger, err := goal.NewFileLedger(t.TempDir(), time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor, err := NewAssignedContinuationExecutor(operations, "routing", "agent-topic", ContinuationExecutorConfig{
+		Enqueuer: &recordingContinuationEnqueuer{}, AuthHandoff: authhandoff.New(), Ledger: ledger,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = executor.RecoverQueued(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "cursorless full pages") {
+		t.Fatalf("RecoverQueued error = %v", err)
+	}
+	if len(operations.listCalls) != goalContinuationMaxOffsetPages {
+		t.Fatalf("cursorless recovery calls = %d, want %d", len(operations.listCalls), goalContinuationMaxOffsetPages)
+	}
+}
+
+func TestAssignedContinuationExecutorRecoveryRejectsNonAdvancingCursor(t *testing.T) {
+	firstPage := make([]*sdk.TaskInfo, goalContinuationRecoveryPage)
+	for i := range firstPage {
+		firstPage[i] = &sdk.TaskInfo{
+			TaskID: "completed-task", TaskType: goalContinuationTaskType,
+			Status: pb.TaskStatus_TASK_STATUS_COMPLETED.String(), AssignedTo: "agent-topic",
+		}
+	}
+	operations := &fakeTaskOperations{listResponses: []*sdk.TaskQueryResponse{
+		{Success: true, Tasks: firstPage, NextPageToken: "repeated-cursor"},
+		{Success: true, Tasks: firstPage, NextPageToken: "repeated-cursor"},
+	}}
+	ledger, err := goal.NewFileLedger(t.TempDir(), time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor, err := NewAssignedContinuationExecutor(operations, "routing", "agent-topic", ContinuationExecutorConfig{
+		Enqueuer: &recordingContinuationEnqueuer{}, AuthHandoff: authhandoff.New(), Ledger: ledger,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = executor.RecoverQueued(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "non-advancing page cursor") {
+		t.Fatalf("RecoverQueued error = %v", err)
 	}
 }
