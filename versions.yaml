@@ -7,7 +7,7 @@
 # anyone imports. A single `vX.Y.Z` tag therefore drives the whole release, and
 # there are no nested modules whose per-module tags need reconciling.
 
-agent-harness-go: 0.0.1
+agent-harness-go: 0.0.2
 
 # NOTE: no `go_toolchain` and no `preferred_versions.go` block, deliberately.
 # Both of those rewrite go.mod — the `go` directive and the require pins

@@ -6,7 +6,7 @@ package version
 // It is the sync target for scitrera-repo-tools: `sync-versions` rewrites this
 // line from the `agent-harness-go` entry in versions.yaml, so change it there
 // rather than here or CI will report the two as drifted.
-const Version = "0.0.1"
+const Version = "0.0.2"
 
 // Commit is the git revision the binary was built from. Release builds stamp it
 // via `-ldflags -X`; a plain `go build` leaves the placeholder.
