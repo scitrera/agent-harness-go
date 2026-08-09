@@ -35,6 +35,9 @@ type fakeTaskOperations struct {
 	queryCalls       int
 	queryResponses   []*sdk.TaskQueryResponse
 	queryErrors      []error
+	listCalls        []*pb.TaskFilter
+	listResponses    []*sdk.TaskQueryResponse
+	listErrors       []error
 }
 
 func executionForAdmission(t *testing.T, admission subagent.TaskAdmission, task string) subagent.ExecutionEnvelope {
@@ -96,6 +99,20 @@ func (f *fakeTaskOperations) GetTask(context.Context, string, time.Duration) (*s
 	var err error
 	if index < len(f.queryErrors) {
 		err = f.queryErrors[index]
+	}
+	return response, err
+}
+
+func (f *fakeTaskOperations) QueryTasks(_ context.Context, filter *pb.TaskFilter, _ time.Duration) (*sdk.TaskQueryResponse, error) {
+	f.listCalls = append(f.listCalls, filter)
+	index := len(f.listCalls) - 1
+	var response *sdk.TaskQueryResponse
+	if index < len(f.listResponses) {
+		response = f.listResponses[index]
+	}
+	var err error
+	if index < len(f.listErrors) {
+		err = f.listErrors[index]
 	}
 	return response, err
 }

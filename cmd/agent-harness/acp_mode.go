@@ -32,7 +32,7 @@ func runACP(cfg appConfig) error {
 	if err != nil {
 		return err
 	}
-	runner, _, err := buildRunner(cfg, st, ac, broker, nil, nil, ac.TurnContext)
+	runner, _, err := buildRunner(cfg, st, ac, broker, nil, nil, nil, nil, ac.TurnContext)
 	if err != nil {
 		return err
 	}

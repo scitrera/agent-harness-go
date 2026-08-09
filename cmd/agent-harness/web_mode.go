@@ -40,7 +40,7 @@ func runWeb(cfg appConfig, addr string, openBrowser bool) error {
 	// Preserve the web channel's inbound Enqueue capability while wrapping only
 	// its publisher side with cursor-bearing recording.
 	runnerChannel := publisherEnqueuer{Publisher: sessionTransport.Publisher, Enqueuer: wc}
-	runner, _, err := buildRunner(cfg, st, runnerChannel, nil, nil, nil, nil)
+	runner, _, err := buildRunner(cfg, st, runnerChannel, nil, nil, nil, nil, nil, nil)
 	if err != nil {
 		return err
 	}

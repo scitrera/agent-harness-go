@@ -107,6 +107,8 @@ type Channel struct {
 	sessionWorkspace       string
 	preferTaskMessageLanes bool
 	workspaceResolver      WorkspaceResolver
+	assignmentRouter       *TaskAssignmentRouter
+	goalContinuations      *AssignedContinuationExecutor
 
 	tasks  chan channel.Inbound
 	runErr chan error
@@ -194,12 +196,14 @@ func New(cfg Config) (*Channel, error) {
 		runErr:                 make(chan error, 1),
 		replyTo:                map[string]string{},
 		sessionSubscribers:     map[string]map[string]*sessionSubscriber{},
+		assignmentRouter:       NewTaskAssignmentRouter(),
 	}
 	if c.sessionWorkspace == "" {
 		c.sessionWorkspace = c.workspace
 	}
 	c.sendMessage = client.SendChatMessage
 	client.OnMessage(c.onMessage)
+	client.OnTaskAssignment(c.assignmentRouter.HandleAssignment)
 	return c, nil
 }
 

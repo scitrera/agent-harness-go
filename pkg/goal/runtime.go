@@ -93,26 +93,28 @@ func (p BoundedPolicy) Decide(_ context.Context, input PolicyInput) PolicyDecisi
 }
 
 type RuntimeConfig struct {
-	Service            *Service
-	Ledger             ContinuationLedger
-	Policy             ContinuationPolicy
-	Enqueuer           channel.Enqueuer
-	Verifier           Verifier
-	AuthHandoff        *authhandoff.Store
-	DefaultWorkspaceID string
-	NewID              func(prefix string) (string, error)
+	Service             *Service
+	Ledger              ContinuationLedger
+	Policy              ContinuationPolicy
+	ContinuationBackend ContinuationBackend
+	Enqueuer            channel.Enqueuer
+	Verifier            Verifier
+	AuthHandoff         *authhandoff.Store
+	DefaultWorkspaceID  string
+	NewID               func(prefix string) (string, error)
 }
 
 // Runtime connects durable goals to host-owned turn continuation. It is safe to
 // share across concurrently served workspaces and sessions.
 type Runtime struct {
-	service            *Service
-	ledger             ContinuationLedger
-	policy             ContinuationPolicy
-	enqueuer           channel.Enqueuer
-	authHandoff        *authhandoff.Store
-	defaultWorkspaceID string
-	newID              func(string) (string, error)
+	service             *Service
+	ledger              ContinuationLedger
+	policy              ContinuationPolicy
+	continuationBackend ContinuationBackend
+	enqueuer            channel.Enqueuer
+	authHandoff         *authhandoff.Store
+	defaultWorkspaceID  string
+	newID               func(string) (string, error)
 
 	verifierMu sync.RWMutex
 	verifier   Verifier
@@ -132,7 +134,8 @@ func NewRuntime(config RuntimeConfig) (*Runtime, error) {
 	}
 	return &Runtime{
 		service: config.Service, ledger: config.Ledger, policy: config.Policy,
-		enqueuer: config.Enqueuer, authHandoff: config.AuthHandoff, verifier: config.Verifier,
+		continuationBackend: config.ContinuationBackend,
+		enqueuer:            config.Enqueuer, authHandoff: config.AuthHandoff, verifier: config.Verifier,
 		defaultWorkspaceID: defaultWorkspaceID, newID: newID,
 	}, nil
 }
@@ -147,6 +150,33 @@ func (r *Runtime) SetVerifier(verifier Verifier) {
 	r.verifierMu.Lock()
 	r.verifier = verifier
 	r.verifierMu.Unlock()
+}
+
+// Decisions exposes the private append-only execution audit for operator and
+// embedding surfaces. It is not part of the client/session wire protocol.
+func (r *Runtime) Decisions(ctx context.Context, workspaceID, sessionID string) ([]DecisionRecord, error) {
+	if r == nil {
+		return nil, errors.New("goal: runtime is not configured")
+	}
+	workspaceID = strings.TrimSpace(workspaceID)
+	if workspaceID == "" {
+		workspaceID = r.defaultWorkspaceID
+	}
+	return r.ledger.List(ctx, workspaceID, sessionID)
+}
+
+// InspectDecision resolves a ledgered backend receipt to authoritative task
+// state. Local queue records have no backend receipt and cannot be inspected
+// through this method.
+func (r *Runtime) InspectDecision(ctx context.Context, record DecisionRecord) (ContinuationState, error) {
+	if r == nil || r.continuationBackend == nil {
+		return "", errors.New("goal: continuation backend is not configured")
+	}
+	receipt := ContinuationReceipt{Backend: record.ContinuationBackend, TaskID: record.ContinuationTaskID}
+	if err := receipt.Validate(); err != nil {
+		return "", err
+	}
+	return r.continuationBackend.Inspect(ctx, receipt)
 }
 
 type turnGoalState struct {
@@ -323,7 +353,7 @@ func (r *Runtime) AfterTurn(ctx context.Context, addr protocol.MessageAddress, t
 		}
 		return true, appendErr
 	}
-	if r.enqueuer == nil {
+	if r.continuationBackend == nil && r.enqueuer == nil {
 		_, admitted, appendErr := r.ledger.AppendFirstDecision(ctx, workspaceID, sessionID, decisionRecord(
 			goalRecord, assistant.ID, DecisionStopped, ReasonEnqueueUnavailable,
 			"host has no continuation ingress queue", continuationsUsed, nil,
@@ -335,29 +365,70 @@ func (r *Runtime) AfterTurn(ctx context.Context, addr protocol.MessageAddress, t
 	}
 
 	nextAttempt := continuationsUsed + 1
-	inbound, err := r.continuationInbound(ctx, addr, goalRecord, assistant.ID, nextAttempt, decision, verification)
+	inbound, err := r.continuationInbound(
+		ctx, addr, goalRecord, assistant.ID, nextAttempt, decision, verification,
+		r.continuationBackend == nil,
+	)
 	if err != nil {
 		return true, err
 	}
-	if _, admitted, err := r.ledger.AppendFirstDecision(ctx, workspaceID, sessionID, decisionRecord(
+	planned := withContinuationIdentity(decisionRecord(
 		goalRecord, assistant.ID, DecisionContinuationPlanned, decision.Reason,
 		decision.Detail, nextAttempt, verificationEvidence(verification),
-	)); err != nil {
+	), inbound, ContinuationReceipt{})
+	var admission ContinuationAdmission
+	if r.continuationBackend != nil {
+		admission = ContinuationAdmission{
+			WorkspaceID: workspaceID, SessionID: sessionID, GoalID: goalRecord.ID,
+			ParentTaskID: addr.TaskID, ParentMessageID: assistant.ID,
+			Attempt: nextAttempt, Inbound: inbound,
+		}
+		envelope, envelopeErr := NewContinuationEnvelope(admission)
+		if envelopeErr != nil {
+			return true, envelopeErr
+		}
+		planned.Continuation = &envelope
+	}
+	if _, admitted, err := r.ledger.AppendFirstDecision(ctx, workspaceID, sessionID, planned); err != nil {
 		return true, err
 	} else if !admitted {
 		return true, nil
 	}
+	if r.continuationBackend != nil {
+		authority, _ := tools.MemoryAuthorityFrom(ctx)
+		admission.Authority = authority
+		receipt, admitErr := r.continuationBackend.Admit(ctx, admission)
+		if admitErr == nil {
+			admitErr = receipt.Validate()
+		}
+		if admitErr != nil {
+			_, ledgerErr := r.ledger.Append(context.WithoutCancel(ctx), workspaceID, sessionID,
+				withContinuationIdentity(decisionRecord(
+					goalRecord, assistant.ID, DecisionStopped, ReasonAdmissionFailed,
+					admitErr.Error(), nextAttempt, nil,
+				), inbound, receipt),
+			)
+			return true, errors.Join(admitErr, ledgerErr)
+		}
+		_, err = r.ledger.Append(context.WithoutCancel(ctx), workspaceID, sessionID,
+			withContinuationIdentity(decisionRecord(
+				goalRecord, assistant.ID, DecisionContinuationAdmitted, decision.Reason,
+				"continuation admitted to durable backend", nextAttempt, verificationEvidence(verification),
+			), inbound, receipt),
+		)
+		return true, err
+	}
 	if err := r.enqueuer.Enqueue(ctx, inbound); err != nil {
-		_, ledgerErr := r.ledger.Append(context.WithoutCancel(ctx), workspaceID, sessionID, decisionRecord(
+		_, ledgerErr := r.ledger.Append(context.WithoutCancel(ctx), workspaceID, sessionID, withContinuationIdentity(decisionRecord(
 			goalRecord, assistant.ID, DecisionStopped, ReasonEnqueueFailed,
 			err.Error(), nextAttempt, nil,
-		))
+		), inbound, ContinuationReceipt{}))
 		return true, errors.Join(err, ledgerErr)
 	}
-	_, err = r.ledger.Append(context.WithoutCancel(ctx), workspaceID, sessionID, decisionRecord(
+	_, err = r.ledger.Append(context.WithoutCancel(ctx), workspaceID, sessionID, withContinuationIdentity(decisionRecord(
 		goalRecord, assistant.ID, DecisionContinuationEnqueued, decision.Reason,
 		"continuation admitted to host ingress", nextAttempt, verificationEvidence(verification),
-	))
+	), inbound, ContinuationReceipt{}))
 	return true, err
 }
 
@@ -367,14 +438,17 @@ func (r *Runtime) currentVerifier() Verifier {
 	return r.verifier
 }
 
-func (r *Runtime) continuationInbound(ctx context.Context, addr protocol.MessageAddress, goalRecord spec.SessionGoalRecord, priorMessageID string, attempt uint32, decision PolicyDecision, verification *VerificationResult) (channel.Inbound, error) {
+func (r *Runtime) continuationInbound(ctx context.Context, addr protocol.MessageAddress, goalRecord spec.SessionGoalRecord, priorMessageID string, attempt uint32, decision PolicyDecision, verification *VerificationResult, localDelivery bool) (channel.Inbound, error) {
 	messageID, err := r.newID("goal-cont-")
 	if err != nil {
 		return channel.Inbound{}, err
 	}
-	taskID, err := r.newID("task-")
-	if err != nil {
-		return channel.Inbound{}, err
+	taskID := ""
+	if localDelivery {
+		taskID, err = r.newID("task-")
+		if err != nil {
+			return channel.Inbound{}, err
+		}
 	}
 	requestID, err := r.newID("req-")
 	if err != nil {
@@ -399,7 +473,7 @@ func (r *Runtime) continuationInbound(ctx context.Context, addr protocol.Message
 		Content: []protocol.ContentPart{part},
 		Meta:    map[string]json.RawMessage{GoalContinuationMetaKey: meta},
 	}
-	if authority, ok := tools.MemoryAuthorityFrom(ctx); ok && authority != (tools.MemoryAuthority{}) {
+	if authority, ok := tools.MemoryAuthorityFrom(ctx); localDelivery && ok && authority != (tools.MemoryAuthority{}) {
 		if r.authHandoff == nil {
 			return channel.Inbound{}, errors.New("goal: continuation with delegated authority requires an authority handoff store")
 		}
@@ -499,6 +573,17 @@ func decisionRecord(goalRecord spec.SessionGoalRecord, turnMessageID string, act
 		TokenUsage: goalRecord.TokenUsage, TokenBudget: goalRecord.TokenBudget,
 		ContinuationsUsed: continuations, Evidence: append([]string(nil), evidence...),
 	}
+}
+
+func withContinuationIdentity(record DecisionRecord, inbound channel.Inbound, receipt ContinuationReceipt) DecisionRecord {
+	record.ContinuationMessageID = inbound.Message.ID
+	record.ContinuationRequestID = inbound.Addr.RequestID
+	record.ContinuationBackend = receipt.Backend
+	record.ContinuationTaskID = receipt.TaskID
+	if record.ContinuationTaskID == "" {
+		record.ContinuationTaskID = inbound.Addr.TaskID
+	}
+	return record
 }
 
 func verificationEvidence(verification *VerificationResult) []string {

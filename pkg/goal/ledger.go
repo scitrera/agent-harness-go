@@ -23,6 +23,7 @@ type DecisionAction string
 
 const (
 	DecisionContinuationPlanned  DecisionAction = "continuation_planned"
+	DecisionContinuationAdmitted DecisionAction = "continuation_admitted"
 	DecisionContinuationEnqueued DecisionAction = "continuation_enqueued"
 	DecisionStopped              DecisionAction = "stopped"
 	DecisionCompleted            DecisionAction = "completed"
@@ -40,6 +41,7 @@ const (
 	ReasonGoalTerminal       DecisionReason = "goal_terminal"
 	ReasonEnqueueUnavailable DecisionReason = "enqueue_unavailable"
 	ReasonEnqueueFailed      DecisionReason = "enqueue_failed"
+	ReasonAdmissionFailed    DecisionReason = "admission_failed"
 )
 
 // DecisionRecord is one immutable explanation of why goal execution continued
@@ -59,6 +61,18 @@ type DecisionRecord struct {
 	TokenBudget       *uint64        `json:"token_budget,omitempty"`
 	ContinuationsUsed uint32         `json:"continuations_used,omitempty"`
 	Evidence          []string       `json:"evidence,omitempty"`
+	// ContinuationMessageID and ContinuationRequestID are minted before the
+	// plan is committed. Backend and task identity appear only after durable
+	// admission succeeds. None of these fields carries task authority.
+	ContinuationMessageID string `json:"continuation_message_id,omitempty"`
+	ContinuationRequestID string `json:"continuation_request_id,omitempty"`
+	ContinuationBackend   string `json:"continuation_backend,omitempty"`
+	ContinuationTaskID    string `json:"continuation_task_id,omitempty"`
+	// Continuation is stored once on the planned record so a durable backend
+	// can reconstruct credential-free ingress after a process restart even
+	// when its task API does not expose the original assignment payload.
+	// Authority is deliberately absent from ContinuationEnvelope.
+	Continuation *ContinuationEnvelope `json:"continuation,omitempty"`
 }
 
 type ContinuationLedger interface {
@@ -242,19 +256,36 @@ func validateDecisionRecord(record DecisionRecord) error {
 		return errors.New("goal: continuation decision requires workspace, session, goal, and turn message IDs")
 	}
 	if !slices.Contains([]DecisionAction{
-		DecisionContinuationPlanned, DecisionContinuationEnqueued, DecisionStopped, DecisionCompleted,
+		DecisionContinuationPlanned, DecisionContinuationAdmitted,
+		DecisionContinuationEnqueued, DecisionStopped, DecisionCompleted,
 	}, record.Action) {
 		return fmt.Errorf("goal: invalid continuation action %q", record.Action)
 	}
 	if !slices.Contains([]DecisionReason{
 		ReasonActiveGoal, ReasonVerifierRevision, ReasonVerifierSatisfied, ReasonVerifierFailed,
 		ReasonTokenBudget, ReasonMaxContinuations, ReasonGoalTerminal,
-		ReasonEnqueueUnavailable, ReasonEnqueueFailed,
+		ReasonEnqueueUnavailable, ReasonEnqueueFailed, ReasonAdmissionFailed,
 	}, record.Reason) {
 		return fmt.Errorf("goal: invalid continuation reason %q", record.Reason)
 	}
 	if _, err := time.Parse(time.RFC3339Nano, record.CreatedAt); err != nil {
 		return errors.New("goal: continuation decision requires an RFC 3339 timestamp")
+	}
+	if record.Continuation != nil {
+		if record.Action != DecisionContinuationPlanned {
+			return errors.New("goal: continuation envelope is only valid on a planned decision")
+		}
+		if err := record.Continuation.Validate(); err != nil {
+			return fmt.Errorf("goal: invalid ledgered continuation: %w", err)
+		}
+		if record.Continuation.WorkspaceID != record.WorkspaceID ||
+			record.Continuation.SessionID != record.SessionID ||
+			record.Continuation.GoalID != record.GoalID ||
+			record.Continuation.ParentMessageID != record.TurnMessageID ||
+			record.Continuation.Inbound.Message.ID != record.ContinuationMessageID ||
+			record.Continuation.Inbound.Addr.RequestID != record.ContinuationRequestID {
+			return errors.New("goal: ledgered continuation identity does not match decision")
+		}
 	}
 	return nil
 }
@@ -265,6 +296,10 @@ func cloneDecisionRecord(record DecisionRecord) DecisionRecord {
 		record.TokenBudget = &budget
 	}
 	record.Evidence = append([]string(nil), record.Evidence...)
+	if record.Continuation != nil {
+		envelope := record.Continuation.Clone()
+		record.Continuation = &envelope
+	}
 	return record
 }
 

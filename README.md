@@ -164,15 +164,19 @@ usage remains zero, so the independent continuation count still bounds the run.
 Set the flag to `0` to retain explicit goal tools and state without automatic
 follow-ups.
 
-Hosted modes (TUI, web, ACP, Aether worker, and standalone) deliver follow-ups
-through their existing ingress queue. The direct stdin CLI has no ingress queue,
-so it records why automatic delivery was unavailable and leaves the goal active
-for explicit user turns. Every decision is appended below the workspace/session
-state directory; Aether modes use the equivalent CAS ledger. A continuation is
-planned durably before enqueue, so a crash at an ambiguous delivery boundary
-cannot replay it. Delegated authority is carried only through the same opaque,
-single-use in-process handoff used by background children; a runtime without the
-matching handoff fails closed before planning a privileged continuation.
+TUI, web, and ACP deliver follow-ups through their existing ingress queue. The
+direct stdin CLI has no ingress queue, so it records why automatic delivery was
+unavailable and leaves the goal active for explicit user turns. Every decision
+is appended below the workspace/session state directory; Aether modes use the
+equivalent CAS ledger and admit each follow-up as a deterministic Aether task
+targeted to the worker's stable identity. Its versioned payload is
+credential-free; typed task authority is converted to the same opaque,
+single-use handoff only when assignment reaches the worker. Live assignments
+use that payload directly. After restart, the worker scans its private Aether
+task type and reconstructs queued ingress from the credential-free envelope
+stored on the planned decision; the normal task lifecycle/turn journal recovers
+running work. Local delivery retains the conservative plan-before-enqueue
+boundary and never blindly replays an ambiguous plan.
 
 Embedders can replace `goal.BoundedPolicy` and supply a `goal.Verifier`. When a
 `turn.RubricVerifier` and goal runtime are both configured on `turn.Runner`, the

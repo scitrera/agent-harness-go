@@ -23,7 +23,7 @@ import (
 	"github.com/scitrera/agent-harness-go/pkg/turn"
 )
 
-func buildRunner(cfg appConfig, st stores, pub channel.Publisher, approvals approval.Awaiter, subagentTasks subagent.TaskBackend, notifier channel.Enqueuer, decorator func(context.Context, protocol.MessageAddress) context.Context) (*turn.Runner, *localtools.Workspace, error) {
+func buildRunner(cfg appConfig, st stores, pub channel.Publisher, approvals approval.Awaiter, subagentTasks subagent.TaskBackend, notifier channel.Enqueuer, continuationBackend goal.ContinuationBackend, authorityHandoff *authhandoff.Store, decorator func(context.Context, protocol.MessageAddress) context.Context) (*turn.Runner, *localtools.Workspace, error) {
 	if st.subagents != nil {
 		var err error
 		if taskRecovery, ok := st.subagents.(subagent.TaskRecoveryRegistry); ok && subagentTasks != nil {
@@ -66,7 +66,9 @@ func buildRunner(cfg appConfig, st stores, pub channel.Publisher, approvals appr
 		notifier, _ = pub.(channel.Enqueuer)
 	}
 	allowBackground := notifier != nil
-	authorityHandoff := authhandoff.New()
+	if authorityHandoff == nil {
+		authorityHandoff = authhandoff.New()
+	}
 	turnOwnerIdentity := cfg.sourceAgent()
 	if topic, ok := notifier.(interface{ Topic() string }); ok && topic.Topic() != "" {
 		turnOwnerIdentity = topic.Topic()
@@ -89,8 +91,9 @@ func buildRunner(cfg appConfig, st stores, pub channel.Publisher, approvals appr
 		}
 		goalRuntime, err = goal.NewRuntime(goal.RuntimeConfig{
 			Service: goalService, Ledger: st.continuations,
-			Policy:   goal.BoundedPolicy{MaxContinuations: cfg.goalMaxContinuations},
-			Enqueuer: notifier, AuthHandoff: authorityHandoff,
+			Policy:              goal.BoundedPolicy{MaxContinuations: cfg.goalMaxContinuations},
+			ContinuationBackend: continuationBackend,
+			Enqueuer:            notifier, AuthHandoff: authorityHandoff,
 			DefaultWorkspaceID: effectiveWorkspace("", cfg.workspaceID),
 		})
 		if err != nil {

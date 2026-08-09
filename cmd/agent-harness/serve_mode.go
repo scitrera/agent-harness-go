@@ -8,6 +8,7 @@ import (
 	"syscall"
 
 	"github.com/scitrera/agent-harness-go/pkg/approval"
+	"github.com/scitrera/agent-harness-go/pkg/authhandoff"
 	aetherchan "github.com/scitrera/agent-harness-go/pkg/channels/aether"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 	"github.com/scitrera/agent-harness-go/pkg/runtime"
@@ -74,7 +75,12 @@ func runServe(cfg appConfig) error {
 	if err != nil {
 		return err
 	}
-	runner, _, err := buildRunner(cfg, st, sessionTransport.Publisher, broker, subagentTasks, ch, nil)
+	authorityHandoff := authhandoff.New()
+	continuationBackend, err := ch.EnableGoalContinuations(st.continuations, authorityHandoff, 0)
+	if err != nil {
+		return err
+	}
+	runner, _, err := buildRunner(cfg, st, sessionTransport.Publisher, broker, subagentTasks, ch, continuationBackend, authorityHandoff, nil)
 	if err != nil {
 		return err
 	}
@@ -93,7 +99,7 @@ func runServe(cfg appConfig) error {
 		return deleteAddressHistory(context.Background(), st.history, addr)
 	})
 
-	rt, err := runtime.NewRunner(ch, runner)
+	rt, err := runtime.NewRunner(ch, withAetherGoalTaskLifecycle(ch, runner))
 	if err != nil {
 		return fmt.Errorf("runtime: %w", err)
 	}
@@ -103,6 +109,12 @@ func runServe(cfg appConfig) error {
 		return err
 	}
 	defer func() { _ = ch.Close() }()
+	if err := ch.ReconcileGoalContinuations(ctx); err != nil {
+		return fmt.Errorf("goal continuation recovery: %w", err)
+	}
+	if err := startAetherTurnRecovery(ctx, ch, runner); err != nil {
+		return err
+	}
 
 	fmt.Fprintf(os.Stderr, "agent-harness | model=%s endpoint=%s - serving on aether %s as %s (history: %s%s)\n",
 		cfg.model, cfg.baseURL, cfg.aetherAddr, ch.Topic(), historyLabel(cfg), externalSubagentLabel(cfg))

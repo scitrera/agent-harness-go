@@ -220,11 +220,15 @@ func (b *SubagentTaskBackend) Admit(ctx context.Context, admission subagent.Task
 // real Aether task. Direct chat turns legitimately carry synthetic task IDs;
 // those remain in lineage metadata but must not be sent as native parentage.
 func (b *SubagentTaskBackend) nativeParentTaskID(ctx context.Context, candidate string) (string, error) {
+	return resolveNativeParentTaskID(ctx, b.tasks, b.namespace, b.timeout, candidate)
+}
+
+func resolveNativeParentTaskID(ctx context.Context, tasks TaskOperations, namespace string, timeout time.Duration, candidate string) (string, error) {
 	candidate = strings.TrimSpace(candidate)
 	if candidate == "" {
 		return "", nil
 	}
-	query, err := b.tasks.GetTask(ctx, candidate, b.timeout)
+	query, err := tasks.GetTask(ctx, candidate, timeout)
 	if err != nil {
 		return "", fmt.Errorf("aether: resolve native parent task: %w", err)
 	}
@@ -237,7 +241,7 @@ func (b *SubagentTaskBackend) nativeParentTaskID(ctx context.Context, candidate 
 	if !query.Success || query.Task == nil {
 		return "", nil
 	}
-	if strings.TrimSpace(query.Task.AssignedTo) != b.namespace {
+	if strings.TrimSpace(query.Task.AssignedTo) != namespace {
 		return "", errors.New("aether: native parent task is not assigned to this worker")
 	}
 	switch query.Task.Status {

@@ -87,7 +87,7 @@ func (c *Channel) EnableSubagentExecutor(cfg SubagentExecutorConfig) (*AssignedS
 	if err != nil {
 		return nil, err
 	}
-	c.client.OnTaskAssignment(executor.HandleAssignment)
+	c.assignmentRouter.Register(executor.HandleAssignment)
 	return executor, nil
 }
 

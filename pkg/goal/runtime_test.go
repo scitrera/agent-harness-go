@@ -25,6 +25,31 @@ type recordingGoalEnqueuer struct {
 	err     error
 }
 
+type recordingContinuationBackend struct {
+	mu         sync.Mutex
+	admissions []ContinuationAdmission
+	receipt    ContinuationReceipt
+	err        error
+	state      ContinuationState
+}
+
+func (b *recordingContinuationBackend) Admit(_ context.Context, admission ContinuationAdmission) (ContinuationReceipt, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.admissions = append(b.admissions, admission)
+	return b.receipt, b.err
+}
+
+func (b *recordingContinuationBackend) Inspect(context.Context, ContinuationReceipt) (ContinuationState, error) {
+	return b.state, b.err
+}
+
+func (b *recordingContinuationBackend) calls() []ContinuationAdmission {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]ContinuationAdmission(nil), b.admissions...)
+}
+
 func (e *recordingGoalEnqueuer) Enqueue(_ context.Context, inbound channel.Inbound) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -343,6 +368,59 @@ func TestRuntimeContinuationPreservesDelegatedAuthorityOrFailsClosed(t *testing.
 			t.Fatal("authority handoff token was reusable")
 		}
 	})
+}
+
+func TestRuntimeUsesDurableContinuationBackendWithoutSerializingAuthority(t *testing.T) {
+	backend := &recordingContinuationBackend{
+		receipt: ContinuationReceipt{Backend: "aether", TaskID: "task-durable-1"}, state: ContinuationRunning,
+	}
+	fx := newRuntimeFixture(t, 3, nil, nil)
+	fx.runtime.continuationBackend = backend
+	_, _ = fx.service.CreateGoal(context.Background(), "project-a", "session-1", CreateInput{Objective: "recover safely"})
+	addr := protocol.MessageAddress{
+		WorkspaceID: "project-a", ThreadID: "session-1", TaskID: "task-parent",
+	}
+	ctx, _ := fx.runtime.BeginTurn(context.Background(), addr)
+	authority := tools.MemoryAuthority{GrantID: "grant-1", SubjectType: "user", SubjectID: "alice"}
+	ctx = tools.WithMemoryAuthority(ctx, authority)
+	assistant := assistantWithUsage("assistant-durable", addr, 7)
+	if _, err := fx.runtime.AfterTurn(ctx, addr, []protocol.ChatMessage{assistant}, assistant); err != nil {
+		t.Fatal(err)
+	}
+	calls := backend.calls()
+	if len(calls) != 1 || calls[0].Authority != authority || calls[0].ParentTaskID != "task-parent" {
+		t.Fatalf("admissions = %#v", calls)
+	}
+	if calls[0].Inbound.Addr.TaskID != "" || calls[0].Inbound.Message.Addr.TaskID != "" {
+		t.Fatalf("backend admission carried synthetic task id: %#v", calls[0].Inbound.Addr)
+	}
+	payload, err := MarshalContinuationEnvelope(calls[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(payload), "grant-1") || strings.Contains(string(payload), "alice") ||
+		strings.Contains(string(payload), "authority_handoff") {
+		t.Fatalf("authority leaked into continuation payload: %s", payload)
+	}
+	records, err := fx.ledger.List(context.Background(), "project-a", "session-1")
+	if err != nil || len(records) != 2 || records[0].Action != DecisionContinuationPlanned ||
+		records[1].Action != DecisionContinuationAdmitted || records[1].ContinuationTaskID != "task-durable-1" ||
+		records[1].ContinuationBackend != "aether" || records[0].ContinuationTaskID != "" ||
+		records[0].Continuation == nil || records[0].Continuation.Inbound.Message.ID != calls[0].Inbound.Message.ID {
+		t.Fatalf("records = %#v err=%v", records, err)
+	}
+	ledgerJSON, err := json.Marshal(records)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(ledgerJSON), "grant-1") || strings.Contains(string(ledgerJSON), "alice") ||
+		strings.Contains(string(ledgerJSON), "authority_handoff") {
+		t.Fatalf("authority leaked into continuation ledger: %s", ledgerJSON)
+	}
+	inspected, err := fx.runtime.InspectDecision(context.Background(), records[1])
+	if err != nil || inspected != ContinuationRunning {
+		t.Fatalf("inspection = %q err=%v", inspected, err)
+	}
 }
 
 func TestRuntimeAccountsExplicitCompletingTurnWithoutContinuing(t *testing.T) {
