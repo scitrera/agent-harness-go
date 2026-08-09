@@ -11,6 +11,7 @@ import (
 
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 	"github.com/scitrera/agent-harness-go/pkg/subagent"
+	"github.com/scitrera/agent-harness-go/pkg/tools"
 )
 
 type recordingAssignedRunner struct {
@@ -31,6 +32,19 @@ func (r *recordingAssignedRunner) ExecuteAssignedSubagent(_ context.Context, tas
 
 type staticCatalog struct {
 	definition subagent.Definition
+}
+
+type recordingAssignedResolver struct {
+	runners    map[string]subagent.AssignedRunner
+	workspaces []string
+	authority  []tools.MemoryAuthority
+}
+
+func (r *recordingAssignedResolver) ResolveAssignedExecution(ctx context.Context, workspaceID string) (subagent.AssignedExecutionResources, error) {
+	r.workspaces = append(r.workspaces, workspaceID)
+	auth, _ := tools.MemoryAuthorityFrom(ctx)
+	r.authority = append(r.authority, auth)
+	return subagent.AssignedExecutionResources{Runner: r.runners[workspaceID]}, nil
 }
 
 func (c staticCatalog) List(context.Context) ([]subagent.Definition, error) {
@@ -121,6 +135,58 @@ func TestAssignedSubagentExecutorClaimsRunsAndCompletesWithTypedAuthority(t *tes
 	}
 	if runner.req.GrantID != "task-grant" || runner.req.SubjectType != "user" || runner.req.SubjectID != "alice" || runner.req.Depth != 2 {
 		t.Fatalf("assigned authority/depth = %+v", runner.req)
+	}
+}
+
+func TestAssignedSubagentExecutorResolvesRunnerByValidatedWorkspace(t *testing.T) {
+	first := externalAssignmentFixture(t, genericExternalRequest())
+	secondReq := genericExternalRequest()
+	secondReq.Parent.WorkspaceID = "project-b"
+	second := externalAssignmentFixture(t, secondReq)
+	second.TaskID = "child-task-b"
+	operations := &fakeTaskOperations{
+		queryResponses: []*sdk.TaskQueryResponse{
+			{Success: true, Task: &sdk.TaskInfo{Status: pb.TaskStatus_TASK_STATUS_QUEUED.String()}},
+			{Success: true, Task: &sdk.TaskInfo{Status: pb.TaskStatus_TASK_STATUS_QUEUED.String()}},
+		},
+		claimResponse:    &sdk.TaskOperationResponse{Success: true},
+		completeResponse: &sdk.TaskOperationResponse{Success: true},
+	}
+	projectA := &recordingAssignedRunner{}
+	projectB := &recordingAssignedRunner{}
+	resolver := &recordingAssignedResolver{runners: map[string]subagent.AssignedRunner{
+		"project-a": projectA,
+		"project-b": projectB,
+	}}
+	executor, err := NewAssignedSubagentExecutor(operations, first.AssignedTo, SubagentExecutorConfig{Resolver: resolver})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := executor.HandleAssignment(context.Background(), first); err != nil {
+		t.Fatal(err)
+	}
+	if err := executor.HandleAssignment(context.Background(), second); err != nil {
+		t.Fatal(err)
+	}
+	if projectA.calls != 1 || projectB.calls != 1 {
+		t.Fatalf("workspace runners called project-a=%d project-b=%d", projectA.calls, projectB.calls)
+	}
+	if len(resolver.workspaces) != 2 || resolver.workspaces[0] != "project-a" || resolver.workspaces[1] != "project-b" {
+		t.Fatalf("resolved workspaces = %#v", resolver.workspaces)
+	}
+	for _, auth := range resolver.authority {
+		if auth.GrantID != "task-grant" || auth.SubjectType != "user" || auth.SubjectID != "alice" {
+			t.Fatalf("resolver authority = %+v", auth)
+		}
+	}
+}
+
+func TestAssignedSubagentExecutorRejectsAmbiguousStaticAndResolvedResources(t *testing.T) {
+	_, err := NewAssignedSubagentExecutor(&fakeTaskOperations{}, "agent", SubagentExecutorConfig{
+		Runner: &recordingAssignedRunner{}, Resolver: &recordingAssignedResolver{},
+	})
+	if err == nil || !strings.Contains(err.Error(), "cannot be combined") {
+		t.Fatalf("error = %v", err)
 	}
 }
 

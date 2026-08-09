@@ -15,6 +15,30 @@ type AssignedRunner interface {
 	ExecuteAssignedSubagent(ctx context.Context, taskID string, envelope ExecutionEnvelope, req Request) (Result, error)
 }
 
+// AssignedExecutionResources are resolved after the executor has validated an
+// envelope's workspace identity and typed task authority, but before it claims
+// the task. A multi-workspace host uses this seam to select a runner and catalog
+// built exclusively for that logical workspace.
+type AssignedExecutionResources struct {
+	Runner  AssignedRunner
+	Catalog Catalog
+}
+
+// AssignedExecutionResolver selects workspace-scoped execution resources for
+// an externally assigned child. Implementations must not fall back across
+// workspace boundaries: a resolution failure prevents model/tool execution and
+// is recorded as a terminal rejection before the task is claimed.
+type AssignedExecutionResolver interface {
+	ResolveAssignedExecution(ctx context.Context, workspaceID string) (AssignedExecutionResources, error)
+}
+
+// AssignedExecutionResolverFunc adapts a function to AssignedExecutionResolver.
+type AssignedExecutionResolverFunc func(context.Context, string) (AssignedExecutionResources, error)
+
+func (f AssignedExecutionResolverFunc) ResolveAssignedExecution(ctx context.Context, workspaceID string) (AssignedExecutionResources, error) {
+	return f(ctx, workspaceID)
+}
+
 // ReconstructExecutionRequest rebuilds the private Request policy an assigned
 // executor must use. Named agent policies are loaded from the executor's local
 // catalog and verified against the envelope digest; generic policies can be

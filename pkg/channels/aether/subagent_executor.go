@@ -13,6 +13,7 @@ import (
 	sdk "github.com/scitrera/aether/sdk/go/aether"
 
 	"github.com/scitrera/agent-harness-go/pkg/subagent"
+	"github.com/scitrera/agent-harness-go/pkg/tools"
 )
 
 const defaultSubagentExecutorConcurrency = 4
@@ -21,8 +22,12 @@ const defaultSubagentExecutorConcurrency = 4
 // assigned subagent tasks. Catalog may be nil when only generic (non-catalog)
 // subagents are accepted.
 type SubagentExecutorConfig struct {
-	Runner         subagent.AssignedRunner
-	Catalog        subagent.Catalog
+	Runner  subagent.AssignedRunner
+	Catalog subagent.Catalog
+	// Resolver replaces the static Runner/Catalog pair for multi-workspace
+	// hosts. It is invoked with the validated logical workspace and the typed
+	// assignment authority installed on ctx.
+	Resolver       subagent.AssignedExecutionResolver
 	MaxConcurrency int
 	Timeout        time.Duration
 }
@@ -34,6 +39,7 @@ type AssignedSubagentExecutor struct {
 	backend    *SubagentTaskBackend
 	runner     subagent.AssignedRunner
 	catalog    subagent.Catalog
+	resolver   subagent.AssignedExecutionResolver
 	assignedTo string
 	slots      chan struct{}
 
@@ -47,7 +53,10 @@ func NewAssignedSubagentExecutor(tasks TaskOperations, assignedTo string, cfg Su
 	if tasks == nil {
 		return nil, errors.New("aether: assigned subagent task operations are required")
 	}
-	if cfg.Runner == nil {
+	if cfg.Resolver != nil && (cfg.Runner != nil || cfg.Catalog != nil) {
+		return nil, errors.New("aether: assigned subagent resolver cannot be combined with a static runner or catalog")
+	}
+	if cfg.Resolver == nil && cfg.Runner == nil {
 		return nil, errors.New("aether: assigned subagent runner is required")
 	}
 	assignedTo = strings.TrimSpace(assignedTo)
@@ -64,6 +73,7 @@ func NewAssignedSubagentExecutor(tasks TaskOperations, assignedTo string, cfg Su
 		backend:    &SubagentTaskBackend{tasks: tasks, timeout: cfg.Timeout},
 		runner:     cfg.Runner,
 		catalog:    cfg.Catalog,
+		resolver:   cfg.Resolver,
 		assignedTo: assignedTo,
 		slots:      make(chan struct{}, cfg.MaxConcurrency),
 		inflight:   make(map[string]struct{}),
@@ -133,7 +143,14 @@ func (e *AssignedSubagentExecutor) HandleAssignment(ctx context.Context, assignm
 	if err != nil {
 		return e.reject(ctx, taskID, err)
 	}
-	req, err := subagent.ReconstructExecutionRequest(ctx, envelope, e.catalog, grantID, subjectType, subjectID)
+	authCtx := tools.WithMemoryAuthority(ctx, tools.MemoryAuthority{
+		GrantID: grantID, SubjectType: subjectType, SubjectID: subjectID,
+	})
+	runner, catalog, err := e.resolveExecution(authCtx, envelope.WorkspaceID)
+	if err != nil {
+		return e.reject(ctx, taskID, err)
+	}
+	req, err := subagent.ReconstructExecutionRequest(authCtx, envelope, catalog, grantID, subjectType, subjectID)
 	if err != nil {
 		return e.reject(ctx, taskID, err)
 	}
@@ -141,7 +158,7 @@ func (e *AssignedSubagentExecutor) HandleAssignment(ctx context.Context, assignm
 	if err := e.backend.Start(ctx, taskID); err != nil {
 		return fmt.Errorf("aether: claim assigned subagent task: %w", err)
 	}
-	_, runErr := e.runner.ExecuteAssignedSubagent(ctx, taskID, envelope, req)
+	_, runErr := runner.ExecuteAssignedSubagent(authCtx, taskID, envelope, req)
 	if runErr != nil {
 		outcome := subagent.TaskOutcomeFailed
 		if errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded) {
@@ -150,6 +167,20 @@ func (e *AssignedSubagentExecutor) HandleAssignment(ctx context.Context, assignm
 		return e.finish(ctx, taskID, outcome, runErr)
 	}
 	return e.finish(ctx, taskID, subagent.TaskOutcomeCompleted, nil)
+}
+
+func (e *AssignedSubagentExecutor) resolveExecution(ctx context.Context, workspaceID string) (subagent.AssignedRunner, subagent.Catalog, error) {
+	if e.resolver == nil {
+		return e.runner, e.catalog, nil
+	}
+	resources, err := e.resolver.ResolveAssignedExecution(ctx, workspaceID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("aether: resolve assigned subagent workspace %q: %w", workspaceID, err)
+	}
+	if resources.Runner == nil {
+		return nil, nil, fmt.Errorf("aether: resolve assigned subagent workspace %q: resolver returned no runner", workspaceID)
+	}
+	return resources.Runner, resources.Catalog, nil
 }
 
 func (e *AssignedSubagentExecutor) markInflight(taskID string) bool {
