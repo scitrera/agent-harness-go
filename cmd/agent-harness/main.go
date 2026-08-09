@@ -44,6 +44,7 @@ func main() {
 	memorylayerURL := flag.String("memorylayer", os.Getenv("MEMORYLAYER_BASE_URL"), "MemoryLayer server URL; stores threads + transcripts there instead of on local disk")
 	memorylayerWorkspace := flag.String("memorylayer-workspace", os.Getenv("MEMORYLAYER_WORKSPACE"), "MemoryLayer workspace (defaults to the resolved logical workspace)")
 	promptNotesAuthority := flag.String("prompt-notes-authority", env("SAHARA_PROMPT_NOTES_AUTHORITY", promptNotesAuthorityLocal), "prompt-note authority: off, local, or memorylayer (no fallback or dual write)")
+	agentSpecificationsAuthority := flag.String("agent-specifications-authority", env("SAHARA_AGENT_SPECIFICATIONS_AUTHORITY", agentSpecificationsAuthorityLocal), "agent-specification authority: off, local, or memorylayer (no fallback or dual write)")
 	memoryRecall := flag.Bool("memory-recall", true, "inject MemoryLayer memories relevant to each message (requires --memorylayer)")
 	memoryRecallLimit := flag.Int("memory-recall-limit", 5, "how many recalled memories to inject")
 	goalMaxContinuations := flag.Uint("goal-max-continuations", 3, "maximum automatic follow-up turns per durable goal; 0 disables automatic continuation")
@@ -106,6 +107,11 @@ func main() {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(2)
 	}
+	normalizedAgentSpecificationsAuthority, err := normalizeAgentSpecificationsAuthority(*agentSpecificationsAuthority, *memorylayerURL)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(2)
+	}
 	if *subagentExecutorConcurrency <= 0 {
 		fmt.Fprintln(os.Stderr, "error: --subagent-executor-concurrency must be positive")
 		os.Exit(2)
@@ -155,13 +161,14 @@ func main() {
 		aetherUser:                  *aetherUser,
 		aetherWindow:                resolveWindowID(*aetherWindow),
 
-		memorylayerURL:       *memorylayerURL,
-		memorylayerKey:       os.Getenv("MEMORYLAYER_API_KEY"),
-		memorylayerWorkspace: effectiveWorkspace(*memorylayerWorkspace, workspaceResolution.WorkspaceID),
-		promptNotesAuthority: normalizedPromptNotesAuthority,
-		memoryRecall:         *memoryRecall,
-		memoryRecallLimit:    *memoryRecallLimit,
-		goalMaxContinuations: uint32(*goalMaxContinuations),
+		memorylayerURL:               *memorylayerURL,
+		memorylayerKey:               os.Getenv("MEMORYLAYER_API_KEY"),
+		memorylayerWorkspace:         effectiveWorkspace(*memorylayerWorkspace, workspaceResolution.WorkspaceID),
+		promptNotesAuthority:         normalizedPromptNotesAuthority,
+		agentSpecificationsAuthority: normalizedAgentSpecificationsAuthority,
+		memoryRecall:                 *memoryRecall,
+		memoryRecallLimit:            *memoryRecallLimit,
+		goalMaxContinuations:         uint32(*goalMaxContinuations),
 	}
 	if selectedMode == appModeServe || selectedMode == appModeStandalone {
 		cfg.streamFlush = aetherStreamFlush

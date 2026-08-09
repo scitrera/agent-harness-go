@@ -64,7 +64,7 @@ func RegisterSubagentWithConfig(reg *Registry, cfg SubagentConfig) error {
 		if args.Task == "" {
 			return errorResult(req, "task is required")
 		}
-		def, selected, err := selectAgentDefinition(ctx, cfg.Catalog, agentSelection{Agent: args.Agent, Type: args.Type})
+		def, selected, err := selectAgentDefinition(ctx, cfg.Catalog, req.Addr.WorkspaceID, agentSelection{Agent: args.Agent, Type: args.Type})
 		if err != nil {
 			return errorResult(req, err.Error())
 		}
@@ -232,7 +232,7 @@ func subagentPartName(selected bool, def subagent.Definition, agentArg, typeArg 
 	return "subagent"
 }
 
-func selectAgentDefinition(ctx context.Context, catalog subagent.Catalog, selection agentSelection) (subagent.Definition, bool, error) {
+func selectAgentDefinition(ctx context.Context, catalog subagent.Catalog, workspaceID string, selection agentSelection) (subagent.Definition, bool, error) {
 	if catalog == nil {
 		return subagent.Definition{}, false, nil
 	}
@@ -243,7 +243,13 @@ func selectAgentDefinition(ctx context.Context, catalog subagent.Catalog, select
 	if selected == "" {
 		return subagent.Definition{}, false, nil
 	}
-	def, err := catalog.Get(ctx, subagent.AgentType(selected))
+	var def subagent.Definition
+	var err error
+	if workspaceCatalog, ok := catalog.(subagent.WorkspaceCatalog); ok {
+		def, err = workspaceCatalog.GetWorkspace(ctx, workspaceID, subagent.AgentType(selected))
+	} else {
+		def, err = catalog.Get(ctx, subagent.AgentType(selected))
+	}
 	if err != nil {
 		return subagent.Definition{}, false, err
 	}

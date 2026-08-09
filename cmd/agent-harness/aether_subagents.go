@@ -23,18 +23,14 @@ func aetherSubagentTaskBackend(ch *aetherchan.Channel, cfg appConfig) (subagent.
 	return ch.TargetedSubagentTaskBackend(0, target)
 }
 
-func enableAetherSubagentExecutor(ch *aetherchan.Channel, runner *turn.Runner, cfg appConfig) error {
+func enableAetherSubagentExecutor(ch *aetherchan.Channel, runner *turn.Runner, catalog subagent.Catalog, cfg appConfig) error {
 	if !cfg.subagentExecutor {
 		return nil
 	}
 	if strings.TrimSpace(cfg.memorylayerURL) == "" {
 		return fmt.Errorf("external subagents require MemoryLayer shared history")
 	}
-	catalog, err := agentCatalogForWorkspace(cfg.workspaceRoot)
-	if err != nil {
-		return err
-	}
-	_, err = ch.EnableSubagentExecutor(aetherchan.SubagentExecutorConfig{
+	_, err := ch.EnableSubagentExecutor(aetherchan.SubagentExecutorConfig{
 		Runner: runner, Catalog: catalog, MaxConcurrency: cfg.subagentExecutorConcurrency,
 	})
 	return err

@@ -14,9 +14,12 @@ import (
 const shutdownTimeout = 5 * time.Second
 
 const (
-	promptNotesAuthorityOff         = "off"
-	promptNotesAuthorityLocal       = "local"
-	promptNotesAuthorityMemoryLayer = "memorylayer"
+	promptNotesAuthorityOff                 = "off"
+	promptNotesAuthorityLocal               = "local"
+	promptNotesAuthorityMemoryLayer         = "memorylayer"
+	agentSpecificationsAuthorityOff         = "off"
+	agentSpecificationsAuthorityLocal       = "local"
+	agentSpecificationsAuthorityMemoryLayer = "memorylayer"
 )
 
 // aetherStreamFlush coalesces streamed token deltas into at most one message per
@@ -71,6 +74,10 @@ type appConfig struct {
 	// separate from transcript placement so enabling MemoryLayer history does not
 	// silently activate remote prompt notes or introduce a hidden fallback.
 	promptNotesAuthority string
+	// agentSpecificationsAuthority explicitly selects the sole reusable
+	// subagent-definition source. local means the workspace's agents directory;
+	// memorylayer means typed, workspace-scoped agent specification resources.
+	agentSpecificationsAuthority string
 	// memoryRecall injects memories relevant to the user's message into the
 	// turn; memoryRecallLimit caps how many.
 	memoryRecall      bool
@@ -100,6 +107,24 @@ func normalizePromptNotesAuthority(value, memorylayerURL string) (string, error)
 		return value, nil
 	default:
 		return "", fmt.Errorf("invalid prompt-note authority %q (want off, local, or memorylayer)", value)
+	}
+}
+
+func normalizeAgentSpecificationsAuthority(value, memorylayerURL string) (string, error) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		value = agentSpecificationsAuthorityLocal
+	}
+	switch value {
+	case agentSpecificationsAuthorityOff, agentSpecificationsAuthorityLocal:
+		return value, nil
+	case agentSpecificationsAuthorityMemoryLayer:
+		if strings.TrimSpace(memorylayerURL) == "" {
+			return "", errors.New("agent-specification authority memorylayer requires --memorylayer")
+		}
+		return value, nil
+	default:
+		return "", fmt.Errorf("invalid agent-specification authority %q (want off, local, or memorylayer)", value)
 	}
 }
 

@@ -55,10 +55,6 @@ func buildRunner(cfg appConfig, st stores, pub channel.Publisher, approvals appr
 		return nil, nil, fmt.Errorf("register tools: %w", err)
 	}
 	subagentRef := &subagent.Ref{}
-	agentCatalog, err := agentCatalogForWorkspace(cfg.workspaceRoot)
-	if err != nil {
-		return nil, nil, err
-	}
 	// A publisher that can also enqueue inbound turns (web/tui channels) lets a
 	// detached background sub-agent push its completion back to the parent thread;
 	// cli (stdout-only) cannot, so background stays disabled there.
@@ -73,7 +69,7 @@ func buildRunner(cfg appConfig, st stores, pub channel.Publisher, approvals appr
 	if topic, ok := notifier.(interface{ Topic() string }); ok && topic.Topic() != "" {
 		turnOwnerIdentity = topic.Topic()
 	}
-	if err := registerReferenceSubagent(reg, subagentRef, agentCatalog, allowBackground); err != nil {
+	if err := registerReferenceSubagent(reg, subagentRef, st.agentCatalog, allowBackground); err != nil {
 		return nil, nil, fmt.Errorf("register subagent: %w", err)
 	}
 

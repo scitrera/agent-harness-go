@@ -31,6 +31,17 @@ type spySubagent struct {
 	resultSummary  string
 }
 
+type workspaceDefinitionProvider struct {
+	workspaces []string
+}
+
+func (p *workspaceDefinitionProvider) LoadWorkspace(_ context.Context, workspaceID string) ([]subagent.Definition, error) {
+	p.workspaces = append(p.workspaces, workspaceID)
+	return []subagent.Definition{{
+		Name: subagent.AgentName(workspaceID), Type: "reviewer", Description: "Review", Prompt: "instructions for " + workspaceID,
+	}}, nil
+}
+
 func (s *spySubagent) RunSubagent(_ context.Context, req subagent.Request) (subagent.Result, error) {
 	s.called = true
 	s.task = req.Task
@@ -256,6 +267,32 @@ func TestRegisterSubagentWithConfigSelectsFilesystemAgent(t *testing.T) {
 	}
 	if len(spy.allowedTools) != 1 || spy.allowedTools[0] != "read_file" {
 		t.Fatalf("allowed tools not passed through: %+v", spy.allowedTools)
+	}
+}
+
+func TestRegisterSubagentSelectsAgentFromRequestWorkspace(t *testing.T) {
+	provider := &workspaceDefinitionProvider{}
+	catalog, err := subagent.NewProviderCatalog(provider, "default", "backend-default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg := NewRegistry()
+	spy := &spySubagent{}
+	if err := RegisterSubagentWithConfig(reg, SubagentConfig{Runner: spy, MaxDepth: 2, Catalog: catalog}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := reg.Invoke(context.Background(), Request{
+		CallID: "c1", Name: "spawn_subagent", Addr: protocol.MessageAddress{WorkspaceID: "project-b"},
+		Arguments: json.RawMessage(`{"agent":"reviewer","task":"review"}`),
+	})
+	if err != nil || result.IsError {
+		t.Fatalf("invoke result=%s err=%v", result.Payload, err)
+	}
+	if len(provider.workspaces) != 1 || provider.workspaces[0] != "project-b" {
+		t.Fatalf("workspaces = %#v", provider.workspaces)
+	}
+	if spy.instructions != "instructions for project-b" {
+		t.Fatalf("instructions = %q", spy.instructions)
 	}
 }
 

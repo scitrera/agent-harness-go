@@ -100,7 +100,7 @@ func runAetherStandalone(cfg appConfig) error {
 	if err != nil {
 		return err
 	}
-	if err := enableAetherSubagentExecutor(worker, runner, cfg); err != nil {
+	if err := enableAetherSubagentExecutor(worker, runner, st.agentCatalog, cfg); err != nil {
 		return err
 	}
 	canceller := turncancel.New()

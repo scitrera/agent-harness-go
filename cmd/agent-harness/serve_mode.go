@@ -84,7 +84,7 @@ func runServe(cfg appConfig) error {
 	if err != nil {
 		return err
 	}
-	if err := enableAetherSubagentExecutor(ch, runner, cfg); err != nil {
+	if err := enableAetherSubagentExecutor(ch, runner, st.agentCatalog, cfg); err != nil {
 		return err
 	}
 	canceller := turncancel.New()

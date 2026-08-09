@@ -67,6 +67,7 @@ the browser, the terminal UI, or stdout in `--cli` mode).
 | `--subagent-executor-concurrency` | — | `4` | bound concurrent externally assigned subagents |
 | `--memorylayer` | `MEMORYLAYER_BASE_URL` | — | store threads + transcripts in MemoryLayer instead of on disk |
 | `--prompt-notes-authority` | `SAHARA_PROMPT_NOTES_AUTHORITY` | `local` | reusable prompt-note authority: `off`, `local`, or `memorylayer`; never dual-writes or falls back |
+| `--agent-specifications-authority` | `SAHARA_AGENT_SPECIFICATIONS_AUTHORITY` | `local` | reusable subagent-definition authority: `off`, local workspace files, or typed MemoryLayer resources |
 | `--memory-recall` | — | `true` | inject MemoryLayer memories relevant to each message |
 | `--goal-max-continuations` | — | `3` | maximum automatic follow-up turns for one durable goal; `0` disables follow-ups |
 
@@ -366,6 +367,42 @@ The resolved turn workspace is forwarded on every read, including additional
 visible workspaces, and an explicit `--memorylayer-workspace` remaps only the
 selected logical default. This resource protocol remains a MemoryLayer API and
 does not add a session-message type to the ecosystem messaging spec.
+
+### Reusable agent specifications
+
+Named `spawn_subagent(agent=...)` definitions use one explicit authority. The
+default `local` authority retains the independently useful `agents/` or
+`.agent-harness-agents/` JSON catalog below the selected project workspace.
+`off` leaves only generic unnamed subagents. Select `memorylayer` to resolve
+enabled, revisioned `/v1/agent-specifications` heads for the request's logical
+workspace:
+
+```bash
+agent-harness --memorylayer http://127.0.0.1:61001 \
+  --agent-specifications-authority memorylayer
+```
+
+The typed resource key is the immutable agent type. Revisions carry display
+name, purpose, instructions, invocation guidance, model/turn limits, tool
+policy, skills, MCP servers, permission mode, and background preference. The
+adapter follows opaque cursors within explicit bounds, forwards per-turn OBO
+authority, validates every enabled definition, sorts types deterministically,
+and never falls back to local files after remote selection. Multi-workspace
+turns resolve the catalog from the address on the actual `spawn_subagent` call.
+
+### Refinement audit records
+
+`pkg/refinement` defines evidence-backed plans and an append-only,
+workspace-aware `Store`. `refinement.NewFileStore` persists immutable JSONL
+records below the same encoded workspace state layout, with exact operation-ID
+replay, stable hashes/ETags, restart validation, and conflict detection. The
+MemoryLayer adapter uses the typed `/v1/refinement-records` API through the Go
+SDK. Proposal, decision, application, correction, and rollback are separate
+linked records; rollback never rewrites history.
+
+The store intentionally does not execute edits or represent a task's live
+lifecycle. Hosts keep approval, proposal application, recovery, and operational
+CAS with their execution authority (Aether in distributed deployments).
 
 With MemoryLayer wired, each turn also gets the memories it has distilled from
 past conversations that are relevant to the current message (`--memory-recall`,

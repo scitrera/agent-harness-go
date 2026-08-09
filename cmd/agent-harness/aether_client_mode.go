@@ -56,10 +56,6 @@ func runTUIClient(cfg appConfig) error {
 	if !st.remote {
 		client.SetHistoryProjection(st.history)
 	}
-	agentCatalog, err := agentCatalogForWorkspace(cfg.workspaceRoot)
-	if err != nil {
-		return err
-	}
 
 	if err := client.Start(ctx); err != nil {
 		return err
@@ -81,7 +77,7 @@ func runTUIClient(cfg appConfig) error {
 		ModelStatus:     remoteModelStatus{model: cfg.model},
 		TaskStore:       store.NewTaskStateStore(modeStateDir),
 		TeamStore:       team.NewFileGraphStore(filepath.Join(modeStateDir, "team", "graph.json")),
-		AgentCatalog:    agentCatalog,
+		AgentCatalog:    st.agentCatalog,
 		InitialThreadID: cfg.thread,
 		WorkspaceRoot:   cfg.workspaceRoot,
 	})

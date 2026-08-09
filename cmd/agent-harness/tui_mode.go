@@ -32,10 +32,6 @@ func runTUI(cfg appConfig) error {
 	if err != nil {
 		return err
 	}
-	agentCatalog, err := agentCatalogForWorkspace(cfg.workspaceRoot)
-	if err != nil {
-		return err
-	}
 	modeStateDir := workspaceStateDir(cfg)
 	taskStore := store.NewTaskStateStore(modeStateDir)
 	teamStore := team.NewFileGraphStore(filepath.Join(modeStateDir, "team", "graph.json"))
@@ -69,7 +65,7 @@ func runTUI(cfg appConfig) error {
 		Commands:        runner,
 		TaskStore:       taskStore,
 		TeamStore:       teamStore,
-		AgentCatalog:    agentCatalog,
+		AgentCatalog:    st.agentCatalog,
 		DirectoryAccess: workspace,
 		InitialThreadID: cfg.thread,
 		WorkspaceRoot:   cfg.workspaceRoot,

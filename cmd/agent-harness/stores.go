@@ -41,6 +41,10 @@ type stores struct {
 	// promptNotes is the one explicitly selected authoritative source. nil means
 	// disabled; no runtime path combines or falls back between providers.
 	promptNotes promptnotes.WorkspaceProvider
+	// agentCatalog is the one explicitly selected reusable subagent-definition
+	// authority. A provider-backed catalog resolves the turn's logical workspace
+	// at invocation time; nil preserves generic unnamed subagents.
+	agentCatalog subagent.Catalog
 	// Lifecycle stores use local files by default. Aether worker modes replace
 	// them with CAS-backed implementations over the same interfaces.
 	subagents subagent.Registry
@@ -240,6 +244,10 @@ func openStores(ctx context.Context, cfg appConfig) (stores, error) {
 	if err != nil {
 		return stores{}, err
 	}
+	agentCatalog, err := openAgentSpecificationCatalog(cfg)
+	if err != nil {
+		return stores{}, err
+	}
 	subagents, err := subagent.NewFileRegistry(cfg.stateDir)
 	if err != nil {
 		return stores{}, err
@@ -266,6 +274,7 @@ func openStores(ctx context.Context, cfg appConfig) (stores, error) {
 			threads:       index,
 			files:         files,
 			promptNotes:   promptNoteProvider,
+			agentCatalog:  agentCatalog,
 			subagents:     subagents,
 			goals:         goals,
 			continuations: continuations,
@@ -309,12 +318,36 @@ func openStores(ctx context.Context, cfg appConfig) (stores, error) {
 		memory:        bindMemory(recaller, cfg.workspaceID, cfg.memorylayerWorkspace),
 		catalogs:      catalog.BindWorkspaceProvider(catalogProvider, cfg.workspaceID, cfg.memorylayerWorkspace),
 		promptNotes:   promptNoteProvider,
+		agentCatalog:  agentCatalog,
 		subagents:     subagents,
 		goals:         goals,
 		continuations: continuations,
 		turns:         turns,
 		remote:        true,
 	}, nil
+}
+
+func openAgentSpecificationCatalog(cfg appConfig) (subagent.Catalog, error) {
+	authority, err := normalizeAgentSpecificationsAuthority(cfg.agentSpecificationsAuthority, cfg.memorylayerURL)
+	if err != nil {
+		return nil, err
+	}
+	switch authority {
+	case agentSpecificationsAuthorityOff:
+		return nil, nil
+	case agentSpecificationsAuthorityLocal:
+		return agentCatalogForWorkspace(cfg.workspaceRoot)
+	case agentSpecificationsAuthorityMemoryLayer:
+		provider, err := memorylayer.NewAgentSpecificationProvider(memorylayer.Config{
+			BaseURL: cfg.memorylayerURL, APIKey: cfg.memorylayerKey, Workspace: cfg.memorylayerWorkspace,
+		})
+		if err != nil {
+			return nil, err
+		}
+		return subagent.NewProviderCatalog(provider, cfg.workspaceID, cfg.memorylayerWorkspace)
+	default:
+		panic("unreachable agent-specification authority")
+	}
 }
 
 func openPromptNoteProvider(cfg appConfig) (promptnotes.WorkspaceProvider, error) {

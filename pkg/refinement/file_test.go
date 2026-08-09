@@ -1,0 +1,147 @@
+package refinement
+
+import (
+	"context"
+	"errors"
+	"sync"
+	"testing"
+	"time"
+)
+
+func proposal(key string) AppendRequest {
+	return AppendRequest{
+		Key: key,
+		Plan: Plan{
+			RefinementID: "refine-1", Trigger: "user", Scope: ScopeWorkspace,
+			Summary: "Add reviewer", Rationale: "Repeated unsupported claims", ExpectedOutcome: "Claims cite evidence",
+			Evidence: []Evidence{{Kind: EvidenceUserInstruction, Reference: "message:m1", Description: "User requested evidence"}},
+			Edits:    []Edit{{Action: ActionCreate, ResourceKind: ResourceAgentSpecification, ResourceKey: "review/evidence", Reason: "Reusable review"}},
+		},
+		Phase: PhaseProposal, Outcome: OutcomeProposed,
+		TaskRef: &ExternalReference{System: "aether", ID: "task-1"},
+	}
+}
+
+func TestFileStoreAppendReplayRestartAndWorkspaceIsolation(t *testing.T) {
+	now := time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)
+	store, err := NewFileStore(t.TempDir(), func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := proposal("refinements/r1/proposal")
+	created, err := store.Append(context.Background(), "project-a", "op-1", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.Replayed || created.Record.Revision != 1 || created.Record.ETag == "" || created.Record.CreatedAt != now.Format(time.RFC3339Nano) {
+		t.Fatalf("created = %#v", created)
+	}
+	replay, err := store.Append(context.Background(), "project-a", "op-1", request)
+	if err != nil || !replay.Replayed || replay.Record.ID != created.Record.ID {
+		t.Fatalf("replay = %#v, %v", replay, err)
+	}
+	other, err := store.List(context.Background(), "project-b")
+	if err != nil || len(other) != 0 {
+		t.Fatalf("other workspace = %#v, %v", other, err)
+	}
+	restarted, _ := NewFileStore(store.stateDir, nil)
+	loaded, err := restarted.Get(context.Background(), "project-a", created.Record.ID)
+	if err != nil || loaded.Key != request.Key || loaded.TaskRef == nil || loaded.TaskRef.ID != "task-1" {
+		t.Fatalf("loaded = %#v, %v", loaded, err)
+	}
+}
+
+func TestFileStoreRejectsConflictingOperationsAndKeys(t *testing.T) {
+	store, _ := NewFileStore(t.TempDir(), nil)
+	request := proposal("refinements/r1/proposal")
+	if _, err := store.Append(context.Background(), "project", "op-1", request); err != nil {
+		t.Fatal(err)
+	}
+	changed := request
+	changed.Summary = "Changed"
+	if _, err := store.Append(context.Background(), "project", "op-1", changed); !errors.Is(err, ErrConflict) {
+		t.Fatalf("operation conflict = %v", err)
+	}
+	if _, err := store.Append(context.Background(), "project", "op-2", request); !errors.Is(err, ErrConflict) {
+		t.Fatalf("key conflict = %v", err)
+	}
+}
+
+func TestFileStoreListsNewestFirst(t *testing.T) {
+	now := time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)
+	store, _ := NewFileStore(t.TempDir(), func() time.Time {
+		now = now.Add(time.Second)
+		return now
+	})
+	first := proposal("refinements/r1/proposal")
+	first.RefinementID = "r1"
+	second := proposal("refinements/r2/proposal")
+	second.RefinementID = "r2"
+	if _, err := store.Append(context.Background(), "project", "op-1", first); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(context.Background(), "project", "op-2", second); err != nil {
+		t.Fatal(err)
+	}
+	records, err := store.List(context.Background(), "project")
+	if err != nil || len(records) != 2 {
+		t.Fatalf("records = %#v, %v", records, err)
+	}
+	if records[0].RefinementID != "r2" || records[1].RefinementID != "r1" {
+		t.Fatalf("record order = %#v", records)
+	}
+}
+
+func TestFileStoreConcurrentReplayAppendsOnce(t *testing.T) {
+	store, _ := NewFileStore(t.TempDir(), nil)
+	request := proposal("refinements/r1/proposal")
+	results := make(chan AppendResult, 8)
+	errorsCh := make(chan error, 8)
+	var wait sync.WaitGroup
+	for range 8 {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			result, err := store.Append(context.Background(), "project", "op-1", request)
+			results <- result
+			errorsCh <- err
+		}()
+	}
+	wait.Wait()
+	close(results)
+	close(errorsCh)
+	for err := range errorsCh {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	ids := map[string]struct{}{}
+	for result := range results {
+		ids[result.Record.ID] = struct{}{}
+	}
+	if len(ids) != 1 {
+		t.Fatalf("record ids = %#v", ids)
+	}
+	records, err := store.List(context.Background(), "project")
+	if err != nil || len(records) != 1 {
+		t.Fatalf("records = %#v, %v", records, err)
+	}
+}
+
+func TestAppendRequestValidatesPhaseOutcomeEvidenceAndRollback(t *testing.T) {
+	request := proposal("refinements/r1/proposal")
+	request.Outcome = OutcomeApplied
+	if err := request.Validate(); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("phase outcome error = %v", err)
+	}
+	request = proposal("refinements/r1/proposal")
+	request.Evidence = nil
+	if err := request.Validate(); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("evidence error = %v", err)
+	}
+	request = proposal("refinements/r1/rollback")
+	request.Phase, request.Outcome = PhaseRollback, OutcomeRolledBack
+	if err := request.Validate(); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("rollback link error = %v", err)
+	}
+}

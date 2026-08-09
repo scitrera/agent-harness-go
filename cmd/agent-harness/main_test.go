@@ -114,6 +114,53 @@ func TestNormalizePromptNotesAuthorityIsExplicitAndRequiresMemoryLayer(t *testin
 	}
 }
 
+func TestNormalizeAgentSpecificationsAuthorityIsExplicitAndRequiresMemoryLayer(t *testing.T) {
+	for _, test := range []struct {
+		value, memoryURL, want, wantErr string
+	}{
+		{value: "", want: agentSpecificationsAuthorityLocal},
+		{value: " OFF ", want: agentSpecificationsAuthorityOff},
+		{value: "LOCAL", want: agentSpecificationsAuthorityLocal},
+		{value: "memorylayer", memoryURL: "http://memorylayer", want: agentSpecificationsAuthorityMemoryLayer},
+		{value: "memorylayer", wantErr: "requires --memorylayer"},
+		{value: "auto", wantErr: "invalid agent-specification authority"},
+	} {
+		got, err := normalizeAgentSpecificationsAuthority(test.value, test.memoryURL)
+		if test.wantErr == "" && (err != nil || got != test.want) {
+			t.Fatalf("normalize(%q) = %q, %v; want %q", test.value, got, err, test.want)
+		}
+		if test.wantErr != "" && (err == nil || !strings.Contains(err.Error(), test.wantErr)) {
+			t.Fatalf("normalize(%q) error = %v, want %q", test.value, err, test.wantErr)
+		}
+	}
+}
+
+func TestOpenAgentSpecificationCatalogSelectsOneAuthority(t *testing.T) {
+	workspace := t.TempDir()
+	local, err := openAgentSpecificationCatalog(appConfig{
+		workspaceRoot: workspace, agentSpecificationsAuthority: agentSpecificationsAuthorityLocal,
+	})
+	if err != nil || local != nil {
+		t.Fatalf("empty local catalog = %T, %v", local, err)
+	}
+	off, err := openAgentSpecificationCatalog(appConfig{agentSpecificationsAuthority: agentSpecificationsAuthorityOff})
+	if err != nil || off != nil {
+		t.Fatalf("off catalog = %T, %v", off, err)
+	}
+	remote, err := openAgentSpecificationCatalog(appConfig{
+		agentSpecificationsAuthority: agentSpecificationsAuthorityMemoryLayer,
+		memorylayerURL:               "http://memorylayer",
+		workspaceID:                  "project",
+		memorylayerWorkspace:         "ml-project",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := remote.(*subagent.ProviderCatalog); !ok {
+		t.Fatalf("remote catalog = %T", remote)
+	}
+}
+
 func (r *recordingSubagentRunner) RunSubagent(_ context.Context, req subagent.Request) (subagent.Result, error) {
 	r.called = true
 	r.agentType = req.AgentType
