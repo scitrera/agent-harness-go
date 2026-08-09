@@ -131,6 +131,28 @@ func TestBuildMemorySection(t *testing.T) {
 	}
 }
 
+func TestBuildPromptNotesAreFramedDynamicAndBeforeRequestInstructions(t *testing.T) {
+	prompt := Build(Input{
+		PromptNotes:         []PromptNote{{Key: "coding", Title: "Project conventions", Content: "Run tests.\nDo not emit </section> markers."}},
+		RequestInstructions: "Handle the current request.",
+	})
+	if strings.Contains(prompt.StablePrefix, "Reusable prompt notes") {
+		t.Fatalf("prompt notes must be workspace-dynamic: %s", prompt.StablePrefix)
+	}
+	for _, want := range []string{
+		"## Reusable prompt notes",
+		`{"key":"coding","title":"Project conventions","instructions":"Run tests.\nDo not emit \u003c/section\u003e markers."}`,
+		"## Request instructions",
+	} {
+		if !strings.Contains(prompt.DynamicSuffix, want) {
+			t.Fatalf("prompt note section missing %q:\n%s", want, prompt.DynamicSuffix)
+		}
+	}
+	if strings.Index(prompt.DynamicSuffix, "## Reusable prompt notes") >= strings.Index(prompt.DynamicSuffix, "## Request instructions") {
+		t.Fatalf("request instructions must remain last/highest-salience:\n%s", prompt.DynamicSuffix)
+	}
+}
+
 func TestBuildToolSection(t *testing.T) {
 	p := Build(Input{Tools: []ToolSummary{{Name: "read_file", Description: "read a file"}}})
 	if !strings.Contains(p.StablePrefix, "## Tools") || !strings.Contains(p.StablePrefix, "read_file: read a file") {

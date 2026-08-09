@@ -12,6 +12,7 @@ import (
 	"github.com/scitrera/agent-harness-go/pkg/bootstrap"
 	"github.com/scitrera/agent-harness-go/pkg/channel"
 	"github.com/scitrera/agent-harness-go/pkg/contextpack"
+	"github.com/scitrera/agent-harness-go/pkg/promptnotes"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 	"github.com/scitrera/agent-harness-go/pkg/provider"
 	"github.com/scitrera/agent-harness-go/pkg/tools"
@@ -79,6 +80,19 @@ func (l fakeLoader) LoadBootstrap(ctx context.Context) ([]bootstrap.File, error)
 type fakeProvider struct {
 	request provider.ChatRequest
 	err     error
+}
+
+type workspacePromptNoteProvider struct {
+	workspaceID string
+	calls       int
+	authority   tools.MemoryAuthority
+}
+
+func (p *workspacePromptNoteProvider) LoadWorkspace(ctx context.Context, workspaceID string) ([]promptnotes.Note, error) {
+	p.workspaceID = workspaceID
+	p.calls++
+	p.authority, _ = tools.MemoryAuthorityFrom(ctx)
+	return []promptnotes.Note{{Key: "workspace", Content: "workspace note", Enabled: true, SchemaVersion: 1}}, nil
 }
 
 func (p *fakeProvider) Chat(ctx context.Context, req provider.ChatRequest) (provider.ChatResponse, error) {
@@ -190,6 +204,41 @@ func Test_Runner_Run_appliesDefaultWorkspaceToWorkspaceLessTurn(t *testing.T) {
 	}
 	if assistant.Addr.WorkspaceID != "project-a" {
 		t.Fatalf("assistant workspace = %q", assistant.Addr.WorkspaceID)
+	}
+}
+
+func Test_Runner_RunCarriesResolvedWorkspaceIntoPromptNoteAuthority(t *testing.T) {
+	notes := &workspacePromptNoteProvider{}
+	model := &fakeProvider{}
+	runner, err := NewRunner(Config{
+		Store:              &fakeStore{},
+		Loader:             fakeLoader{},
+		Provider:           model,
+		Publisher:          &fakePublisher{},
+		Assembler:          contextpack.NewAssembler(contextpack.Config{PromptNotes: notes}),
+		Model:              "test-model",
+		DefaultWorkspaceID: "project-default",
+		Authority: func(protocol.MessageAddress, protocol.ChatMessage) tools.MemoryAuthority {
+			return tools.MemoryAuthority{GrantID: "grant-1", SubjectType: "user", SubjectID: "alice"}
+		},
+	})
+	if err != nil {
+		t.Fatalf("new runner: %v", err)
+	}
+	if _, err := runner.Run(context.Background(), protocol.MessageAddress{ThreadID: "thread"}, userMsg(t, "hello")); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if notes.workspaceID != "project-default" {
+		t.Fatalf("prompt-note workspace = %q", notes.workspaceID)
+	}
+	if notes.calls != 1 {
+		t.Fatalf("prompt-note authority calls = %d, want one turn snapshot", notes.calls)
+	}
+	if notes.authority.GrantID != "grant-1" || notes.authority.SubjectID != "alice" {
+		t.Fatalf("prompt-note authority context = %#v", notes.authority)
+	}
+	if !requestTextContains(model.request, "workspace note") {
+		t.Fatalf("model request does not contain prompt note: %#v", model.request)
 	}
 }
 

@@ -169,6 +169,7 @@ func buildRunner(cfg appConfig, st stores, pub channel.Publisher, approvals appr
 			SkillLoadTool:      true,
 			SkillBodies:        skillReg.Body,
 			SkillLoadWarnings:  skillWarnings,
+			PromptNotes:        st.promptNotes,
 			WorkspaceDir:       cfg.workspaceRoot,
 			Model:              cfg.model,
 			Now:                time.Now,

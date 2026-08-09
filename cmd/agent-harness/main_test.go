@@ -93,6 +93,27 @@ func TestValidateExternalSubagentConfigRequiresWorkerAndSharedHistory(t *testing
 	}
 }
 
+func TestNormalizePromptNotesAuthorityIsExplicitAndRequiresMemoryLayer(t *testing.T) {
+	for _, test := range []struct {
+		value, memoryURL, want, wantErr string
+	}{
+		{value: "", want: promptNotesAuthorityLocal},
+		{value: " OFF ", want: promptNotesAuthorityOff},
+		{value: "LOCAL", want: promptNotesAuthorityLocal},
+		{value: "memorylayer", memoryURL: "http://memorylayer", want: promptNotesAuthorityMemoryLayer},
+		{value: "memorylayer", wantErr: "requires --memorylayer"},
+		{value: "auto", wantErr: "invalid prompt-note authority"},
+	} {
+		got, err := normalizePromptNotesAuthority(test.value, test.memoryURL)
+		if test.wantErr == "" && (err != nil || got != test.want) {
+			t.Fatalf("normalize(%q) = %q, %v; want %q", test.value, got, err, test.want)
+		}
+		if test.wantErr != "" && (err == nil || !strings.Contains(err.Error(), test.wantErr)) {
+			t.Fatalf("normalize(%q) error = %v, want %q", test.value, err, test.wantErr)
+		}
+	}
+}
+
 func (r *recordingSubagentRunner) RunSubagent(_ context.Context, req subagent.Request) (subagent.Result, error) {
 	r.called = true
 	r.agentType = req.AgentType

@@ -8,6 +8,7 @@ import (
 
 	"github.com/scitrera/agent-harness-go/pkg/bootstrap"
 	"github.com/scitrera/agent-harness-go/pkg/compaction"
+	"github.com/scitrera/agent-harness-go/pkg/promptnotes"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 	"github.com/scitrera/agent-harness-go/pkg/sysprompt"
 )
@@ -46,6 +47,11 @@ type Config struct {
 	// attachments and returns their summaries for the "## Attached documents/files"
 	// prompt sections. nil -> no attachment section (today's behavior).
 	AttachmentPreparer AttachmentPreparer
+
+	// PromptNotes is the selected authoritative source of reusable workspace
+	// instructions. nil disables the section. Provider and validation failures
+	// fail prompt assembly rather than silently dropping or cross-falling back.
+	PromptNotes promptnotes.WorkspaceProvider
 
 	// SkillRelevance, when set, ranks/selects the skills listed each turn and may
 	// nominate skills to auto-realize (inject their body). nil -> the full Skills
@@ -98,6 +104,66 @@ const defaultMaxAutoRealizeBytes = 32 << 10
 
 type Assembler struct {
 	cfg Config
+}
+
+type workspaceIDKey struct{}
+type preparedPromptNotesKey struct{}
+
+type preparedPromptNotes struct {
+	notes []sysprompt.PromptNote
+}
+
+// WithWorkspaceID carries the resolved logical workspace into prompt assembly.
+// The turn runner installs it after applying its configured default.
+func WithWorkspaceID(ctx context.Context, workspaceID string) context.Context {
+	return context.WithValue(ctx, workspaceIDKey{}, workspaceID)
+}
+
+// WorkspaceIDFrom returns the logical workspace selected for this turn.
+func WorkspaceIDFrom(ctx context.Context) (string, bool) {
+	workspaceID, ok := ctx.Value(workspaceIDKey{}).(string)
+	return workspaceID, ok
+}
+
+// Prepare resolves turn-scoped authoritative inputs once. The runner calls this
+// optional seam after it installs workspace and OBO authority, so every model
+// call and retry in one turn sees the same prompt-note revision snapshot.
+func (a Assembler) Prepare(ctx context.Context) (context.Context, error) {
+	if a.cfg.PromptNotes == nil {
+		return ctx, nil
+	}
+	notes, err := a.loadPromptNotes(ctx)
+	if err != nil {
+		return ctx, err
+	}
+	return context.WithValue(ctx, preparedPromptNotesKey{}, preparedPromptNotes{notes: notes}), nil
+}
+
+func (a Assembler) loadPromptNotes(ctx context.Context) ([]sysprompt.PromptNote, error) {
+	workspaceID, _ := WorkspaceIDFrom(ctx)
+	loaded, err := a.cfg.PromptNotes.LoadWorkspace(ctx, workspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("load prompt notes for workspace %q: %w", workspaceID, err)
+	}
+	enabled, err := promptnotes.Enabled(loaded)
+	if err != nil {
+		return nil, fmt.Errorf("validate prompt notes for workspace %q: %w", workspaceID, err)
+	}
+	out := make([]sysprompt.PromptNote, 0, len(enabled))
+	for _, note := range enabled {
+		out = append(out, sysprompt.PromptNote{Key: note.Key, Title: note.Title, Content: note.Content})
+	}
+	return out, nil
+}
+
+func (a Assembler) promptNotes(ctx context.Context) ([]sysprompt.PromptNote, error) {
+	if prepared, ok := ctx.Value(preparedPromptNotesKey{}).(preparedPromptNotes); ok {
+		return prepared.notes, nil
+	}
+	if a.cfg.PromptNotes == nil {
+		return nil, nil
+	}
+	return a.loadPromptNotes(ctx)
 }
 
 func NewAssembler(cfg Config) Assembler {
@@ -298,6 +364,10 @@ func (a Assembler) Build(ctx context.Context, bootstrap []bootstrap.File, histor
 			attachments = atts
 		}
 	}
+	promptNotes, err := a.promptNotes(ctx)
+	if err != nil {
+		return nil, err
+	}
 	sysMsg, err := sysprompt.Build(sysprompt.Input{
 		Base:                a.cfg.Base,
 		Bootstrap:           bootstrap,
@@ -313,6 +383,7 @@ func (a Assembler) Build(ctx context.Context, bootstrap []bootstrap.File, histor
 		Todos:               wsTodos,
 		Subagents:           wsSubagents,
 		Attachments:         attachments,
+		PromptNotes:         promptNotes,
 		RequestInstructions: systemPromptExtraFrom(ctx),
 		MemoryTools:         a.cfg.MemoryTools,
 		SubagentsEnabled:    a.cfg.Subagents,

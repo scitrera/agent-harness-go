@@ -66,6 +66,7 @@ the browser, the terminal UI, or stdout in `--cli` mode).
 | `--subagent-executor` | — | `false` | consume targeted agent-harness subagent tasks on this worker; requires MemoryLayer |
 | `--subagent-executor-concurrency` | — | `4` | bound concurrent externally assigned subagents |
 | `--memorylayer` | `MEMORYLAYER_BASE_URL` | — | store threads + transcripts in MemoryLayer instead of on disk |
+| `--prompt-notes-authority` | `SAHARA_PROMPT_NOTES_AUTHORITY` | `local` | reusable prompt-note authority: `off`, `local`, or `memorylayer`; never dual-writes or falls back |
 | `--memory-recall` | — | `true` | inject MemoryLayer memories relevant to each message |
 | `--goal-max-continuations` | — | `3` | maximum automatic follow-up turns for one durable goal; `0` disables follow-ups |
 
@@ -320,6 +321,51 @@ MemoryLayer MCP entries are executable host configuration: anyone allowed to
 change an enabled stdio server can choose a command and environment inherited by
 the harness process. Give catalog-management authority only to principals that
 are already trusted to configure code execution on that host.
+
+### Reusable prompt notes
+
+Prompt notes are workspace-scoped supplemental instructions resolved once per
+turn and reused by every model call/retry in that turn. They are ordered by
+stable `key`, bounded to 128 enabled notes and
+64 KiB total content, and rendered before the current request's instructions.
+An invalid or unavailable selected authority fails prompt assembly; Sahara does
+not silently omit authoritative guidance or read a different backend.
+
+The default `local` authority reads `prompt-notes.json` below the workspace's
+harness state directory. In legacy single-workspace mode that is
+`<state-dir>/prompt-notes.json`; scoped workspaces use the same encoded
+`<state-dir>/workspaces/<workspace>/` layout as other local state. A missing file
+means no notes. The file is intentionally simple and can be managed directly:
+
+```json
+{
+  "schema_version": 1,
+  "workspace_id": "project-a",
+  "notes": [
+    {
+      "key": "project-conventions",
+      "title": "Project conventions",
+      "content": "Run the focused tests after changing the parser.",
+      "enabled": true
+    }
+  ]
+}
+```
+
+Select `memorylayer` to read current heads from MemoryLayer's typed,
+revisioned `/v1/prompt-notes` API through its Go SDK and opaque cursors:
+
+```bash
+agent-harness --memorylayer http://127.0.0.1:61001 \
+  --prompt-notes-authority memorylayer \
+  --base-url "$SAHARA_LLM_BASE_URL"
+```
+
+`memorylayer` requires `--memorylayer`; `off` disables prompt notes explicitly.
+The resolved turn workspace is forwarded on every read, including additional
+visible workspaces, and an explicit `--memorylayer-workspace` remaps only the
+selected logical default. This resource protocol remains a MemoryLayer API and
+does not add a session-message type to the ecosystem messaging spec.
 
 With MemoryLayer wired, each turn also gets the memories it has distilled from
 past conversations that are relevant to the current message (`--memory-recall`,

@@ -10,6 +10,7 @@ import (
 	"github.com/scitrera/agent-harness-go/pkg/goal"
 	"github.com/scitrera/agent-harness-go/pkg/harness"
 	"github.com/scitrera/agent-harness-go/pkg/memorylayer"
+	"github.com/scitrera/agent-harness-go/pkg/promptnotes"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 	"github.com/scitrera/agent-harness-go/pkg/store"
 	"github.com/scitrera/agent-harness-go/pkg/subagent"
@@ -37,6 +38,9 @@ type stores struct {
 	// combines it with filesystem skills and caches compiled entries per logical
 	// workspace; nil preserves filesystem-only behavior.
 	catalogs catalog.WorkspaceProvider
+	// promptNotes is the one explicitly selected authoritative source. nil means
+	// disabled; no runtime path combines or falls back between providers.
+	promptNotes promptnotes.WorkspaceProvider
 	// Lifecycle stores use local files by default. Aether worker modes replace
 	// them with CAS-backed implementations over the same interfaces.
 	subagents subagent.Registry
@@ -232,6 +236,10 @@ func historyLabel(cfg appConfig) string {
 // when configured, otherwise local files.
 func openStores(ctx context.Context, cfg appConfig) (stores, error) {
 	files := store.NewFileStore(cfg.workspaceRoot, cfg.stateDir)
+	promptNoteProvider, err := openPromptNoteProvider(cfg)
+	if err != nil {
+		return stores{}, err
+	}
 	subagents, err := subagent.NewFileRegistry(cfg.stateDir)
 	if err != nil {
 		return stores{}, err
@@ -257,6 +265,7 @@ func openStores(ctx context.Context, cfg appConfig) (stores, error) {
 			history:       bindHistory(files, cfg.workspaceID),
 			threads:       index,
 			files:         files,
+			promptNotes:   promptNoteProvider,
 			subagents:     subagents,
 			goals:         goals,
 			continuations: continuations,
@@ -299,10 +308,34 @@ func openStores(ctx context.Context, cfg appConfig) (stores, error) {
 		files:         files,
 		memory:        bindMemory(recaller, cfg.workspaceID, cfg.memorylayerWorkspace),
 		catalogs:      catalog.BindWorkspaceProvider(catalogProvider, cfg.workspaceID, cfg.memorylayerWorkspace),
+		promptNotes:   promptNoteProvider,
 		subagents:     subagents,
 		goals:         goals,
 		continuations: continuations,
 		turns:         turns,
 		remote:        true,
 	}, nil
+}
+
+func openPromptNoteProvider(cfg appConfig) (promptnotes.WorkspaceProvider, error) {
+	authority, err := normalizePromptNotesAuthority(cfg.promptNotesAuthority, cfg.memorylayerURL)
+	if err != nil {
+		return nil, err
+	}
+	switch authority {
+	case promptNotesAuthorityOff:
+		return nil, nil
+	case promptNotesAuthorityLocal:
+		return promptnotes.NewFileProvider(cfg.stateDir)
+	case promptNotesAuthorityMemoryLayer:
+		provider, err := memorylayer.NewPromptNoteProvider(memorylayer.Config{
+			BaseURL: cfg.memorylayerURL, APIKey: cfg.memorylayerKey, Workspace: cfg.memorylayerWorkspace,
+		})
+		if err != nil {
+			return nil, err
+		}
+		return promptnotes.BindWorkspaceProvider(provider, cfg.workspaceID, cfg.memorylayerWorkspace), nil
+	default:
+		panic("unreachable prompt-note authority")
+	}
 }

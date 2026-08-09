@@ -101,6 +101,13 @@ type ContextManager interface {
 	Build(ctx context.Context, bootstrap []bootstrap.File, history []protocol.ChatMessage) ([]protocol.ChatMessage, error)
 }
 
+// ContextPreparer is an optional turn-scoped companion to ContextManager. It
+// resolves authoritative prompt inputs once after workspace and OBO authority
+// are installed, keeping all model calls/retries within a turn deterministic.
+type ContextPreparer interface {
+	Prepare(ctx context.Context) (context.Context, error)
+}
+
 // EventPublisher is the egress half of the transport seam (channel.Publisher).
 type EventPublisher = channel.Publisher
 
@@ -802,6 +809,10 @@ func (r *Runner) Run(ctx context.Context, addr protocol.MessageAddress, user pro
 	if addr.WorkspaceID == "" {
 		addr.WorkspaceID = r.defaultWorkspaceID
 	}
+	// Context assembly needs the resolved logical workspace for workspace-scoped
+	// authoritative inputs such as prompt notes. Carry it independently of
+	// provider attribution so every ContextManager build/retry sees the same ID.
+	ctx = contextpack.WithWorkspaceID(ctx, addr.WorkspaceID)
 	// Optional ctx decorator (e.g. the ACP channel attaches per-session fs/terminal
 	// client delegates keyed by addr.ThreadID). Applied once at entry so it covers
 	// the whole turn; nil → ctx untouched (behavior unchanged).
@@ -923,6 +934,12 @@ func (r *Runner) Run(ctx context.Context, addr protocol.MessageAddress, user pro
 	// act under the user's grant. Tools also receive it via req.Authority on the
 	// session; this covers the ctx path.
 	ctx = tools.WithMemoryAuthority(ctx, auth)
+	if preparer, ok := r.ctxMgr.(ContextPreparer); ok {
+		ctx, err = preparer.Prepare(ctx)
+		if err != nil {
+			return protocol.ChatMessage{}, fmt.Errorf("prepare context: %w", err)
+		}
+	}
 	var execution *turnExecution
 	if recovering {
 		execution = &turnExecution{store: r.turnJournal, record: recoveryRecord}

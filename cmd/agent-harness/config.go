@@ -13,6 +13,12 @@ import (
 
 const shutdownTimeout = 5 * time.Second
 
+const (
+	promptNotesAuthorityOff         = "off"
+	promptNotesAuthorityLocal       = "local"
+	promptNotesAuthorityMemoryLayer = "memorylayer"
+)
+
 // aetherStreamFlush coalesces streamed token deltas into at most one message per
 // interval on the Aether transport. Every delta published as its own message
 // would burn the gateway's per-identity message-rate quota on a fast reply (and
@@ -61,6 +67,10 @@ type appConfig struct {
 	memorylayerURL       string
 	memorylayerKey       string
 	memorylayerWorkspace string
+	// promptNotesAuthority explicitly selects the sole prompt-note source. It is
+	// separate from transcript placement so enabling MemoryLayer history does not
+	// silently activate remote prompt notes or introduce a hidden fallback.
+	promptNotesAuthority string
 	// memoryRecall injects memories relevant to the user's message into the
 	// turn; memoryRecallLimit caps how many.
 	memoryRecall      bool
@@ -73,6 +83,24 @@ type appConfig struct {
 	// streamFlush is the token-delta coalescing interval handed to the turn
 	// runner; 0 streams every delta.
 	streamFlush time.Duration
+}
+
+func normalizePromptNotesAuthority(value, memorylayerURL string) (string, error) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		value = promptNotesAuthorityLocal
+	}
+	switch value {
+	case promptNotesAuthorityOff, promptNotesAuthorityLocal:
+		return value, nil
+	case promptNotesAuthorityMemoryLayer:
+		if strings.TrimSpace(memorylayerURL) == "" {
+			return "", errors.New("prompt-note authority memorylayer requires --memorylayer")
+		}
+		return value, nil
+	default:
+		return "", fmt.Errorf("invalid prompt-note authority %q (want off, local, or memorylayer)", value)
+	}
 }
 
 func validateExternalSubagentConfig(mode appMode, target string, executor bool, memorylayerURL string) error {

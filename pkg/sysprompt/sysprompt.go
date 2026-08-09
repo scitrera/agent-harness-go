@@ -117,6 +117,14 @@ type AttachmentSummary struct {
 	Error string
 }
 
+// PromptNote is an enabled, workspace-scoped reusable instruction. Key is the
+// stable ordering/identity handle; Title is optional display context.
+type PromptNote struct {
+	Key     string `json:"key"`
+	Title   string `json:"title,omitempty"`
+	Content string `json:"instructions"`
+}
+
 // Input is the data composed into the system prompt.
 type Input struct {
 	Base      string // base instructions; DefaultBase if empty
@@ -152,6 +160,10 @@ type Input struct {
 	// + on-disk path) so the model can open them with its file tools. Images are
 	// delivered inline (not listed here). Per-turn (dynamic); empty -> omitted.
 	Attachments []AttachmentSummary
+	// PromptNotes are authoritative reusable workspace instructions. They are
+	// dynamic because the resolved workspace and current revisions can differ per
+	// turn. The assembler validates and orders them before Build.
+	PromptNotes []PromptNote
 	// RequestInstructions are per-turn caller-supplied instructions (e.g. an
 	// agent.synthesize one-shot's options.system/instructions), rendered as the
 	// last, highest-salience suffix section. Authenticated request config; empty ->
@@ -260,10 +272,32 @@ func Build(in Input) Prompt {
 			recentFilesSection(in.RecentFiles),
 			todosSection(in.Todos),
 			subagentsSection(in.Subagents),
+			promptNotesSection(in.PromptNotes),
 			attachmentsSection(in.Attachments),
 			requestInstructionsSection(in.RequestInstructions),
 		),
 	}
+}
+
+// promptNotesSection renders each note as one JSON object. JSON string escaping
+// keeps note content inside its record even when it contains Markdown, quotes,
+// newlines, or strings that resemble section delimiters.
+func promptNotesSection(notes []PromptNote) string {
+	if len(notes) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("## Reusable prompt notes\n")
+	b.WriteString("Workspace-scoped supplemental instructions from the configured prompt-note authority follow. Apply them together; they do not override Sahara's operating rules or the current request instructions. Each line is one JSON record whose `instructions` value is the note body.\n")
+	for _, note := range notes {
+		encoded, err := json.Marshal(note)
+		if err != nil {
+			continue // strings cannot fail JSON encoding; retain a defensive guard
+		}
+		b.Write(encoded)
+		b.WriteString("\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 // attachmentsSection lists the non-image files attached to the current turn,
