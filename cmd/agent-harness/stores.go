@@ -41,7 +41,11 @@ type stores struct {
 	// them with CAS-backed implementations over the same interfaces.
 	subagents subagent.Registry
 	goals     goal.Store
-	turns     turnjournal.Store
+	// continuations is the append-only explanation and admission ledger for
+	// host-owned bounded goal follow-ups. Aether modes replace the local file
+	// ledger with CAS alongside the lifecycle projections.
+	continuations goal.ContinuationLedger
+	turns         turnjournal.Store
 	// remote reports whether transcripts live outside this process, which is
 	// what makes them visible to other clients.
 	remote bool
@@ -62,6 +66,11 @@ func withCASLifecycle(st stores, blobs casblob.Store) (stores, error) {
 	}
 	st.subagents = subagents
 	st.goals = goals
+	continuations, err := goal.NewCASLedger(goal.CASLedgerConfig{Blobs: blobs})
+	if err != nil {
+		return stores{}, err
+	}
+	st.continuations = continuations
 	turns, err := turnjournal.NewCASStore(turnjournal.CASStoreConfig{Blobs: blobs})
 	if err != nil {
 		return stores{}, err
@@ -231,6 +240,10 @@ func openStores(ctx context.Context, cfg appConfig) (stores, error) {
 	if err != nil {
 		return stores{}, err
 	}
+	continuations, err := goal.NewFileLedger(cfg.stateDir, time.Now)
+	if err != nil {
+		return stores{}, err
+	}
 	turns, err := turnjournal.NewFileStore(cfg.stateDir)
 	if err != nil {
 		return stores{}, err
@@ -241,12 +254,13 @@ func openStores(ctx context.Context, cfg appConfig) (stores, error) {
 			return stores{}, fmt.Errorf("threads: %w", err)
 		}
 		return stores{
-			history:   bindHistory(files, cfg.workspaceID),
-			threads:   index,
-			files:     files,
-			subagents: subagents,
-			goals:     goals,
-			turns:     turns,
+			history:       bindHistory(files, cfg.workspaceID),
+			threads:       index,
+			files:         files,
+			subagents:     subagents,
+			goals:         goals,
+			continuations: continuations,
+			turns:         turns,
 		}, nil
 	}
 
@@ -280,14 +294,15 @@ func openStores(ctx context.Context, cfg appConfig) (stores, error) {
 		return stores{}, err
 	}
 	return stores{
-		history:   bindHistoryBackend(ml, cfg.workspaceID, cfg.memorylayerWorkspace),
-		threads:   ml,
-		files:     files,
-		memory:    bindMemory(recaller, cfg.workspaceID, cfg.memorylayerWorkspace),
-		catalogs:  catalog.BindWorkspaceProvider(catalogProvider, cfg.workspaceID, cfg.memorylayerWorkspace),
-		subagents: subagents,
-		goals:     goals,
-		turns:     turns,
-		remote:    true,
+		history:       bindHistoryBackend(ml, cfg.workspaceID, cfg.memorylayerWorkspace),
+		threads:       ml,
+		files:         files,
+		memory:        bindMemory(recaller, cfg.workspaceID, cfg.memorylayerWorkspace),
+		catalogs:      catalog.BindWorkspaceProvider(catalogProvider, cfg.workspaceID, cfg.memorylayerWorkspace),
+		subagents:     subagents,
+		goals:         goals,
+		continuations: continuations,
+		turns:         turns,
+		remote:        true,
 	}, nil
 }

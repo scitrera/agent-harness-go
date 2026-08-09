@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"sync"
 
@@ -27,6 +28,20 @@ type Store interface {
 	ListGoals(ctx context.Context, workspaceID, sessionID string) ([]spec.SessionGoalRecord, error)
 }
 
+// Mutation updates one complete goal projection atomically. Implementations may
+// retry the callback after an optimistic-concurrency conflict, so it must not
+// perform external side effects.
+type Mutation func(state *spec.SessionGoalsState) error
+
+// AtomicStore is the additive mutation surface used by the goal service. The
+// original Store remains sufficient for read-only snapshot projection and
+// compatibility with external backends.
+type AtomicStore interface {
+	Store
+	MutateGoals(ctx context.Context, workspaceID, sessionID string, mutate Mutation) error
+	AccountGoalUsage(ctx context.Context, workspaceID, sessionID, goalID, assistantMessageID string, tokenDelta uint64, updatedAt string) (spec.SessionGoalRecord, bool, error)
+}
+
 // FileStore stores one goal set per workspace/session. It is concurrency-safe
 // within one process; a state directory has one writing process.
 type FileStore struct {
@@ -35,10 +50,11 @@ type FileStore struct {
 }
 
 type fileStoreState struct {
-	SchemaVersion uint32                 `json:"schema_version"`
-	WorkspaceID   string                 `json:"workspace_id"`
-	SessionID     string                 `json:"session_id"`
-	State         spec.SessionGoalsState `json:"state"`
+	SchemaVersion     uint32                 `json:"schema_version"`
+	WorkspaceID       string                 `json:"workspace_id"`
+	SessionID         string                 `json:"session_id"`
+	State             spec.SessionGoalsState `json:"state"`
+	AccountedMessages map[string][]string    `json:"accounted_messages,omitempty"`
 }
 
 func NewFileStore(stateDir string) (*FileStore, error) {
@@ -85,6 +101,9 @@ func (s *FileStore) loadLocked(workspaceID, sessionID string) (fileStoreState, e
 	if err := state.State.Validate(); err != nil {
 		return fileStoreState{}, fmt.Errorf("%w: %v", ErrCorruptStore, err)
 	}
+	if err := validateAccountedMessages(state); err != nil {
+		return fileStoreState{}, err
+	}
 	return state, nil
 }
 
@@ -102,39 +121,135 @@ func (s *FileStore) persistLocked(state fileStoreState) error {
 
 // PutGoal atomically creates or replaces one stable goal record.
 func (s *FileStore) PutGoal(ctx context.Context, workspaceID, sessionID string, record spec.SessionGoalRecord) error {
+	record = cloneGoalRecord(record)
+	return s.MutateGoals(ctx, workspaceID, sessionID, func(state *spec.SessionGoalsState) error {
+		return putGoalState(state, record)
+	})
+}
+
+// MutateGoals applies one atomic projection mutation under the file store's
+// process lock and persists it only after the complete state validates.
+func (s *FileStore) MutateGoals(ctx context.Context, workspaceID, sessionID string, mutate Mutation) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if workspaceID == "" || sessionID == "" {
 		return errors.New("goal: workspace and session are required")
 	}
-	record = cloneGoalRecord(record)
+	if mutate == nil {
+		return errors.New("goal: mutation is required")
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	state, err := s.loadLocked(workspaceID, sessionID)
 	if err != nil {
 		return err
 	}
-	if err := putGoalState(&state, record); err != nil {
+	if err := mutate(&state.State); err != nil {
 		return err
+	}
+	if err := state.State.Validate(); err != nil {
+		return fmt.Errorf("goal: lifecycle mutation: %w", err)
 	}
 	return s.persistLocked(state)
 }
 
-func putGoalState(state *fileStoreState, record spec.SessionGoalRecord) error {
-	index := sort.Search(len(state.State.Records), func(i int) bool { return state.State.Records[i].ID >= record.ID })
-	if index < len(state.State.Records) && state.State.Records[index].ID == record.ID {
-		if state.State.Records[index].CreatedAt != "" {
-			record.CreatedAt = state.State.Records[index].CreatedAt
-		}
-		state.State.Records[index] = record
-	} else {
-		state.State.Records = append(state.State.Records, spec.SessionGoalRecord{})
-		copy(state.State.Records[index+1:], state.State.Records[index:])
-		state.State.Records[index] = record
+// AccountGoalUsage atomically charges one assistant message at most once. The
+// message IDs remain private store metadata rather than leaking through the
+// portable SessionGoalRecord projection.
+func (s *FileStore) AccountGoalUsage(ctx context.Context, workspaceID, sessionID, goalID, assistantMessageID string, tokenDelta uint64, updatedAt string) (spec.SessionGoalRecord, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return spec.SessionGoalRecord{}, false, err
 	}
-	if err := state.State.Validate(); err != nil {
+	if workspaceID == "" || sessionID == "" {
+		return spec.SessionGoalRecord{}, false, errors.New("goal: workspace and session are required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state, err := s.loadLocked(workspaceID, sessionID)
+	if err != nil {
+		return spec.SessionGoalRecord{}, false, err
+	}
+	record, accounted, err := accountGoalUsageState(&state, goalID, assistantMessageID, tokenDelta, updatedAt)
+	if err != nil || !accounted {
+		return record, accounted, err
+	}
+	if err := s.persistLocked(state); err != nil {
+		return spec.SessionGoalRecord{}, false, err
+	}
+	return record, true, nil
+}
+
+func putGoalState(state *spec.SessionGoalsState, record spec.SessionGoalRecord) error {
+	index := sort.Search(len(state.Records), func(i int) bool { return state.Records[i].ID >= record.ID })
+	if index < len(state.Records) && state.Records[index].ID == record.ID {
+		if state.Records[index].CreatedAt != "" {
+			record.CreatedAt = state.Records[index].CreatedAt
+		}
+		state.Records[index] = record
+	} else {
+		state.Records = append(state.Records, spec.SessionGoalRecord{})
+		copy(state.Records[index+1:], state.Records[index:])
+		state.Records[index] = record
+	}
+	if err := state.Validate(); err != nil {
 		return fmt.Errorf("goal: lifecycle transition: %w", err)
+	}
+	return nil
+}
+
+func accountGoalUsageState(state *fileStoreState, goalID, assistantMessageID string, tokenDelta uint64, updatedAt string) (spec.SessionGoalRecord, bool, error) {
+	for i := range state.State.Records {
+		record := &state.State.Records[i]
+		if record.ID != goalID {
+			continue
+		}
+		refs := state.AccountedMessages[goalID]
+		if slices.Contains(refs, assistantMessageID) {
+			return cloneGoalRecord(*record), false, nil
+		}
+		if len(refs) >= maxAccountedMessageRefs {
+			return spec.SessionGoalRecord{}, false, errors.New("goal: accounted-message limit reached")
+		}
+		if tokenDelta > spec.SessionMaxSequence-record.TokenUsage {
+			return spec.SessionGoalRecord{}, false, errors.New("goal: token accounting exceeds the JSON-safe range")
+		}
+		record.TokenUsage += tokenDelta
+		record.UpdatedAt = updatedAt
+		if state.AccountedMessages == nil {
+			state.AccountedMessages = map[string][]string{}
+		}
+		state.AccountedMessages[goalID] = append(append([]string(nil), refs...), assistantMessageID)
+		if err := state.State.Validate(); err != nil {
+			return spec.SessionGoalRecord{}, false, fmt.Errorf("goal: usage accounting: %w", err)
+		}
+		return cloneGoalRecord(*record), true, nil
+	}
+	return spec.SessionGoalRecord{}, false, ErrNoGoal
+}
+
+func validateAccountedMessages(state fileStoreState) error {
+	known := make(map[string]struct{}, len(state.State.Records))
+	for _, record := range state.State.Records {
+		known[record.ID] = struct{}{}
+	}
+	for goalID, refs := range state.AccountedMessages {
+		if _, ok := known[goalID]; !ok {
+			return fmt.Errorf("%w: accounted messages reference unknown goal %q", ErrCorruptStore, goalID)
+		}
+		if len(refs) > maxAccountedMessageRefs {
+			return fmt.Errorf("%w: too many accounted messages for goal %q", ErrCorruptStore, goalID)
+		}
+		seen := make(map[string]struct{}, len(refs))
+		for _, messageID := range refs {
+			if messageID == "" {
+				return fmt.Errorf("%w: empty accounted message ID", ErrCorruptStore)
+			}
+			if _, duplicate := seen[messageID]; duplicate {
+				return fmt.Errorf("%w: duplicate accounted message ID", ErrCorruptStore)
+			}
+			seen[messageID] = struct{}{}
+		}
 	}
 	return nil
 }
@@ -182,3 +297,4 @@ func cloneRawMap(values map[string]json.RawMessage) map[string]json.RawMessage {
 }
 
 var _ Store = (*FileStore)(nil)
+var _ AtomicStore = (*FileStore)(nil)

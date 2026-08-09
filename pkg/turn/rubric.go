@@ -5,11 +5,13 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
 
 	"github.com/scitrera/agent-harness-go/pkg/channel"
+	"github.com/scitrera/agent-harness-go/pkg/goal"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 )
 
@@ -82,18 +84,9 @@ func (v *RubricVerifier) AfterTurn(ctx context.Context, addr protocol.MessageAdd
 	if v == nil || v.Grader == nil {
 		return RubricVerdict{Satisfied: true}, nil
 	}
-	req := v.buildRequest(transcript)
-	verdict, err := v.Grader.Grade(ctx, req)
+	verdict, err := v.verify(ctx, transcript)
 	if err != nil {
 		return RubricVerdict{}, err
-	}
-	// Contradiction guard: a verdict claiming satisfied while still naming failed
-	// criteria is self-inconsistent — trust the failure, not the pass, and treat
-	// it as needs-revision (defensive against a confused/adversarial grade).
-	if verdict.Satisfied && len(verdict.FailedCriteria) > 0 {
-		slog.WarnContext(ctx, "rubric: contradictory verdict (satisfied with failed criteria); treating as needs-revision",
-			slog.Int("failed", len(verdict.FailedCriteria)))
-		verdict.Satisfied = false
 	}
 	if verdict.Satisfied {
 		return verdict, nil
@@ -116,6 +109,46 @@ func (v *RubricVerifier) AfterTurn(ctx context.Context, addr protocol.MessageAdd
 	}
 	return verdict, nil
 }
+
+func (v *RubricVerifier) verify(ctx context.Context, transcript []protocol.ChatMessage) (RubricVerdict, error) {
+	req := v.buildRequest(transcript)
+	verdict, err := v.Grader.Grade(ctx, req)
+	if err != nil {
+		return RubricVerdict{}, err
+	}
+	// Contradiction guard: a verdict claiming satisfied while still naming failed
+	// criteria is self-inconsistent — trust the failure, not the pass, and treat
+	// it as needs-revision (defensive against a confused/adversarial grade).
+	if verdict.Satisfied && len(verdict.FailedCriteria) > 0 {
+		slog.WarnContext(ctx, "rubric: contradictory verdict (satisfied with failed criteria); treating as needs-revision",
+			slog.Int("failed", len(verdict.FailedCriteria)))
+		verdict.Satisfied = false
+	}
+	return verdict, nil
+}
+
+// VerifyGoal adapts the rubric grader to the generic goal verifier without
+// invoking RubricVerifier's own enqueue loop. The durable goal runtime owns the
+// single bounded continuation decision and ledger.
+func (v *RubricVerifier) VerifyGoal(ctx context.Context, request goal.VerificationRequest) (goal.VerificationResult, error) {
+	if v == nil || v.Grader == nil {
+		return goal.VerificationResult{}, errors.New("rubric: goal verifier has no grader")
+	}
+	adapted := *v
+	adapted.Criteria = append(append([]string(nil), v.Criteria...),
+		"The active durable goal objective is fully achieved: "+request.Goal.Objective)
+	verdict, err := adapted.verify(ctx, request.Transcript)
+	if err != nil {
+		return goal.VerificationResult{}, err
+	}
+	return goal.VerificationResult{
+		Satisfied: verdict.Satisfied, Feedback: verdict.Feedback,
+		FailedCriteria: append([]string(nil), verdict.FailedCriteria...),
+		Evidence:       []string{"rubric"},
+	}, nil
+}
+
+var _ goal.Verifier = (*RubricVerifier)(nil)
 
 func (v *RubricVerifier) maxAttempts() int {
 	if v.MaxAttempts <= 0 {

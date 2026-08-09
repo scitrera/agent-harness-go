@@ -66,6 +66,10 @@ type appConfig struct {
 	memoryRecall      bool
 	memoryRecallLimit int
 
+	// goalMaxContinuations bounds host-created follow-up turns for one durable
+	// goal. Zero keeps goal tools/state enabled but disables automatic follow-ups.
+	goalMaxContinuations uint32
+
 	// streamFlush is the token-delta coalescing interval handed to the turn
 	// runner; 0 streams every delta.
 	streamFlush time.Duration

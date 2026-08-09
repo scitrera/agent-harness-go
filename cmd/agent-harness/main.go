@@ -45,6 +45,7 @@ func main() {
 	memorylayerWorkspace := flag.String("memorylayer-workspace", os.Getenv("MEMORYLAYER_WORKSPACE"), "MemoryLayer workspace (defaults to the resolved logical workspace)")
 	memoryRecall := flag.Bool("memory-recall", true, "inject MemoryLayer memories relevant to each message (requires --memorylayer)")
 	memoryRecallLimit := flag.Int("memory-recall-limit", 5, "how many recalled memories to inject")
+	goalMaxContinuations := flag.Uint("goal-max-continuations", 3, "maximum automatic follow-up turns per durable goal; 0 disables automatic continuation")
 	addr := flag.String("addr", env("SAHARA_WEB_ADDR", "127.0.0.1:8787"), "web UI listen address (NO auth - localhost only)")
 	noBrowser := flag.Bool("no-browser", false, "do not open a browser (web mode)")
 	exportThread := flag.String("export", "", "export thread history as JSONL to stdout and exit (a thread id, or 'all')")
@@ -103,6 +104,10 @@ func main() {
 		fmt.Fprintln(os.Stderr, "error: --subagent-executor-concurrency must be positive")
 		os.Exit(2)
 	}
+	if *goalMaxContinuations > uint(^uint32(0)) {
+		fmt.Fprintln(os.Stderr, "error: --goal-max-continuations is too large")
+		os.Exit(2)
+	}
 	// A pure client drives someone else's agent, so it needs no provider of its
 	// own; every other mode runs turns locally and does.
 	if *baseURL == "" && selectedMode.runsTurnsLocally(*aetherAddr) {
@@ -149,6 +154,7 @@ func main() {
 		memorylayerWorkspace: effectiveWorkspace(*memorylayerWorkspace, workspaceResolution.WorkspaceID),
 		memoryRecall:         *memoryRecall,
 		memoryRecallLimit:    *memoryRecallLimit,
+		goalMaxContinuations: uint32(*goalMaxContinuations),
 	}
 	if selectedMode == appModeServe || selectedMode == appModeStandalone {
 		cfg.streamFlush = aetherStreamFlush

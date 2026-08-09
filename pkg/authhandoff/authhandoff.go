@@ -73,6 +73,35 @@ func (s *Store) ResolveMessage(message protocol.ChatMessage) (tools.MemoryAuthor
 	return s.Resolve(messageAuthorityHandoffToken(message))
 }
 
+// StampMessage carries an opaque handoff token on an internally-created inbound
+// message. The token is not a credential; ResolveMessage consumes it from the
+// private Store. An empty token is a no-op.
+func StampMessage(message protocol.ChatMessage, token string) protocol.ChatMessage {
+	if token == "" {
+		return message
+	}
+	if message.Meta == nil {
+		message.Meta = map[string]json.RawMessage{}
+	}
+	envelope := map[string]json.RawMessage{}
+	if existing := message.Meta["scitrera"]; len(existing) > 0 {
+		if err := json.Unmarshal(existing, &envelope); err != nil {
+			return message
+		}
+	}
+	encodedToken, err := json.Marshal(token)
+	if err != nil {
+		return message
+	}
+	envelope["authority_handoff"] = encodedToken
+	raw, err := json.Marshal(envelope)
+	if err != nil {
+		return message
+	}
+	message.Meta["scitrera"] = raw
+	return message
+}
+
 func messageAuthorityHandoffToken(message protocol.ChatMessage) string {
 	raw := message.Meta["scitrera"]
 	if len(raw) == 0 {

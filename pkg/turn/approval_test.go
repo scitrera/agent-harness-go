@@ -9,6 +9,7 @@ import (
 	spec "github.com/scitrera/ecosystem-messaging-spec/go"
 
 	"github.com/scitrera/agent-harness-go/pkg/approval"
+	"github.com/scitrera/agent-harness-go/pkg/authhandoff"
 	"github.com/scitrera/agent-harness-go/pkg/contextpack"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 	"github.com/scitrera/agent-harness-go/pkg/provider"
@@ -278,5 +279,50 @@ func Test_Runner_preserves_pre_resolved_context_authority_when_hook_is_empty(t *
 	}
 	if !store.saw || store.seen != want {
 		t.Fatalf("grant store authority = %#v (saw=%v), want %#v", store.seen, store.saw, want)
+	}
+}
+
+func Test_Runner_consumes_single_use_authority_handoff(t *testing.T) {
+	policy := tools.NewDynamicPolicy(tools.StaticPolicy{Allowed: map[string]string{}}, nil)
+	registry := tools.NewAuditedRegistry(policy, nil)
+	if err := registry.Register("record", tools.HandlerFunc(func(_ context.Context, req tools.Request) (tools.Result, error) {
+		return tools.NewJSONResult(req.CallID, req.Name, json.RawMessage(`{"ok":true}`))
+	})); err != nil {
+		t.Fatal(err)
+	}
+	callPart, _ := protocol.NewToolCallPart(protocol.ToolInvokeEnvelope{
+		CallID: "call-1", Name: "record", Args: protocol.RawToArgs(json.RawMessage(`{}`)),
+	})
+	finalPart, _ := protocol.NewTextPart("done")
+	prov := &scriptedProvider{responses: []provider.ChatResponse{
+		{Message: protocol.ChatMessage{ID: "a-tool", Role: protocol.RoleAssistant, Content: []protocol.ContentPart{callPart}}},
+		{Message: protocol.ChatMessage{ID: "a-final", Role: protocol.RoleAssistant, Content: []protocol.ContentPart{finalPart}}},
+	}}
+	store := &authCapturingStore{}
+	handoff := authhandoff.New()
+	want := tools.MemoryAuthority{SubjectType: "user", SubjectID: "u1", GrantID: "g-handoff"}
+	token := handoff.Put(want)
+	runner, err := NewRunner(Config{
+		Store: &fakeStore{}, Loader: fakeLoader{}, Registry: registry, Provider: prov,
+		Publisher: &fakePublisher{}, Assembler: contextpack.NewAssembler(contextpack.Config{}),
+		Approvals:  fakeAwaiter{decision: approval.Decision{Granted: false}},
+		GrantStore: store, ApprovalGranter: policy, AuthHandoff: handoff,
+		Authority: func(protocol.MessageAddress, protocol.ChatMessage) tools.MemoryAuthority {
+			return tools.MemoryAuthority{}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	user := authhandoff.StampMessage(userTurn(t), token)
+	addr := protocol.MessageAddress{ThreadID: "th1", TaskID: "task1", WorkspaceID: "ws1"}
+	if _, err := runner.Run(context.Background(), addr, user); err != nil {
+		t.Fatal(err)
+	}
+	if !store.saw || store.seen != want {
+		t.Fatalf("grant store authority = %#v (saw=%v), want %#v", store.seen, store.saw, want)
+	}
+	if _, ok := handoff.Resolve(token); ok {
+		t.Fatal("runner did not consume the authority handoff token")
 	}
 }

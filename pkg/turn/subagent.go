@@ -12,6 +12,7 @@ import (
 
 	spec "github.com/scitrera/ecosystem-messaging-spec/go"
 
+	"github.com/scitrera/agent-harness-go/pkg/authhandoff"
 	"github.com/scitrera/agent-harness-go/pkg/bootstrap"
 	"github.com/scitrera/agent-harness-go/pkg/channel"
 	"github.com/scitrera/agent-harness-go/pkg/compaction"
@@ -644,7 +645,7 @@ func (r *Runner) notifySubagentComplete(ctx context.Context, req subagent.Reques
 		content = append(content, sp)
 	}
 	msg := protocol.ChatMessage{Role: protocol.RoleUser, Addr: addr, Content: content}
-	msg.Meta = stampAuthorityHandoff(msg.Meta, r.authHandoff.Put(parentAuth))
+	msg = authhandoff.StampMessage(msg, r.authHandoff.Put(parentAuth))
 
 	if err := r.notifier.Enqueue(ctx, channel.Inbound{Addr: addr, Message: msg}); err != nil {
 		slog.WarnContext(ctx, "subagent: enqueue completion notice failed",
@@ -673,26 +674,6 @@ func noticeID(prefix string) string {
 		return prefix
 	}
 	return id
-}
-
-// stampAuthorityHandoff records the OBO handoff token on the notice message under
-// meta["scitrera"].authority_handoff. An empty token (no OBO to hand off) is a
-// no-op. The token is a lookup key into the harness-private handoff store, NOT a
-// credential: the distribution's Authority func resolves it there, and an unknown
-// token simply yields the default authority.
-func stampAuthorityHandoff(meta map[string]json.RawMessage, token string) map[string]json.RawMessage {
-	if token == "" {
-		return meta
-	}
-	if meta == nil {
-		meta = map[string]json.RawMessage{}
-	}
-	raw, err := json.Marshal(map[string]any{"authority_handoff": token})
-	if err != nil {
-		return meta
-	}
-	meta["scitrera"] = raw
-	return meta
 }
 
 // stampSubagentSpawnMeta records spawn provenance on the child thread's task

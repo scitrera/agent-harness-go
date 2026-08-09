@@ -2,15 +2,18 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"time"
 
 	"github.com/scitrera/agent-harness-go/pkg/approval"
+	"github.com/scitrera/agent-harness-go/pkg/authhandoff"
 	"github.com/scitrera/agent-harness-go/pkg/channel"
 	"github.com/scitrera/agent-harness-go/pkg/commands"
 	"github.com/scitrera/agent-harness-go/pkg/compaction"
 	"github.com/scitrera/agent-harness-go/pkg/contextpack"
+	"github.com/scitrera/agent-harness-go/pkg/goal"
 	"github.com/scitrera/agent-harness-go/pkg/localtools"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 	"github.com/scitrera/agent-harness-go/pkg/provider"
@@ -63,12 +66,36 @@ func buildRunner(cfg appConfig, st stores, pub channel.Publisher, approvals appr
 		notifier, _ = pub.(channel.Enqueuer)
 	}
 	allowBackground := notifier != nil
+	authorityHandoff := authhandoff.New()
 	turnOwnerIdentity := cfg.sourceAgent()
 	if topic, ok := notifier.(interface{ Topic() string }); ok && topic.Topic() != "" {
 		turnOwnerIdentity = topic.Topic()
 	}
 	if err := registerReferenceSubagent(reg, subagentRef, agentCatalog, allowBackground); err != nil {
 		return nil, nil, fmt.Errorf("register subagent: %w", err)
+	}
+
+	var goalRuntime *goal.Runtime
+	if st.goals != nil || st.continuations != nil {
+		if st.goals == nil || st.continuations == nil {
+			return nil, nil, errors.New("goal runtime requires both lifecycle store and continuation ledger")
+		}
+		goalService, err := goal.NewService(goal.ServiceConfig{Store: st.goals, Now: time.Now})
+		if err != nil {
+			return nil, nil, fmt.Errorf("goal service: %w", err)
+		}
+		if err := goal.RegisterTools(reg, goalService); err != nil {
+			return nil, nil, fmt.Errorf("register goal tools: %w", err)
+		}
+		goalRuntime, err = goal.NewRuntime(goal.RuntimeConfig{
+			Service: goalService, Ledger: st.continuations,
+			Policy:   goal.BoundedPolicy{MaxContinuations: cfg.goalMaxContinuations},
+			Enqueuer: notifier, AuthHandoff: authorityHandoff,
+			DefaultWorkspaceID: effectiveWorkspace("", cfg.workspaceID),
+		})
+		if err != nil {
+			return nil, nil, fmt.Errorf("goal runtime: %w", err)
+		}
 	}
 
 	auth := ""
@@ -164,11 +191,13 @@ func buildRunner(cfg appConfig, st stores, pub channel.Publisher, approvals appr
 		// Notifier wakes a fresh parent turn with a background sub-agent's completion
 		// notice; nil (cli) → background spawns fall back to synchronous.
 		Notifier:                 notifier,
+		AuthHandoff:              authorityHandoff,
 		SubagentObserver:         st.subagents,
 		SubagentDefaultWorkspace: effectiveWorkspace("", cfg.workspaceID),
 		SubagentTasks:            subagentTasks,
 		TurnJournal:              st.turns,
 		TurnOwnerIdentity:        turnOwnerIdentity,
+		Goals:                    goalRuntime,
 		// Interactive web/TUI channels can use child-thread stream events to keep the
 		// blocking spawn_subagent row live with the child's latest activity.
 		StreamSubagents: allowBackground || subagentTasks != nil,

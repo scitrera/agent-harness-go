@@ -21,6 +21,7 @@ and is the open-source core that the Scitrera distribution ("sahara") builds on.
 | Tool observer | `hooks` | none | OTel/audit observers |
 | Session attach/replay | `sessionlog` | bounded memory/file event logs | Aether/MemoryLayer/distributed implementations |
 | Subagent execution authority | `subagent.TaskBackend` | in-process execution | durable task systems such as Aether |
+| Goals and continuation | `goal.Service`, `goal.ContinuationPolicy` | atomic files + bounded host follow-ups | CAS stores, custom policies/verifiers |
 
 ## Quick start
 
@@ -66,6 +67,7 @@ the browser, the terminal UI, or stdout in `--cli` mode).
 | `--subagent-executor-concurrency` | — | `4` | bound concurrent externally assigned subagents |
 | `--memorylayer` | `MEMORYLAYER_BASE_URL` | — | store threads + transcripts in MemoryLayer instead of on disk |
 | `--memory-recall` | — | `true` | inject MemoryLayer memories relevant to each message |
+| `--goal-max-continuations` | — | `3` | maximum automatic follow-up turns for one durable goal; `0` disables follow-ups |
 
 ### Project workspaces
 
@@ -142,6 +144,47 @@ or receive the optional state.
 
 Aether and other channels can adapt the same library without changing the
 protocol or local storage behavior.
+
+### Durable goals and bounded continuation
+
+The reference host registers `create_goal`, `get_goal`, and `update_goal` over
+the exported `goal.Service`. Goal creation is intended only for explicitly
+requested persistent multi-turn work. A workspace/session retains terminal goal
+history but may have at most one pending, active, or blocked goal. The service
+atomically validates lifecycle transitions under both the file and Aether-CAS
+stores; `update_goal` is the explicit completion/block/cancel/resume surface and
+accepts stable message, artifact, task, or verifier evidence references.
+
+An active goal receives up to `--goal-max-continuations` host-created follow-up
+turns after its initial turn. Provider-reported usage is charged exactly once per
+finalized assistant message, including the turn that completes the goal. A goal
+whose cumulative token budget is reached, or whose automatic follow-up limit is
+exhausted, becomes blocked before another turn is admitted. Missing provider
+usage remains zero, so the independent continuation count still bounds the run.
+Set the flag to `0` to retain explicit goal tools and state without automatic
+follow-ups.
+
+Hosted modes (TUI, web, ACP, Aether worker, and standalone) deliver follow-ups
+through their existing ingress queue. The direct stdin CLI has no ingress queue,
+so it records why automatic delivery was unavailable and leaves the goal active
+for explicit user turns. Every decision is appended below the workspace/session
+state directory; Aether modes use the equivalent CAS ledger. A continuation is
+planned durably before enqueue, so a crash at an ambiguous delivery boundary
+cannot replay it. Delegated authority is carried only through the same opaque,
+single-use in-process handoff used by background children; a runtime without the
+matching handoff fails closed before planning a privileged continuation.
+
+Embedders can replace `goal.BoundedPolicy` and supply a `goal.Verifier`. When a
+`turn.RubricVerifier` and goal runtime are both configured on `turn.Runner`, the
+rubric becomes that verifier: satisfied evidence completes the goal, revision
+feedback informs the one ledgered continuation path, and grader errors block
+automatic progress. The standalone rubric retry loop runs only on turns that
+are not associated with a goal.
+
+No additional wire schema is needed. Revision-3 clients already negotiate the
+portable `session.state.goals.v1` projection containing lifecycle, budget, usage,
+evidence, and blocked reason. Continuation decisions are private execution
+records rather than a second client-visible source of truth.
 
 ### Over Aether
 

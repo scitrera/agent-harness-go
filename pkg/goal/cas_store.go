@@ -97,6 +97,9 @@ func (s *CASStore) read(ctx context.Context, workspaceID, sessionID string) ([]b
 	if err := state.State.Validate(); err != nil {
 		return nil, fileStoreState{}, false, fmt.Errorf("%w: %v", ErrCorruptStore, err)
 	}
+	if err := validateAccountedMessages(state); err != nil {
+		return nil, fileStoreState{}, false, err
+	}
 	return append([]byte(nil), raw...), state, true, nil
 }
 
@@ -121,13 +124,27 @@ func (s *CASStore) commit(ctx context.Context, workspaceID, sessionID string, pr
 
 func (s *CASStore) PutGoal(ctx context.Context, workspaceID, sessionID string, record spec.SessionGoalRecord) error {
 	record = cloneGoalRecord(record)
+	return s.MutateGoals(ctx, workspaceID, sessionID, func(state *spec.SessionGoalsState) error {
+		return putGoalState(state, record)
+	})
+}
+
+// MutateGoals applies one optimistic CAS mutation. The callback may run more
+// than once when another replica wins the compare-and-swap.
+func (s *CASStore) MutateGoals(ctx context.Context, workspaceID, sessionID string, mutate Mutation) error {
+	if mutate == nil {
+		return errors.New("goal: mutation is required")
+	}
 	for attempt := 0; attempt < s.maxRetries; attempt++ {
 		previous, state, found, err := s.read(ctx, workspaceID, sessionID)
 		if err != nil {
 			return err
 		}
-		if err := putGoalState(&state, record); err != nil {
+		if err := mutate(&state.State); err != nil {
 			return err
+		}
+		if err := state.State.Validate(); err != nil {
+			return fmt.Errorf("goal: lifecycle mutation: %w", err)
 		}
 		committed, err := s.commit(ctx, workspaceID, sessionID, previous, found, state)
 		if err != nil {
@@ -138,6 +155,27 @@ func (s *CASStore) PutGoal(ctx context.Context, workspaceID, sessionID string, r
 		}
 	}
 	return fmt.Errorf("%w: put %q after %d attempts", ErrCASRetryLimit, s.key(workspaceID, sessionID), s.maxRetries)
+}
+
+func (s *CASStore) AccountGoalUsage(ctx context.Context, workspaceID, sessionID, goalID, assistantMessageID string, tokenDelta uint64, updatedAt string) (spec.SessionGoalRecord, bool, error) {
+	for attempt := 0; attempt < s.maxRetries; attempt++ {
+		previous, state, found, err := s.read(ctx, workspaceID, sessionID)
+		if err != nil {
+			return spec.SessionGoalRecord{}, false, err
+		}
+		record, accounted, err := accountGoalUsageState(&state, goalID, assistantMessageID, tokenDelta, updatedAt)
+		if err != nil || !accounted {
+			return record, accounted, err
+		}
+		committed, err := s.commit(ctx, workspaceID, sessionID, previous, found, state)
+		if err != nil {
+			return spec.SessionGoalRecord{}, false, err
+		}
+		if committed {
+			return record, true, nil
+		}
+	}
+	return spec.SessionGoalRecord{}, false, fmt.Errorf("%w: account usage for %q after %d attempts", ErrCASRetryLimit, s.key(workspaceID, sessionID), s.maxRetries)
 }
 
 func (s *CASStore) ListGoals(ctx context.Context, workspaceID, sessionID string) ([]spec.SessionGoalRecord, error) {
@@ -153,3 +191,4 @@ func (s *CASStore) ListGoals(ctx context.Context, workspaceID, sessionID string)
 }
 
 var _ Store = (*CASStore)(nil)
+var _ AtomicStore = (*CASStore)(nil)

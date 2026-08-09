@@ -6,7 +6,10 @@ import (
 	"strings"
 	"testing"
 
+	spec "github.com/scitrera/ecosystem-messaging-spec/go"
+
 	"github.com/scitrera/agent-harness-go/pkg/channel"
+	"github.com/scitrera/agent-harness-go/pkg/goal"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 )
 
@@ -201,5 +204,31 @@ func Test_RubricVerifier_nil_grader_is_noop(t *testing.T) {
 	}
 	if !verdict.Satisfied {
 		t.Fatalf("nil verifier should return a satisfied (no-op) verdict")
+	}
+}
+
+func Test_RubricVerifier_goal_adapter_uses_objective_without_enqueuing(t *testing.T) {
+	grader := &fakeGrader{verdict: RubricVerdict{
+		Satisfied: false, Feedback: "missing evidence", FailedCriteria: []string{"prove completion"},
+	}}
+	enqueuer := &fakeEnqueuer{}
+	verifier := &RubricVerifier{
+		Criteria: []string{"tests pass"}, Grader: grader, Enqueuer: enqueuer,
+	}
+	result, err := verifier.VerifyGoal(context.Background(), goal.VerificationRequest{
+		Goal:       spec.SessionGoalRecord{ID: "goal-1", Objective: "ship the release", Status: spec.SessionGoalActive},
+		Transcript: []protocol.ChatMessage{userMsg(t, "work")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Satisfied || result.Feedback != "missing evidence" || len(result.FailedCriteria) != 1 {
+		t.Fatalf("goal verification = %#v", result)
+	}
+	if !strings.Contains(grader.seen.Prompt, "ship the release") {
+		t.Fatalf("goal objective missing from rubric prompt: %q", grader.seen.Prompt)
+	}
+	if len(enqueuer.got) != 0 {
+		t.Fatal("goal adapter must not use the standalone rubric enqueue path")
 	}
 }

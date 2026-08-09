@@ -88,3 +88,20 @@ func Test_Store_resolve_message_rejects_malformed_metadata(t *testing.T) {
 		}
 	}
 }
+
+func Test_StampMessage_preserves_existing_scitrera_metadata(t *testing.T) {
+	message := protocol.ChatMessage{Meta: map[string]json.RawMessage{
+		"scitrera": json.RawMessage(`{"agent_name":"sahara"}`),
+	}}
+	message = StampMessage(message, "opaque-token")
+	var envelope struct {
+		AgentName        string `json:"agent_name"`
+		AuthorityHandoff string `json:"authority_handoff"`
+	}
+	if err := json.Unmarshal(message.Meta["scitrera"], &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.AgentName != "sahara" || envelope.AuthorityHandoff != "opaque-token" {
+		t.Fatalf("stamped envelope = %#v", envelope)
+	}
+}

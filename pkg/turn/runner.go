@@ -18,6 +18,7 @@ import (
 	"github.com/scitrera/agent-harness-go/pkg/compaction"
 	"github.com/scitrera/agent-harness-go/pkg/contextpack"
 	"github.com/scitrera/agent-harness-go/pkg/dailynotes"
+	"github.com/scitrera/agent-harness-go/pkg/goal"
 	"github.com/scitrera/agent-harness-go/pkg/harness"
 	"github.com/scitrera/agent-harness-go/pkg/hooks"
 	"github.com/scitrera/agent-harness-go/pkg/ids"
@@ -207,6 +208,10 @@ type Runner struct {
 	// rubric, when set, runs the opt-in post-turn self-grading verifier at
 	// end-of-turn (nil → skipped; default behavior unchanged).
 	rubric *RubricVerifier
+	// goals, when set, owns durable goal accounting and the single bounded
+	// continuation decision. A configured rubric becomes its verifier so two
+	// independent retry loops cannot enqueue competing follow-ups.
+	goals *goal.Runtime
 
 	// ctxDecorator, when set, wraps the incoming turn ctx once at Run entry (e.g.
 	// the ACP channel attaches per-session fs/terminal client delegates). nil →
@@ -450,8 +455,9 @@ type Config struct {
 	StreamSubagents bool
 	// AuthHandoff hands the parent turn's OBO authority to the woken completion turn
 	// via a single-use token carried on the notice (the credential never rides the
-	// message). Optional; nil → a Store is created. The distribution's Authority
-	// func resolves the token against it before falling back to gateway derivation.
+	// message). Optional; nil → a Store is created. The runner consumes the token
+	// before applying the Authority hook; a distribution may also pre-resolve it
+	// onto the context while routing across workspace-specific runners.
 	AuthHandoff *authhandoff.Store
 	// SubagentObserver receives best-effort authoritative lifecycle transitions
 	// for durable registry/snapshot projection. Observation failures are logged
@@ -479,6 +485,12 @@ type Config struct {
 	// (default, behavior unchanged). The runner invokes AfterTurn at end-of-turn
 	// when it is set.
 	Rubric *RubricVerifier
+
+	// Goals, when set, accounts finalized turns against durable goals and asks a
+	// host-owned bounded policy whether to enqueue another turn. If Rubric is also
+	// set it is used as the goal verifier; Rubric's standalone retry loop runs only
+	// on turns not associated with a goal.
+	Goals *goal.Runtime
 
 	// ContextDecorator, when set, wraps the incoming turn ctx once at the start of
 	// Run (before the tool loop), keyed off the resolved address. The ACP channel
@@ -551,6 +563,9 @@ func NewRunner(cfg Config) (*Runner, error) {
 	}
 	// Per-turn tool sources: copied so a later caller mutation can't reach the runner.
 	toolProviders := append([]ToolProvider(nil), cfg.ToolProviders...)
+	if cfg.Goals != nil && cfg.Rubric != nil {
+		cfg.Goals.SetVerifier(cfg.Rubric)
+	}
 	return &Runner{
 		store:                     cfg.Store,
 		loader:                    cfg.Loader,
@@ -612,6 +627,7 @@ func NewRunner(cfg Config) (*Runner, error) {
 		turnJournal:               cfg.TurnJournal,
 		turnOwnerIdentity:         strings.TrimSpace(cfg.TurnOwnerIdentity),
 		rubric:                    cfg.Rubric,
+		goals:                     cfg.Goals,
 		ctxDecorator:              cfg.ContextDecorator,
 	}, nil
 }
@@ -809,6 +825,9 @@ func (r *Runner) Run(ctx context.Context, addr protocol.MessageAddress, user pro
 	// in-process handoff before workspace routing). Preserve that authority when
 	// the address/message hook has nothing newer to derive.
 	auth, _ := tools.MemoryAuthorityFrom(ctx)
+	if handedOff, ok := r.authHandoff.ResolveMessage(user); ok {
+		auth = handedOff
+	}
 	if r.authorityFn != nil {
 		if derived := r.authorityFn(addr, user); derived != (tools.MemoryAuthority{}) || auth == (tools.MemoryAuthority{}) {
 			auth = derived
@@ -931,6 +950,16 @@ func (r *Runner) Run(ctx context.Context, addr protocol.MessageAddress, user pro
 	}
 	if err != nil {
 		return protocol.ChatMessage{}, fmt.Errorf("start session: %w", err)
+	}
+	if r.goals != nil {
+		if ephemeral {
+			ctx = WithExcludedTools(ctx, []string{goal.CreateToolName, goal.GetToolName, goal.UpdateToolName})
+		} else {
+			ctx, err = r.goals.BeginTurn(ctx, addr)
+			if err != nil {
+				return protocol.ChatMessage{}, fmt.Errorf("goal: begin turn: %w", err)
+			}
+		}
 	}
 	// The host may commit the inbound user turn to the store out-of-band before
 	// dispatching this task (e.g. workclaw's platform-server), so a freshly-loaded
@@ -1098,11 +1127,27 @@ func (r *Runner) Run(ctx context.Context, addr protocol.MessageAddress, user pro
 	} else {
 		r.commitToMemory(ctx, auth, addr, user, assistant)
 	}
-	// Opt-in post-turn self-grading: an independent grader checks the just-produced
-	// result against the declarative rubric and (if it needs revision) enqueues an
-	// actionable revision follow-up. nil → skipped (default; behavior unchanged).
-	if r.rubric != nil {
-		transcript := append(append([]protocol.ChatMessage{}, session.History()...), assistant)
+	// Replace the pre-finalized terminal assistant already in session history with
+	// the canonical finalized copy (usage + emitted durable parts) for post-turn
+	// goal accounting and verification. Do not append a duplicate assistant.
+	transcript := session.History()
+	if n := len(transcript); n > 0 && transcript[n-1].ID == assistant.ID {
+		transcript[n-1] = assistant
+	} else {
+		transcript = append(transcript, assistant)
+	}
+	goalHandled := false
+	if r.goals != nil && !ephemeral {
+		var goalErr error
+		goalHandled, goalErr = r.goals.AfterTurn(ctx, addr, transcript, assistant)
+		if goalErr != nil {
+			slog.WarnContext(ctx, "goal: post-turn continuation stopped", slog.Any("err", goalErr))
+		}
+	}
+	// Opt-in standalone self-grading runs only when this turn had no durable goal;
+	// goal turns use the same rubric through the goal runtime's single ledgered
+	// policy path.
+	if r.rubric != nil && !goalHandled {
 		if _, rerr := r.rubric.AfterTurn(ctx, addr, transcript); rerr != nil {
 			slog.WarnContext(ctx, "rubric: post-turn verification failed", slog.Any("err", rerr))
 		}
