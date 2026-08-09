@@ -59,6 +59,9 @@ func (s *FileStore) Append(ctx context.Context, workspaceID, operationID string,
 	if err := request.Validate(); err != nil {
 		return AppendResult{}, err
 	}
+	// Normalize interface-valued JSON documents before hashing so a typed
+	// metadata value and its decoded map representation have one stable hash.
+	request = cloneRequest(request)
 	requestBytes, err := json.Marshal(request)
 	if err != nil {
 		return AppendResult{}, fmt.Errorf("refinement: encode request: %w", err)
@@ -223,13 +226,13 @@ func (s *FileStore) appendEntry(workspaceID string, entry fileEntry) error {
 
 func cloneRequest(request AppendRequest) AppendRequest {
 	request.Plan.Evidence = append([]Evidence(nil), request.Plan.Evidence...)
-	request.Plan.Edits = append([]Edit(nil), request.Plan.Edits...)
+	edits := request.Plan.Edits
+	request.Plan.Edits = make([]Edit, len(edits))
+	for i := range edits {
+		request.Plan.Edits[i] = cloneEdit(edits[i])
+	}
 	if request.Metadata != nil {
-		metadata := make(map[string]any, len(request.Metadata))
-		for key, value := range request.Metadata {
-			metadata[key] = value
-		}
-		request.Metadata = metadata
+		request.Metadata = cloneMap(request.Metadata)
 	}
 	if request.TaskRef != nil {
 		ref := *request.TaskRef
@@ -240,6 +243,45 @@ func cloneRequest(request AppendRequest) AppendRequest {
 		request.ApprovalRef = &ref
 	}
 	return request
+}
+
+func cloneEdit(edit Edit) Edit {
+	edit.Content = cloneMap(edit.Content)
+	if edit.Before != nil {
+		before := *edit.Before
+		before.Content = cloneMap(before.Content)
+		before.Metadata = cloneMap(before.Metadata)
+		edit.Before = &before
+	}
+	if edit.After != nil {
+		after := *edit.After
+		after.Content = cloneMap(after.Content)
+		after.Metadata = cloneMap(after.Metadata)
+		edit.After = &after
+	}
+	return edit
+}
+
+func cloneMap(input map[string]any) map[string]any {
+	if input == nil {
+		return nil
+	}
+	encoded, err := json.Marshal(input)
+	if err != nil {
+		// Validation and persistence will reject non-JSON values. Returning a
+		// shallow clone here keeps clone helpers total for callers inspecting an
+		// invalid request before Append.
+		output := make(map[string]any, len(input))
+		for key, value := range input {
+			output[key] = value
+		}
+		return output
+	}
+	var output map[string]any
+	if err := json.Unmarshal(encoded, &output); err != nil {
+		return nil
+	}
+	return output
 }
 
 func cloneRecord(record Record) Record {

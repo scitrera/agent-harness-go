@@ -20,6 +20,10 @@ const (
 	// TrustPreAuthorized marks a tool authorized ahead of time (no prompt); it
 	// still passes through the safety authorizer like every other tool.
 	TrustPreAuthorized
+	// TrustRequiresFreshApproval requires a new once-only human decision for
+	// every invocation. Session and durable grants cannot bypass it. Use it for
+	// mutations whose exact arguments, not merely the tool name, need review.
+	TrustRequiresFreshApproval
 )
 
 // Descriptor is the model-facing metadata for a tool: its name, a one-line

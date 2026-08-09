@@ -71,6 +71,20 @@ type Evidence struct {
 	ContentHash string       `json:"content_hash,omitempty"`
 }
 
+// ResourceSnapshot captures the authority response before or after a mutation.
+// Content is the authority-neutral resource document used to plan a safe
+// rollback; secrets and other non-resource execution state must not be placed
+// here.
+type ResourceSnapshot struct {
+	ResourceID    string         `json:"resource_id,omitempty"`
+	ResourceKey   string         `json:"resource_key"`
+	ETag          string         `json:"etag,omitempty"`
+	SchemaVersion int            `json:"schema_version,omitempty"`
+	Content       map[string]any `json:"content,omitempty"`
+	Metadata      map[string]any `json:"metadata,omitempty"`
+	Deleted       bool           `json:"deleted,omitempty"`
+}
+
 type Edit struct {
 	Action       Action       `json:"action"`
 	ResourceKind ResourceKind `json:"resource_kind"`
@@ -80,8 +94,13 @@ type Edit struct {
 	BeforeETag   string       `json:"before_etag,omitempty"`
 	AfterETag    string       `json:"after_etag,omitempty"`
 	Reason       string       `json:"reason"`
-	Applied      *bool        `json:"applied,omitempty"`
-	Error        string       `json:"error,omitempty"`
+	// Content is the desired authority-neutral resource document for create and
+	// replace actions. Delete actions leave it empty.
+	Content map[string]any    `json:"content,omitempty"`
+	Before  *ResourceSnapshot `json:"before,omitempty"`
+	After   *ResourceSnapshot `json:"after,omitempty"`
+	Applied *bool             `json:"applied,omitempty"`
+	Error   string            `json:"error,omitempty"`
 }
 
 // ExternalReference correlates an audit record to an execution-plane object
@@ -181,7 +200,7 @@ func (r AppendRequest) Validate() error {
 	}
 	for i, edit := range r.Plan.Edits {
 		if !validAction(edit.Action) || !validResourceKind(edit.ResourceKind) || !validKey.MatchString(edit.ResourceKey) || strings.TrimSpace(edit.Reason) == "" {
-			return fmt.Errorf("%w: invalid edit at index %d", ErrInvalid, i)
+			return fmt.Errorf("%w: invalid edit at index %d (action=%q resource_kind=%q resource_key=%q has_reason=%t)", ErrInvalid, i, edit.Action, edit.ResourceKind, edit.ResourceKey, strings.TrimSpace(edit.Reason) != "")
 		}
 	}
 	if !validPhaseOutcome(r.Phase, r.Outcome) {

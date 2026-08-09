@@ -45,6 +45,8 @@ func main() {
 	memorylayerWorkspace := flag.String("memorylayer-workspace", os.Getenv("MEMORYLAYER_WORKSPACE"), "MemoryLayer workspace (defaults to the resolved logical workspace)")
 	promptNotesAuthority := flag.String("prompt-notes-authority", env("SAHARA_PROMPT_NOTES_AUTHORITY", promptNotesAuthorityLocal), "prompt-note authority: off, local, or memorylayer (no fallback or dual write)")
 	agentSpecificationsAuthority := flag.String("agent-specifications-authority", env("SAHARA_AGENT_SPECIFICATIONS_AUTHORITY", agentSpecificationsAuthorityLocal), "agent-specification authority: off, local, or memorylayer (no fallback or dual write)")
+	refinementAuthority := flag.String("refinement-authority", env("SAHARA_REFINEMENT_AUTHORITY", refinementAuthorityLocal), "refinement proposal/audit authority: off, local, or memorylayer (no fallback or dual write)")
+	refinementSessionAutoApply := flag.Bool("refinement-session-auto-apply", strings.EqualFold(strings.TrimSpace(os.Getenv("SAHARA_REFINEMENT_SESSION_AUTO_APPLY")), "true"), "allow low-risk session-only refinements to apply without interactive approval")
 	memoryRecall := flag.Bool("memory-recall", true, "inject MemoryLayer memories relevant to each message (requires --memorylayer)")
 	memoryRecallLimit := flag.Int("memory-recall-limit", 5, "how many recalled memories to inject")
 	goalMaxContinuations := flag.Uint("goal-max-continuations", 3, "maximum automatic follow-up turns per durable goal; 0 disables automatic continuation")
@@ -112,6 +114,11 @@ func main() {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(2)
 	}
+	normalizedRefinementAuthority, err := normalizeRefinementAuthority(*refinementAuthority, *memorylayerURL)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(2)
+	}
 	if *subagentExecutorConcurrency <= 0 {
 		fmt.Fprintln(os.Stderr, "error: --subagent-executor-concurrency must be positive")
 		os.Exit(2)
@@ -166,6 +173,8 @@ func main() {
 		memorylayerWorkspace:         effectiveWorkspace(*memorylayerWorkspace, workspaceResolution.WorkspaceID),
 		promptNotesAuthority:         normalizedPromptNotesAuthority,
 		agentSpecificationsAuthority: normalizedAgentSpecificationsAuthority,
+		refinementAuthority:          normalizedRefinementAuthority,
+		refinementSessionAutoApply:   *refinementSessionAutoApply,
 		memoryRecall:                 *memoryRecall,
 		memoryRecallLimit:            *memoryRecallLimit,
 		goalMaxContinuations:         uint32(*goalMaxContinuations),

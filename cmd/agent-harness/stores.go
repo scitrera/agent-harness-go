@@ -12,6 +12,7 @@ import (
 	"github.com/scitrera/agent-harness-go/pkg/memorylayer"
 	"github.com/scitrera/agent-harness-go/pkg/promptnotes"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
+	"github.com/scitrera/agent-harness-go/pkg/refinement"
 	"github.com/scitrera/agent-harness-go/pkg/store"
 	"github.com/scitrera/agent-harness-go/pkg/subagent"
 	"github.com/scitrera/agent-harness-go/pkg/threadindex"
@@ -45,6 +46,9 @@ type stores struct {
 	// authority. A provider-backed catalog resolves the turn's logical workspace
 	// at invocation time; nil preserves generic unnamed subagents.
 	agentCatalog subagent.Catalog
+	// refinements coordinates the selected immutable audit authority with the
+	// independently selected target-resource authorities.
+	refinements *refinement.Service
 	// Lifecycle stores use local files by default. Aether worker modes replace
 	// them with CAS-backed implementations over the same interfaces.
 	subagents subagent.Registry
@@ -248,6 +252,10 @@ func openStores(ctx context.Context, cfg appConfig) (stores, error) {
 	if err != nil {
 		return stores{}, err
 	}
+	refinements, err := openRefinementService(cfg)
+	if err != nil {
+		return stores{}, err
+	}
 	subagents, err := subagent.NewFileRegistry(cfg.stateDir)
 	if err != nil {
 		return stores{}, err
@@ -275,6 +283,7 @@ func openStores(ctx context.Context, cfg appConfig) (stores, error) {
 			files:         files,
 			promptNotes:   promptNoteProvider,
 			agentCatalog:  agentCatalog,
+			refinements:   refinements,
 			subagents:     subagents,
 			goals:         goals,
 			continuations: continuations,
@@ -319,11 +328,72 @@ func openStores(ctx context.Context, cfg appConfig) (stores, error) {
 		catalogs:      catalog.BindWorkspaceProvider(catalogProvider, cfg.workspaceID, cfg.memorylayerWorkspace),
 		promptNotes:   promptNoteProvider,
 		agentCatalog:  agentCatalog,
+		refinements:   refinements,
 		subagents:     subagents,
 		goals:         goals,
 		continuations: continuations,
 		turns:         turns,
 		remote:        true,
+	}, nil
+}
+
+func openRefinementService(cfg appConfig) (*refinement.Service, error) {
+	authority, err := normalizeRefinementAuthority(cfg.refinementAuthority, cfg.memorylayerURL)
+	if err != nil {
+		return nil, err
+	}
+	if authority == refinementAuthorityOff {
+		return nil, nil
+	}
+	promptAuthority, err := normalizePromptNotesAuthority(cfg.promptNotesAuthority, cfg.memorylayerURL)
+	if err != nil {
+		return nil, err
+	}
+	agentAuthority, err := normalizeAgentSpecificationsAuthority(cfg.agentSpecificationsAuthority, cfg.memorylayerURL)
+	if err != nil {
+		return nil, err
+	}
+	var audit refinement.Store
+	switch authority {
+	case refinementAuthorityLocal:
+		audit, err = refinement.NewFileStore(cfg.stateDir, time.Now)
+	case refinementAuthorityMemoryLayer:
+		audit, err = memorylayer.NewRefinementRecordStore(memorylayer.Config{
+			BaseURL: cfg.memorylayerURL, APIKey: cfg.memorylayerKey, Workspace: cfg.memorylayerWorkspace,
+		})
+		if err == nil {
+			audit = refinement.BindStore(audit, cfg.workspaceID, cfg.memorylayerWorkspace)
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
+	editors := map[refinement.ResourceKind]refinement.ResourceEditor{}
+	if promptAuthority == promptNotesAuthorityLocal {
+		localEditor, editorErr := promptnotes.NewFileEditor(cfg.stateDir)
+		if editorErr != nil {
+			return nil, editorErr
+		}
+		editors[refinement.ResourcePromptNote] = localEditor
+	}
+	if promptAuthority == promptNotesAuthorityMemoryLayer || agentAuthority == agentSpecificationsAuthorityMemoryLayer {
+		editor, editorErr := memorylayer.NewRefinementResourceEditor(memorylayer.Config{
+			BaseURL: cfg.memorylayerURL, APIKey: cfg.memorylayerKey, Workspace: cfg.memorylayerWorkspace,
+		})
+		if editorErr != nil {
+			return nil, editorErr
+		}
+		bound := refinement.BindResourceEditor(editor, cfg.workspaceID, cfg.memorylayerWorkspace)
+		if promptAuthority == promptNotesAuthorityMemoryLayer {
+			editors[refinement.ResourcePromptNote] = bound
+		}
+		if agentAuthority == agentSpecificationsAuthorityMemoryLayer {
+			editors[refinement.ResourceAgentSpecification] = bound
+		}
+	}
+	return &refinement.Service{
+		Store: audit, Editors: editors,
+		Policy: refinement.Policy{AllowSessionLowRiskWithoutApproval: cfg.refinementSessionAutoApply},
 	}, nil
 }
 

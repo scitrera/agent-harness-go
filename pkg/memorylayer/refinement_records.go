@@ -145,10 +145,21 @@ func sdkRefinementEdits(edits []refinement.Edit) []memorylayersdk.RefinementEdit
 			Action: string(edit.Action), ResourceKind: string(edit.ResourceKind), ResourceKey: edit.ResourceKey,
 			ResourceID: optionalString(edit.ResourceID), ExpectedETag: optionalString(edit.ExpectedETag),
 			BeforeETag: optionalString(edit.BeforeETag), AfterETag: optionalString(edit.AfterETag),
-			Reason: edit.Reason, Applied: edit.Applied, Error: optionalString(edit.Error),
+			Reason: edit.Reason, Content: edit.Content, Before: sdkResourceSnapshot(edit.Before), After: sdkResourceSnapshot(edit.After),
+			Applied: edit.Applied, Error: optionalString(edit.Error),
 		}
 	}
 	return out
+}
+
+func sdkResourceSnapshot(snapshot *refinement.ResourceSnapshot) *memorylayersdk.RefinementResourceSnapshot {
+	if snapshot == nil {
+		return nil
+	}
+	return &memorylayersdk.RefinementResourceSnapshot{
+		ResourceID: optionalString(snapshot.ResourceID), ResourceKey: snapshot.ResourceKey, ETag: optionalString(snapshot.ETag),
+		SchemaVersion: snapshot.SchemaVersion, Content: snapshot.Content, Metadata: snapshot.Metadata, Deleted: snapshot.Deleted,
+	}
 }
 
 func sdkExternalReference(reference *refinement.ExternalReference) *memorylayersdk.RefinementExternalReference {
@@ -191,10 +202,21 @@ func refinementEdits(edits []memorylayersdk.RefinementEdit) []refinement.Edit {
 		out[i] = refinement.Edit{
 			Action: refinement.Action(edit.Action), ResourceKind: refinement.ResourceKind(edit.ResourceKind), ResourceKey: edit.ResourceKey,
 			ResourceID: valueString(edit.ResourceID), ExpectedETag: valueString(edit.ExpectedETag), BeforeETag: valueString(edit.BeforeETag),
-			AfterETag: valueString(edit.AfterETag), Reason: edit.Reason, Applied: edit.Applied, Error: valueString(edit.Error),
+			AfterETag: valueString(edit.AfterETag), Reason: edit.Reason, Content: edit.Content,
+			Before: resourceSnapshot(edit.Before), After: resourceSnapshot(edit.After), Applied: edit.Applied, Error: valueString(edit.Error),
 		}
 	}
 	return out
+}
+
+func resourceSnapshot(snapshot *memorylayersdk.RefinementResourceSnapshot) *refinement.ResourceSnapshot {
+	if snapshot == nil {
+		return nil
+	}
+	return &refinement.ResourceSnapshot{
+		ResourceID: valueString(snapshot.ResourceID), ResourceKey: snapshot.ResourceKey, ETag: valueString(snapshot.ETag),
+		SchemaVersion: snapshot.SchemaVersion, Content: snapshot.Content, Metadata: snapshot.Metadata, Deleted: snapshot.Deleted,
+	}
 }
 
 func externalReference(reference *memorylayersdk.RefinementExternalReference) *refinement.ExternalReference {

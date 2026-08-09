@@ -13,7 +13,7 @@ import (
 	workspacepkg "github.com/scitrera/agent-harness-go/pkg/workspace"
 )
 
-const maxFileBytes = 1 << 20
+const maxFileBytes = 16 << 20
 
 // FileProvider reads the standalone prompt-note authority from the harness
 // state directory. Each logical workspace gets its own prompt-notes.json file.
@@ -36,9 +36,10 @@ func (p *FileProvider) Path(workspaceID string) string {
 }
 
 type fileDocument struct {
-	SchemaVersion int        `json:"schema_version"`
-	WorkspaceID   string     `json:"workspace_id,omitempty"`
-	Notes         []fileNote `json:"notes"`
+	SchemaVersion int             `json:"schema_version"`
+	WorkspaceID   string          `json:"workspace_id,omitempty"`
+	Notes         []fileNote      `json:"notes"`
+	Operations    []fileOperation `json:"refinement_operations,omitempty"`
 }
 
 type fileNote struct {
@@ -51,50 +52,26 @@ type fileNote struct {
 	Metadata      map[string]any `json:"metadata,omitempty"`
 	Revision      int            `json:"revision,omitempty"`
 	ETag          string         `json:"etag,omitempty"`
+	Deleted       bool           `json:"deleted,omitempty"`
 }
 
 // LoadWorkspace reads and validates one workspace's local authority. A missing
 // file means that workspace has no prompt notes; malformed or mismatched data is
 // an error so it cannot silently change the system prompt.
 func (p *FileProvider) LoadWorkspace(ctx context.Context, workspaceID string) ([]Note, error) {
-	if err := ctx.Err(); err != nil {
+	document, exists, err := p.loadDocument(ctx, workspaceID)
+	if err != nil {
 		return nil, err
 	}
-	path := p.Path(workspaceID)
-	file, err := os.Open(path)
-	if errors.Is(err, os.ErrNotExist) {
+	if !exists {
 		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("promptnotes: open %s: %w", path, err)
-	}
-	defer file.Close()
-
-	limited := io.LimitReader(file, maxFileBytes+1)
-	raw, err := io.ReadAll(limited)
-	if err != nil {
-		return nil, fmt.Errorf("promptnotes: read %s: %w", path, err)
-	}
-	if len(raw) > maxFileBytes {
-		return nil, fmt.Errorf("promptnotes: %s exceeds %d bytes", path, maxFileBytes)
-	}
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.DisallowUnknownFields()
-	var document fileDocument
-	if err := decoder.Decode(&document); err != nil {
-		return nil, fmt.Errorf("promptnotes: decode %s: %w", path, err)
-	}
-	if err := requireJSONEOF(decoder); err != nil {
-		return nil, fmt.Errorf("promptnotes: decode %s: %w", path, err)
-	}
-	if document.SchemaVersion != CurrentSchemaVersion {
-		return nil, fmt.Errorf("promptnotes: %s uses unsupported document schema version %d", path, document.SchemaVersion)
-	}
-	if document.WorkspaceID != "" && document.WorkspaceID != workspaceID {
-		return nil, fmt.Errorf("promptnotes: %s belongs to workspace %q, not %q", path, document.WorkspaceID, workspaceID)
 	}
 	notes := make([]Note, 0, len(document.Notes))
 	for _, stored := range document.Notes {
+		stored = normalizeFileNote(workspaceID, stored)
+		if stored.Deleted {
+			continue
+		}
 		enabled := true
 		if stored.Enabled != nil {
 			enabled = *stored.Enabled
@@ -106,6 +83,49 @@ func (p *FileProvider) LoadWorkspace(ctx context.Context, workspaceID string) ([
 		})
 	}
 	return Enabled(notes)
+}
+
+func (p *FileProvider) loadDocument(ctx context.Context, workspaceID string) (fileDocument, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return fileDocument{}, false, err
+	}
+	path := p.Path(workspaceID)
+	file, err := os.Open(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return fileDocument{SchemaVersion: CurrentSchemaVersion, WorkspaceID: workspaceID, Notes: []fileNote{}}, false, nil
+	}
+	if err != nil {
+		return fileDocument{}, false, fmt.Errorf("promptnotes: open %s: %w", path, err)
+	}
+	defer file.Close()
+
+	limited := io.LimitReader(file, maxFileBytes+1)
+	raw, err := io.ReadAll(limited)
+	if err != nil {
+		return fileDocument{}, false, fmt.Errorf("promptnotes: read %s: %w", path, err)
+	}
+	if len(raw) > maxFileBytes {
+		return fileDocument{}, false, fmt.Errorf("promptnotes: %s exceeds %d bytes", path, maxFileBytes)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	var document fileDocument
+	if err := decoder.Decode(&document); err != nil {
+		return fileDocument{}, false, fmt.Errorf("promptnotes: decode %s: %w", path, err)
+	}
+	if err := requireJSONEOF(decoder); err != nil {
+		return fileDocument{}, false, fmt.Errorf("promptnotes: decode %s: %w", path, err)
+	}
+	if document.SchemaVersion != CurrentSchemaVersion {
+		return fileDocument{}, false, fmt.Errorf("promptnotes: %s uses unsupported document schema version %d", path, document.SchemaVersion)
+	}
+	if document.WorkspaceID != "" && document.WorkspaceID != workspaceID {
+		return fileDocument{}, false, fmt.Errorf("promptnotes: %s belongs to workspace %q, not %q", path, document.WorkspaceID, workspaceID)
+	}
+	if document.WorkspaceID == "" {
+		document.WorkspaceID = workspaceID
+	}
+	return document, true, nil
 }
 
 func requireJSONEOF(decoder *json.Decoder) error {

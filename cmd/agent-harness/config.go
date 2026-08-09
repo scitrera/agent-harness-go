@@ -20,6 +20,9 @@ const (
 	agentSpecificationsAuthorityOff         = "off"
 	agentSpecificationsAuthorityLocal       = "local"
 	agentSpecificationsAuthorityMemoryLayer = "memorylayer"
+	refinementAuthorityOff                  = "off"
+	refinementAuthorityLocal                = "local"
+	refinementAuthorityMemoryLayer          = "memorylayer"
 )
 
 // aetherStreamFlush coalesces streamed token deltas into at most one message per
@@ -78,6 +81,10 @@ type appConfig struct {
 	// subagent-definition source. local means the workspace's agents directory;
 	// memorylayer means typed, workspace-scoped agent specification resources.
 	agentSpecificationsAuthority string
+	// refinementAuthority selects the sole append-only proposal/audit store.
+	// Target resources still follow their prompt-note/agent-spec authorities.
+	refinementAuthority        string
+	refinementSessionAutoApply bool
 	// memoryRecall injects memories relevant to the user's message into the
 	// turn; memoryRecallLimit caps how many.
 	memoryRecall      bool
@@ -125,6 +132,24 @@ func normalizeAgentSpecificationsAuthority(value, memorylayerURL string) (string
 		return value, nil
 	default:
 		return "", fmt.Errorf("invalid agent-specification authority %q (want off, local, or memorylayer)", value)
+	}
+}
+
+func normalizeRefinementAuthority(value, memorylayerURL string) (string, error) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		value = refinementAuthorityLocal
+	}
+	switch value {
+	case refinementAuthorityOff, refinementAuthorityLocal:
+		return value, nil
+	case refinementAuthorityMemoryLayer:
+		if strings.TrimSpace(memorylayerURL) == "" {
+			return "", errors.New("refinement authority memorylayer requires --memorylayer")
+		}
+		return value, nil
+	default:
+		return "", fmt.Errorf("invalid refinement authority %q (want off, local, or memorylayer)", value)
 	}
 }
 

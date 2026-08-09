@@ -81,6 +81,26 @@ func Test_authorizeTool_safety_runs_for_preauthorized(t *testing.T) {
 	}
 }
 
+func Test_authorizeTool_freshApprovalIgnoresDurableGrant(t *testing.T) {
+	awaiter := &recordingAwaiter{}
+	granter := &fakeGranter{}
+	runner := &Runner{
+		approvals: awaiter, approvalGranter: granter,
+		grantStore: stubGrantStore{granted: map[string]bool{"ws1/apply_refinement": true}},
+	}
+	in := AuthzInput{
+		Call: protocol.ToolInvokeEnvelope{CallID: "apply-1", Name: "apply_refinement"},
+		Addr: protocol.MessageAddress{WorkspaceID: "ws1"}, Trust: tools.TrustRequiresFreshApproval,
+	}
+	decision := runner.authorizeTool(context.Background(), in, trustBase(in.Trust))
+	if decision.Outcome != Allow || !awaiter.consulted {
+		t.Fatalf("fresh approval decision = %+v, consulted=%t", decision, awaiter.consulted)
+	}
+	if len(granter.session) != 0 || len(granter.always) != 0 {
+		t.Fatalf("fresh approval must not create reusable grants: %+v", granter)
+	}
+}
+
 // recordingAwaiter grants and records that it was consulted.
 type recordingAwaiter struct{ consulted bool }
 

@@ -84,11 +84,11 @@ func resolveAuthz(ctx context.Context, in AuthzInput, seed AuthzOutcome, authori
 }
 
 // trustBase maps a tool's Trust hint to the pipeline's base requirement: a
-// pre-authorized/default tool starts Allow, a requires-approval tool starts
-// Prompt. Local tools reach the pipeline only via the runtime policy's
-// requires-approval trigger, so their base is Prompt regardless of Trust.
+// pre-authorized/default tool starts Allow, while both approval trust levels
+// start Prompt. Local tools reach the pipeline after their handler/policy asks
+// for approval; fresh trust then prevents a reusable grant from bypassing it.
 func trustBase(trust tools.TrustLevel) AuthzOutcome {
-	if trust == tools.TrustRequiresApproval {
+	if trust == tools.TrustRequiresApproval || trust == tools.TrustRequiresFreshApproval {
 		return Prompt
 	}
 	return Allow
@@ -223,6 +223,9 @@ type grantAuthorizer struct{ r *Runner }
 
 func (g grantAuthorizer) Authorize(ctx context.Context, in AuthzInput) AuthzDecision {
 	r := g.r
+	if in.Trust == tools.TrustRequiresFreshApproval {
+		return AuthzDecision{Outcome: Abstain, Reason: "fresh approval required"}
+	}
 	if in.Trust == tools.TrustPreAuthorized {
 		return AuthzDecision{Outcome: Allow, Reason: "pre-authorized"}
 	}
@@ -258,7 +261,9 @@ func (ia interactiveAuthorizer) Authorize(ctx context.Context, in AuthzInput) Au
 	reqID := call.CallID
 	emitter, _ := tools.PartEmitterFrom(ctx)
 	scopes := r.approvalScopes
-	if len(scopes) == 0 {
+	if in.Trust == tools.TrustRequiresFreshApproval {
+		scopes = []string{"once"}
+	} else if len(scopes) == 0 {
 		scopes = []string{"once", "session", "always"}
 	}
 	r.emitApproval(ctx, emitter, reqID, call, scopes, spec.ApprovalPending, "tool is not pre-authorized")
@@ -296,7 +301,7 @@ func (ia interactiveAuthorizer) Authorize(ctx context.Context, in AuthzInput) Au
 	}
 
 	// Granted: record a grant so future calls in scope don't re-prompt.
-	if r.approvalGranter != nil {
+	if r.approvalGranter != nil && in.Trust != tools.TrustRequiresFreshApproval {
 		switch decision.Scope {
 		case "session":
 			r.approvalGranter.GrantSession(addr.WorkspaceID, call.Name)

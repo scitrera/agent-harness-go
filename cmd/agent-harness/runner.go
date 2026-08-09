@@ -17,6 +17,7 @@ import (
 	"github.com/scitrera/agent-harness-go/pkg/localtools"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 	"github.com/scitrera/agent-harness-go/pkg/provider"
+	"github.com/scitrera/agent-harness-go/pkg/refinement"
 	"github.com/scitrera/agent-harness-go/pkg/skills"
 	"github.com/scitrera/agent-harness-go/pkg/subagent"
 	"github.com/scitrera/agent-harness-go/pkg/tools"
@@ -71,6 +72,11 @@ func buildRunner(cfg appConfig, st stores, pub channel.Publisher, approvals appr
 	}
 	if err := registerReferenceSubagent(reg, subagentRef, st.agentCatalog, allowBackground); err != nil {
 		return nil, nil, fmt.Errorf("register subagent: %w", err)
+	}
+	if st.refinements != nil {
+		if err := refinement.RegisterTools(reg, st.refinements); err != nil {
+			return nil, nil, fmt.Errorf("register refinement tools: %w", err)
+		}
 	}
 
 	var goalRuntime *goal.Runtime

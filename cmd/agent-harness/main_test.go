@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/scitrera/agent-harness-go/pkg/refinement"
 	"github.com/scitrera/agent-harness-go/pkg/subagent"
 	"github.com/scitrera/agent-harness-go/pkg/tools"
 )
@@ -132,6 +133,45 @@ func TestNormalizeAgentSpecificationsAuthorityIsExplicitAndRequiresMemoryLayer(t
 		if test.wantErr != "" && (err == nil || !strings.Contains(err.Error(), test.wantErr)) {
 			t.Fatalf("normalize(%q) error = %v, want %q", test.value, err, test.wantErr)
 		}
+	}
+}
+
+func TestNormalizeRefinementAuthorityIsExplicitAndRequiresMemoryLayer(t *testing.T) {
+	for _, test := range []struct {
+		value, memoryURL, want, wantErr string
+	}{
+		{value: "", want: refinementAuthorityLocal},
+		{value: " OFF ", want: refinementAuthorityOff},
+		{value: "LOCAL", want: refinementAuthorityLocal},
+		{value: "memorylayer", memoryURL: "http://memorylayer", want: refinementAuthorityMemoryLayer},
+		{value: "memorylayer", wantErr: "requires --memorylayer"},
+		{value: "dual", wantErr: "invalid refinement authority"},
+	} {
+		got, err := normalizeRefinementAuthority(test.value, test.memoryURL)
+		if test.wantErr == "" && (err != nil || got != test.want) {
+			t.Fatalf("normalize(%q) = %q, %v; want %q", test.value, got, err, test.want)
+		}
+		if test.wantErr != "" && (err == nil || !strings.Contains(err.Error(), test.wantErr)) {
+			t.Fatalf("normalize(%q) error = %v, want %q", test.value, err, test.wantErr)
+		}
+	}
+}
+
+func TestOpenRefinementServiceSelectsAuditAndResourceAuthorities(t *testing.T) {
+	local, err := openRefinementService(appConfig{stateDir: t.TempDir()})
+	if err != nil || local == nil || local.Store == nil || local.Editors[refinement.ResourcePromptNote] == nil || local.Editors[refinement.ResourceAgentSpecification] != nil {
+		t.Fatalf("local refinement service = %+v, %v", local, err)
+	}
+	off, err := openRefinementService(appConfig{stateDir: t.TempDir(), refinementAuthority: refinementAuthorityOff})
+	if err != nil || off != nil {
+		t.Fatalf("off refinement service = %+v, %v", off, err)
+	}
+	remoteResource, err := openRefinementService(appConfig{
+		stateDir: t.TempDir(), memorylayerURL: "http://memorylayer", memorylayerWorkspace: "backend",
+		promptNotesAuthority: promptNotesAuthorityMemoryLayer,
+	})
+	if err != nil || remoteResource == nil || remoteResource.Editors[refinement.ResourcePromptNote] == nil || remoteResource.Editors[refinement.ResourceAgentSpecification] != nil {
+		t.Fatalf("mixed-authority refinement service = %+v, %v", remoteResource, err)
 	}
 }
 

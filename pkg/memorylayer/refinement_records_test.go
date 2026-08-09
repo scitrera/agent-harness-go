@@ -67,3 +67,19 @@ func TestRefinementRecordStoreRejectsCursorCycles(t *testing.T) {
 		t.Fatal("expected cursor cycle error")
 	}
 }
+
+func TestRefinementEditAdapterPreservesContentAndSnapshots(t *testing.T) {
+	applied := true
+	edits := []refinement.Edit{{
+		Action: refinement.ActionReplace, ResourceKind: refinement.ResourcePromptNote, ResourceKey: "note", ResourceID: "note-1",
+		ExpectedETag: "e1", BeforeETag: "e1", AfterETag: "e2", Reason: "improve guidance",
+		Content: map[string]any{"title": "New", "content": "New content"},
+		Before:  &refinement.ResourceSnapshot{ResourceID: "note-1", ResourceKey: "note", ETag: "e1", SchemaVersion: 1, Content: map[string]any{"title": "Old"}},
+		After:   &refinement.ResourceSnapshot{ResourceID: "note-1", ResourceKey: "note", ETag: "e2", SchemaVersion: 1, Content: map[string]any{"title": "New"}},
+		Applied: &applied,
+	}}
+	roundTrip := refinementEdits(sdkRefinementEdits(edits))
+	if len(roundTrip) != 1 || roundTrip[0].Content["title"] != "New" || roundTrip[0].Before == nil || roundTrip[0].Before.ETag != "e1" || roundTrip[0].After == nil || roundTrip[0].After.ETag != "e2" {
+		t.Fatalf("round trip = %#v", roundTrip)
+	}
+}
