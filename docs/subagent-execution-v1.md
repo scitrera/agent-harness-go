@@ -1,7 +1,8 @@
 # Subagent Execution Envelope v1
 
-Status: implemented as the OSS in-process/Aether task payload contract; external
-task assignment is not enabled yet.
+Status: implemented for the default in-process path and the opt-in targeted
+Aether executor. The schema remains pre-release while sibling modules are tested
+through local replacements.
 
 ## Purpose
 
@@ -47,16 +48,19 @@ referenced child-session message and checked against the input digest.
 resolve/mint child session
         |
         v
-persist referenced input message
+persist referenced input message in shared history
         |
         v
-admit durable task with envelope payload
+admit targeted durable task with envelope payload
+        |
+        v
+assignee validates envelope, metadata, authority, and catalog digest
         |
         v
 claim task exactly once
         |
         v
-resolve + verify input and policy
+resolve + verify referenced input
         |
         v
 execute / checkpoint / append result
@@ -80,27 +84,42 @@ reject cross-workspace or cross-session references, unknown fields, duplicate
 input IDs, non-canonical policy lists, and trailing JSON.
 
 Local execution works with the ordinary OSS history store. An external worker
-requires a history implementation visible to both creator and executor, such as
-MemoryLayer OSS or a deliberately shared filesystem deployment. Merely placing
-prompt text in Aether metadata is not an acceptable substitute.
+requires a history implementation visible to both creator and executor. The
+reference CLI currently requires MemoryLayer for this mode; library hosts may
+provide another genuinely shared `HistoryStore`. Merely placing prompt text in
+Aether metadata is not an acceptable substitute.
+
+Named-agent catalog definitions remain local deployment inputs in revision 1.
+The executor loads its workspace catalog and verifies the complete policy digest
+before claiming. Parent and executor deployments therefore need matching agent
+definitions. Generic policies can be reconstructed only when they contain no
+private instructions that were intentionally omitted from the descriptor.
 
 The checkpoint reference is task-scoped. Revision 1 reserves its stable key but
 does not claim that the current one-turn provider/tool loop is resumable. A
 worker may only advertise resumption after it can atomically record a boundary
 that excludes uncertain tool mutations.
 
-## Current activation boundary
+## Activation
 
-The reference runner now creates and verifies this envelope even in local mode,
-persists the referenced input before task admission, and consumes that same
-input during in-process execution. The Aether adapter serializes the descriptor
-as the task payload while keeping only non-secret IDs and hashes in metadata.
+The reference runner creates and verifies this envelope in both modes and
+persists the referenced input before task admission. Self-assigned in-process
+execution remains the default.
 
-Aether tasks remain self-assigned because execution still happens inside the
-parent worker. The next activation step is an optional pool/targeted executor
-that consumes `TaskAssignment.Payload`, resolves shared history and catalog
-policy, claims the task, and runs the already-prepared child without calling the
-parent's admission path again.
+With `--subagent-target`, the parent creates a targeted Aether task and becomes
+a read-only waiter: it does not claim, execute, fail, cancel, or complete the
+child. A worker started with `--subagent-executor` consumes only
+`agent-harness.subagent.v1` assignments, validates the descriptor against its
+non-secret metadata and local catalog, claims once, resolves the shared-history
+input, executes without re-entering admission, appends the result, and performs
+the terminal task transition. Both flags are restricted to Aether worker modes
+with `--memorylayer`; local-only history fails closed during configuration.
+
+The executor receives any OBO authority on Aether's typed
+`TaskAssignment.Authorization` field. That value is projected by the gateway
+from persisted, task-scoped, assignee-bound authority—not reconstructed from
+creator metadata. The envelope and harness-supplied task metadata still contain
+no grant, principal, token, prompt text, or catalog instructions.
 
 ## Recovery ownership
 
@@ -111,8 +130,12 @@ parent's admission path again.
   execution authority.
 - A lost response is followed by an authoritative query; the mutation is not
   blindly repeated.
-- A non-terminal task whose executor is known lost is durably failed or
-  cancelled before the lifecycle is projected as `interrupted`.
+- A running task redelivered after its executor is no longer known in-process is
+  durably failed rather than replayed. Concurrent duplicate delivery to the
+  same live executor is coalesced.
+- Parent restart recovery preserves externally admitted/running task state and
+  reconciles its lifecycle projection against Aether instead of terminating the
+  remotely owned work.
 - A terminal task is never automatically rerun, even when its result reference
   is missing; that inconsistency requires inspection or an explicit new
   invocation.

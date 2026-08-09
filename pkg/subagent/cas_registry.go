@@ -360,6 +360,18 @@ func (r *CASRegistry) recoverRef(ctx context.Context, ref casRegistryRef, at tim
 					return fmt.Errorf("subagent: reconcile execution task %q: %w", record.TaskID, err)
 				}
 				switch recovery {
+				case TaskRecoveryAdmitted:
+					// State projection is monotonic. A briefly stale task read must
+					// not move a locally observed running child back to admitted.
+					if record.Status == spec.SessionSubagentAdmitted || record.Status == spec.SessionSubagentRunning {
+						continue
+					}
+					recoveredStatus = spec.SessionSubagentAdmitted
+				case TaskRecoveryRunning:
+					if record.Status == spec.SessionSubagentRunning {
+						continue
+					}
+					recoveredStatus = spec.SessionSubagentRunning
 				case TaskRecoveryCompleted:
 					recoveredStatus = spec.SessionSubagentCompleted
 				case TaskRecoveryFailed:
@@ -374,7 +386,11 @@ func (r *CASRegistry) recoverRef(ctx context.Context, ref casRegistryRef, at tim
 			}
 			record.Status = recoveredStatus
 			record.UpdatedAt = timestamp
-			record.CompletedAt = timestamp
+			if recoveredStatus == spec.SessionSubagentAdmitted || recoveredStatus == spec.SessionSubagentRunning {
+				record.CompletedAt = ""
+			} else {
+				record.CompletedAt = timestamp
+			}
 			changed = true
 		}
 		if !changed {

@@ -93,6 +93,7 @@ type ExecutionEnvelope struct {
 	ParentTaskID    string               `json:"parent_task_id,omitempty"`
 	ParentMessageID string               `json:"parent_message_id,omitempty"`
 	InvocationID    string               `json:"invocation_id,omitempty"`
+	Depth           int                  `json:"depth"`
 	Background      bool                 `json:"background,omitempty"`
 	Input           ExecutionArtifactRef `json:"input"`
 	Result          ExecutionArtifactRef `json:"result"`
@@ -113,6 +114,7 @@ func NewExecutionEnvelope(req Request, workspaceID, childSessionID string, backg
 		req.Parent.TaskID,
 		req.ParentMessageID,
 		req.InvocationID,
+		strconv.Itoa(req.Depth),
 		strconv.FormatBool(background),
 	)
 	policy := executionPolicy(req)
@@ -126,6 +128,7 @@ func NewExecutionEnvelope(req Request, workspaceID, childSessionID string, backg
 		ParentTaskID:    strings.TrimSpace(req.Parent.TaskID),
 		ParentMessageID: strings.TrimSpace(req.ParentMessageID),
 		InvocationID:    strings.TrimSpace(req.InvocationID),
+		Depth:           req.Depth,
 		Background:      background,
 		Input: ExecutionArtifactRef{
 			Backend:     ExecutionBackendHistory,
@@ -172,6 +175,8 @@ func (e ExecutionEnvelope) Validate() error {
 		return fmt.Errorf("subagent: unsupported execution schema %q", e.Schema)
 	case e.SchemaRevision != ExecutionEnvelopeSchemaRevision:
 		return fmt.Errorf("subagent: unsupported execution schema revision %d", e.SchemaRevision)
+	case e.Depth < 0:
+		return errors.New("subagent: execution depth must not be negative")
 	}
 	wantExecutionID := "ahx-v1-" + hashExecutionIdentity(
 		e.WorkspaceID,
@@ -180,6 +185,7 @@ func (e ExecutionEnvelope) Validate() error {
 		e.ParentTaskID,
 		e.ParentMessageID,
 		e.InvocationID,
+		strconv.Itoa(e.Depth),
 		strconv.FormatBool(e.Background),
 	)
 	if e.ExecutionID != wantExecutionID {

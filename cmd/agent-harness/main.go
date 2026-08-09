@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/scitrera/agent-harness-go/pkg/telemetry/otlpexport"
@@ -37,6 +38,9 @@ func main() {
 	aetherTLS := flag.Bool("aether-tls", false, "use TLS for the Aether connection")
 	aetherTLSInsecure := flag.Bool("aether-tls-insecure", false, "skip Aether TLS certificate verification (testing only)")
 	aetherTaskMessageLanes := flag.Bool("aether-task-message-lanes", false, "route real Aether task turns over their subscribed per-task message lanes")
+	subagentTarget := flag.String("subagent-target", os.Getenv("SAHARA_SUBAGENT_TARGET"), "execute spawned subagents on this full Aether agent topic (requires --memorylayer)")
+	subagentExecutor := flag.Bool("subagent-executor", false, "accept targeted agent-harness subagent tasks on this Aether worker (requires --memorylayer)")
+	subagentExecutorConcurrency := flag.Int("subagent-executor-concurrency", 4, "maximum concurrently assigned external subagents")
 	memorylayerURL := flag.String("memorylayer", os.Getenv("MEMORYLAYER_BASE_URL"), "MemoryLayer server URL; stores threads + transcripts there instead of on local disk")
 	memorylayerWorkspace := flag.String("memorylayer-workspace", os.Getenv("MEMORYLAYER_WORKSPACE"), "MemoryLayer workspace (defaults to the resolved logical workspace)")
 	memoryRecall := flag.Bool("memory-recall", true, "inject MemoryLayer memories relevant to each message (requires --memorylayer)")
@@ -91,6 +95,14 @@ func main() {
 		fmt.Fprintf(os.Stderr, "error: --%s needs an Aether gateway: set --aether or AETHER_ADDR\n", selectedMode)
 		os.Exit(2)
 	}
+	if err := validateExternalSubagentConfig(selectedMode, *subagentTarget, *subagentExecutor, *memorylayerURL); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(2)
+	}
+	if *subagentExecutorConcurrency <= 0 {
+		fmt.Fprintln(os.Stderr, "error: --subagent-executor-concurrency must be positive")
+		os.Exit(2)
+	}
 	// A pure client drives someone else's agent, so it needs no provider of its
 	// own; every other mode runs turns locally and does.
 	if *baseURL == "" && selectedMode.runsTurnsLocally(*aetherAddr) {
@@ -120,14 +132,17 @@ func main() {
 		seed:              *seed,
 		record:            *record,
 
-		aetherAddr:             *aetherAddr,
-		aetherWorkspace:        effectiveWorkspace(*aetherWorkspace, workspaceResolution.WorkspaceID),
-		aetherSpecifier:        *aetherSpecifier,
-		aetherTLS:              *aetherTLS,
-		aetherTLSInsecure:      *aetherTLSInsecure,
-		aetherTaskMessageLanes: *aetherTaskMessageLanes,
-		aetherUser:             *aetherUser,
-		aetherWindow:           resolveWindowID(*aetherWindow),
+		aetherAddr:                  *aetherAddr,
+		aetherWorkspace:             effectiveWorkspace(*aetherWorkspace, workspaceResolution.WorkspaceID),
+		aetherSpecifier:             *aetherSpecifier,
+		aetherTLS:                   *aetherTLS,
+		aetherTLSInsecure:           *aetherTLSInsecure,
+		aetherTaskMessageLanes:      *aetherTaskMessageLanes,
+		subagentTarget:              strings.TrimSpace(*subagentTarget),
+		subagentExecutor:            *subagentExecutor,
+		subagentExecutorConcurrency: *subagentExecutorConcurrency,
+		aetherUser:                  *aetherUser,
+		aetherWindow:                resolveWindowID(*aetherWindow),
 
 		memorylayerURL:       *memorylayerURL,
 		memorylayerKey:       os.Getenv("MEMORYLAYER_API_KEY"),

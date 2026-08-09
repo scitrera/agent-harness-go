@@ -176,14 +176,17 @@ func TestCASRegistryDeferredRecoveryProjectsAuthoritativeTaskState(t *testing.T)
 	for _, item := range []struct {
 		id     string
 		taskID string
+		status spec.SessionSubagentStatus
 	}{
-		{id: "cancelled", taskID: "task-cancelled"},
-		{id: "completed", taskID: "task-completed"},
-		{id: "failed", taskID: "task-failed"},
-		{id: "orphaned", taskID: "task-orphaned"},
-		{id: "legacy"},
+		{id: "cancelled", taskID: "task-cancelled", status: spec.SessionSubagentRunning},
+		{id: "completed", taskID: "task-completed", status: spec.SessionSubagentRunning},
+		{id: "failed", taskID: "task-failed", status: spec.SessionSubagentRunning},
+		{id: "orphaned", taskID: "task-orphaned", status: spec.SessionSubagentRunning},
+		{id: "assigned-running", taskID: "task-running", status: spec.SessionSubagentAdmitted},
+		{id: "stale-admitted", taskID: "task-admitted", status: spec.SessionSubagentRunning},
+		{id: "legacy", status: spec.SessionSubagentRunning},
 	} {
-		record := casRecord(item.id, "parent-1", spec.SessionSubagentRunning)
+		record := casRecord(item.id, "parent-1", item.status)
 		record.TaskID = item.taskID
 		if err := seed.ObserveSubagent(context.Background(), LifecycleEvent{WorkspaceID: "project-a", Record: record}); err != nil {
 			t.Fatal(err)
@@ -194,6 +197,8 @@ func TestCASRegistryDeferredRecoveryProjectsAuthoritativeTaskState(t *testing.T)
 		"task-completed": TaskRecoveryCompleted,
 		"task-failed":    TaskRecoveryFailed,
 		"task-orphaned":  TaskRecoveryInterrupted,
+		"task-running":   TaskRecoveryRunning,
+		"task-admitted":  TaskRecoveryAdmitted,
 	}}
 	restarted, _ := NewCASRegistry(CASRegistryConfig{Blobs: blobs, DeferRecovery: true})
 	recoveryAt := time.Date(2026, 8, 8, 22, 0, 0, 0, time.UTC)
@@ -205,18 +210,24 @@ func TestCASRegistryDeferredRecoveryProjectsAuthoritativeTaskState(t *testing.T)
 		t.Fatal(err)
 	}
 	want := map[string]spec.SessionSubagentStatus{
-		"cancelled": spec.SessionSubagentCancelled,
-		"completed": spec.SessionSubagentCompleted,
-		"failed":    spec.SessionSubagentFailed,
-		"legacy":    spec.SessionSubagentInterrupted,
-		"orphaned":  spec.SessionSubagentInterrupted,
+		"cancelled":        spec.SessionSubagentCancelled,
+		"completed":        spec.SessionSubagentCompleted,
+		"failed":           spec.SessionSubagentFailed,
+		"legacy":           spec.SessionSubagentInterrupted,
+		"orphaned":         spec.SessionSubagentInterrupted,
+		"assigned-running": spec.SessionSubagentRunning,
+		"stale-admitted":   spec.SessionSubagentRunning,
 	}
 	for _, record := range records {
-		if record.Status != want[record.ID] || record.CompletedAt != recoveryAt.Format(time.RFC3339Nano) {
+		if record.Status != want[record.ID] {
 			t.Fatalf("record = %#v", record)
 		}
+		terminal := record.ID != "assigned-running" && record.ID != "stale-admitted"
+		if terminal != (record.CompletedAt == recoveryAt.Format(time.RFC3339Nano)) {
+			t.Fatalf("record completion = %#v", record)
+		}
 	}
-	if len(tasks.calls) != 4 {
+	if len(tasks.calls) != 6 {
 		t.Fatalf("task recovery calls = %#v", tasks.calls)
 	}
 }

@@ -70,12 +70,15 @@ func runServe(cfg appConfig) error {
 		return err
 	}
 	ch.SetSessionService(sessionTransport.Coordinator)
-	subagentTasks, err := ch.SubagentTaskBackend(0)
+	subagentTasks, err := aetherSubagentTaskBackend(ch, cfg)
 	if err != nil {
 		return err
 	}
 	runner, _, err := buildRunner(cfg, st, sessionTransport.Publisher, broker, subagentTasks, ch, nil)
 	if err != nil {
+		return err
+	}
+	if err := enableAetherSubagentExecutor(ch, runner, cfg); err != nil {
 		return err
 	}
 	canceller := turncancel.New()
@@ -101,8 +104,8 @@ func runServe(cfg appConfig) error {
 	}
 	defer func() { _ = ch.Close() }()
 
-	fmt.Fprintf(os.Stderr, "agent-harness | model=%s endpoint=%s - serving on aether %s as %s (history: %s)\n",
-		cfg.model, cfg.baseURL, cfg.aetherAddr, ch.Topic(), historyLabel(cfg))
+	fmt.Fprintf(os.Stderr, "agent-harness | model=%s endpoint=%s - serving on aether %s as %s (history: %s%s)\n",
+		cfg.model, cfg.baseURL, cfg.aetherAddr, ch.Topic(), historyLabel(cfg), externalSubagentLabel(cfg))
 
 	if _, err := rt.RunLoop(ctx, runtime.LoopConfig{Concurrency: 8}); err != nil && ctx.Err() == nil {
 		return fmt.Errorf("run loop: %w", err)

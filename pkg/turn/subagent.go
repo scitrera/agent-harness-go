@@ -63,6 +63,9 @@ func (r *Runner) RunSubagent(ctx context.Context, req subagent.Request) (_ subag
 		return subagent.Result{}, err
 	}
 	req = execution.req
+	if execution.external {
+		return r.awaitExternalSubagent(ctx, &execution)
+	}
 	if err := r.startSubagent(ctx, execution); err != nil {
 		return subagent.Result{}, err
 	}
@@ -82,6 +85,7 @@ type subagentExecution struct {
 	model         string
 	childUsage    map[string]json.RawMessage
 	envelope      subagent.ExecutionEnvelope
+	external      bool
 }
 
 // admitSubagent first persists the immutable referenced input, then creates the
@@ -133,6 +137,9 @@ func (r *Runner) admitSubagent(ctx context.Context, req subagent.Request, childT
 			return subagentExecution{}, errors.New("subagent task admission: backend returned an empty task id")
 		}
 		execution.taskID = taskID
+		if awaiter, ok := r.subagentTasks.(subagent.TaskAwaiter); ok {
+			execution.external = awaiter.ExecutesExternally()
+		}
 	}
 	r.observeSubagent(ctx, req, childThreadID, execution.taskID, spec.SessionSubagentAdmitted, execution.admittedAt, execution.admittedAt, "", nil)
 	return execution, nil
@@ -230,6 +237,116 @@ func (r *Runner) finishSubagent(ctx context.Context, execution subagentExecution
 	}
 	r.observeSubagent(ctx, execution.req, execution.childThreadID, execution.taskID, status, execution.admittedAt, terminalAt, execution.model, execution.childUsage)
 	return runErr
+}
+
+// awaitExternalSubagent observes a task owned by another Aether assignee. The
+// parent never claims, executes, or finishes that task; it only projects
+// authoritative state and resolves the terminal result from shared history.
+func (r *Runner) awaitExternalSubagent(ctx context.Context, execution *subagentExecution) (subagent.Result, error) {
+	awaiter, ok := r.subagentTasks.(subagent.TaskAwaiter)
+	if !ok || !awaiter.ExecutesExternally() {
+		return subagent.Result{}, errors.New("subagent: external execution backend cannot await tasks")
+	}
+	seenRunning := false
+	recovery, err := awaiter.Await(ctx, execution.taskID, func(state subagent.TaskRecovery) {
+		if state != subagent.TaskRecoveryRunning || seenRunning {
+			return
+		}
+		seenRunning = true
+		r.observeSubagent(
+			ctx, execution.req, execution.childThreadID, execution.taskID,
+			spec.SessionSubagentRunning, execution.admittedAt, r.subagentLifecycleNow(), execution.model, nil,
+		)
+	})
+	terminalAt := r.subagentLifecycleNow()
+	if err != nil {
+		r.observeSubagent(
+			context.WithoutCancel(ctx), execution.req, execution.childThreadID, execution.taskID,
+			spec.SessionSubagentInterrupted, execution.admittedAt, terminalAt, execution.model, execution.childUsage,
+		)
+		return subagent.Result{}, fmt.Errorf("subagent: await external task %q: %w", execution.taskID, err)
+	}
+	switch recovery {
+	case subagent.TaskRecoveryCompleted:
+		result, resolveErr := r.resolveExternalSubagentResult(ctx, execution)
+		status := spec.SessionSubagentCompleted
+		if resolveErr != nil {
+			status = spec.SessionSubagentInterrupted
+		}
+		r.observeSubagent(
+			ctx, execution.req, execution.childThreadID, execution.taskID,
+			status, execution.admittedAt, terminalAt, execution.model, execution.childUsage,
+		)
+		return result, resolveErr
+	case subagent.TaskRecoveryFailed:
+		r.observeSubagent(ctx, execution.req, execution.childThreadID, execution.taskID, spec.SessionSubagentFailed, execution.admittedAt, terminalAt, execution.model, nil)
+		return subagent.Result{}, fmt.Errorf("subagent: external task %q failed", execution.taskID)
+	case subagent.TaskRecoveryCancelled:
+		r.observeSubagent(ctx, execution.req, execution.childThreadID, execution.taskID, spec.SessionSubagentCancelled, execution.admittedAt, terminalAt, execution.model, nil)
+		return subagent.Result{}, fmt.Errorf("subagent: external task %q was cancelled", execution.taskID)
+	default:
+		return subagent.Result{}, fmt.Errorf("subagent: external task %q returned non-terminal state %q", execution.taskID, recovery)
+	}
+}
+
+func (r *Runner) resolveExternalSubagentResult(ctx context.Context, execution *subagentExecution) (subagent.Result, error) {
+	auth := tools.MemoryAuthority{
+		GrantID: execution.req.GrantID, SubjectType: execution.req.SubjectType, SubjectID: execution.req.SubjectID,
+	}
+	addr := execution.req.Parent
+	addr.WorkspaceID = execution.envelope.WorkspaceID
+	addr.ThreadID = execution.childThreadID
+	addr.TaskID = execution.taskID
+	session, err := harness.NewSession(tools.WithMemoryAuthority(ctx, auth), addr, r.store, r.registry, auth)
+	if err != nil {
+		return subagent.Result{}, fmt.Errorf("subagent: load external result session: %w", err)
+	}
+	assistant, err := execution.envelope.ResolveResult(session.History())
+	if err != nil {
+		return subagent.Result{}, fmt.Errorf("subagent: resolve external result: %w", err)
+	}
+	execution.childUsage = sessionUsageProjection(assistant)
+	text := textOf(assistant)
+	return subagent.Result{Text: text, ThreadID: execution.childThreadID, Summary: summarizeSubagent(text)}, nil
+}
+
+// ExecuteAssignedSubagent runs an already-admitted child without re-entering
+// admission or mutating its Aether task. The assignment owner must claim before
+// calling and must perform the terminal task transition after this returns.
+func (r *Runner) ExecuteAssignedSubagent(ctx context.Context, taskID string, envelope subagent.ExecutionEnvelope, req subagent.Request) (subagent.Result, error) {
+	if strings.TrimSpace(taskID) == "" {
+		return subagent.Result{}, errors.New("subagent: assigned execution task id is required")
+	}
+	if err := envelope.Validate(); err != nil {
+		return subagent.Result{}, err
+	}
+	if req.Parent.WorkspaceID != envelope.WorkspaceID || req.Parent.ThreadID != envelope.ParentSessionID ||
+		req.Parent.TaskID != envelope.ParentTaskID || req.ParentMessageID != envelope.ParentMessageID ||
+		req.InvocationID != envelope.InvocationID || req.Depth != envelope.Depth || req.Background != envelope.Background {
+		return subagent.Result{}, errors.New("subagent: assigned execution request identity mismatch")
+	}
+	if err := envelope.VerifyPolicy(req); err != nil {
+		return subagent.Result{}, err
+	}
+	auth := tools.MemoryAuthority{GrantID: req.GrantID, SubjectType: req.SubjectType, SubjectID: req.SubjectID}
+	addr := req.Parent
+	addr.WorkspaceID = envelope.WorkspaceID
+	addr.ThreadID = envelope.ChildSessionID
+	addr.TaskID = taskID
+	session, err := harness.NewSession(tools.WithMemoryAuthority(ctx, auth), addr, r.store, r.registry, auth)
+	if err != nil {
+		return subagent.Result{}, fmt.Errorf("subagent: load assigned input session: %w", err)
+	}
+	_, task, err := envelope.ResolveInput(session.History())
+	if err != nil {
+		return subagent.Result{}, err
+	}
+	req.Task = task
+	execution := subagentExecution{
+		req: req, childThreadID: envelope.ChildSessionID, taskID: taskID,
+		admittedAt: r.subagentLifecycleNow(), model: req.Model, envelope: envelope, external: true,
+	}
+	return r.runSubagentOn(ctx, req, envelope.ChildSessionID, nil, &execution)
 }
 
 // resolveSubagentThread resolves the canonical child id before the child is
@@ -387,6 +504,12 @@ func (r *Runner) StartBackground(ctx context.Context, req subagent.Request) (str
 		var err error
 		sctx, span := telemetry.StartSubagent(bgCtx, req.Depth)
 		defer func() { telemetry.Finish(span, &err) }()
+		if execution.external {
+			var res subagent.Result
+			res, err = r.awaitExternalSubagent(sctx, &execution)
+			r.notifySubagentComplete(sctx, req, childThreadID, parentAuth, res, err)
+			return
+		}
 		if err = r.startSubagent(sctx, execution); err != nil {
 			r.notifySubagentComplete(sctx, req, childThreadID, parentAuth, subagent.Result{}, err)
 			return

@@ -2,12 +2,28 @@ package subagent
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
 
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 )
+
+type executionCatalog struct {
+	definition Definition
+}
+
+func (c executionCatalog) List(context.Context) ([]Definition, error) {
+	return []Definition{c.definition}, nil
+}
+
+func (c executionCatalog) Get(_ context.Context, typ AgentType) (Definition, error) {
+	if c.definition.Type != typ {
+		return Definition{}, ErrUnknownAgent
+	}
+	return c.definition, nil
+}
 
 func executionTestRequest() Request {
 	return Request{
@@ -160,6 +176,55 @@ func TestExecutionEnvelopePolicySnapshotFailsClosedOnCatalogDrift(t *testing.T) 
 	changed.Instructions = "changed instructions"
 	if err := first.VerifyPolicy(changed); err == nil || !strings.Contains(err.Error(), "snapshot mismatch") {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestReconstructExecutionRequestUsesCatalogAndTaskAuthority(t *testing.T) {
+	req := executionTestRequest()
+	envelope, err := NewExecutionEnvelope(req, "project-a", "child-session", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reconstructed, err := ReconstructExecutionRequest(context.Background(), envelope, executionCatalog{definition: Definition{
+		Name: req.AgentName, Type: req.AgentType, Description: "review code", Prompt: req.Instructions,
+		Model: req.Model, MaxTurns: req.MaxTurns, AllowedTools: req.AllowedTools, DeniedTools: req.DeniedTools,
+		Skills: req.Skills, MCPServers: req.MCPServers, PermissionMode: req.PermissionMode, ExecPolicyHint: req.ExecPolicyHint,
+	}}, "task-grant", "user", "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reconstructed.Task != "" || reconstructed.Instructions != req.Instructions || reconstructed.Depth != req.Depth || !reconstructed.Background {
+		t.Fatalf("reconstructed request = %+v", reconstructed)
+	}
+	if reconstructed.GrantID != "task-grant" || reconstructed.SubjectType != "user" || reconstructed.SubjectID != "alice" {
+		t.Fatalf("reconstructed authority = %+v", reconstructed)
+	}
+
+	drifted := executionCatalog{definition: Definition{
+		Name: req.AgentName, Type: req.AgentType, Description: "review code", Prompt: "changed prompt",
+		Model: req.Model, MaxTurns: req.MaxTurns, AllowedTools: req.AllowedTools, DeniedTools: req.DeniedTools,
+		Skills: req.Skills, MCPServers: req.MCPServers, PermissionMode: req.PermissionMode, ExecPolicyHint: req.ExecPolicyHint,
+	}}
+	if _, err := ReconstructExecutionRequest(context.Background(), envelope, drifted, "task-grant", "user", "alice"); err == nil || !strings.Contains(err.Error(), "snapshot mismatch") {
+		t.Fatalf("catalog drift error = %v", err)
+	}
+}
+
+func TestReconstructExecutionRequestRejectsPrivateGenericPolicy(t *testing.T) {
+	req := Request{
+		Task: "inspect", Instructions: "private generic instructions",
+		Parent: protocol.MessageAddress{WorkspaceID: "project-a", ThreadID: "parent-session"},
+	}
+	envelope, err := NewExecutionEnvelope(req, "project-a", "child-session", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReconstructExecutionRequest(context.Background(), envelope, nil, "", "", ""); err == nil || !strings.Contains(err.Error(), "snapshot mismatch") {
+		t.Fatalf("private generic policy error = %v", err)
+	}
+	envelope.Depth = -1
+	if err := envelope.Validate(); err == nil || !strings.Contains(err.Error(), "depth") {
+		t.Fatalf("negative depth error = %v", err)
 	}
 }
 

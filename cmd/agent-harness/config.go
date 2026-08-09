@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -46,6 +47,11 @@ type appConfig struct {
 	// per-task message lane. It is opt-in because task-less OSS clients depend
 	// on direct replies to their user-session topic.
 	aetherTaskMessageLanes bool
+	// subagentTarget opts parent turns into targeted Aether child execution.
+	// subagentExecutor enables consumption of those targeted tasks on this agent.
+	subagentTarget              string
+	subagentExecutor            bool
+	subagentExecutorConcurrency int
 	// Client-session identity. WindowID distinguishes two frontends run by the
 	// same user; it is what the agent addresses its replies to.
 	aetherUser   string
@@ -63,6 +69,23 @@ type appConfig struct {
 	// streamFlush is the token-delta coalescing interval handed to the turn
 	// runner; 0 streams every delta.
 	streamFlush time.Duration
+}
+
+func validateExternalSubagentConfig(mode appMode, target string, executor bool, memorylayerURL string) error {
+	target = strings.TrimSpace(target)
+	if target == "" && !executor {
+		return nil
+	}
+	if mode != appModeServe && mode != appModeStandalone {
+		return errors.New("external subagents require --serve or --aether-standalone")
+	}
+	if strings.TrimSpace(memorylayerURL) == "" {
+		return errors.New("external subagents require --memorylayer so parent and executor share history")
+	}
+	if target != "" && !strings.HasPrefix(target, "ag::") {
+		return errors.New("--subagent-target must be a full Aether agent topic (ag::<workspace>::<implementation>::<specifier>)")
+	}
+	return nil
 }
 
 func parseVisibleWorkspaces(value string) []string {

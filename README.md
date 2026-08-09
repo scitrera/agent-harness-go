@@ -61,6 +61,9 @@ the browser, the terminal UI, or stdout in `--cli` mode).
 | `--aether` | `AETHER_ADDR` | — | Aether gateway address, e.g. `127.0.0.1:50051` |
 | `--aether-standalone` | — | `false` | run the worker and the terminal UI in one process |
 | `--aether-task-message-lanes` | — | `false` | route turns carrying real Aether task IDs to their subscribed per-task message lanes |
+| `--subagent-target` | `SAHARA_SUBAGENT_TARGET` | — | target spawned subagents at a full Aether agent topic; requires MemoryLayer |
+| `--subagent-executor` | — | `false` | consume targeted agent-harness subagent tasks on this worker; requires MemoryLayer |
+| `--subagent-executor-concurrency` | — | `4` | bound concurrent externally assigned subagents |
 | `--memorylayer` | `MEMORYLAYER_BASE_URL` | — | store threads + transcripts in MemoryLayer instead of on disk |
 | `--memory-recall` | — | `true` | inject MemoryLayer memories relevant to each message |
 
@@ -176,7 +179,8 @@ and hand-off snapshots; the active multi-writer event ledger uses KV because it
 requires atomic create and compare-and-swap.
 
 Aether worker and standalone modes also account every subagent invocation as a
-real self-assigned Aether task before child model or tool work starts. The task
+real Aether task before child model or tool work starts. The default task is
+self-assigned and executes in-process. The task
 uses a stable admission idempotency key, one execution attempt, a session context
 ID, bounded non-secret correlation metadata, and the parent turn's OBO authority
 when one is available. Its ID is used on the child stream and in the
@@ -199,10 +203,32 @@ Each child also carries the strict OSS
 in its Aether task payload. The descriptor contains workspace-isolated durable
 input/result/checkpoint references, hashes, policy identity, and claim/recovery
 rules—not prompt text or credentials. The runner persists the referenced child
-input before task admission and resolves that same input for today's in-process
-execution. Tasks remain self-assigned until the optional external executor can
-claim this payload against a shared history backend without re-entering the
-parent admission path.
+input before task admission and resolves that same input for in-process
+execution.
+
+External execution is an explicit two-worker deployment. Both processes must
+use the same MemoryLayer workspace, and named agent definitions must match (the
+executor verifies their digest before claiming):
+
+```bash
+# Assignee. Its full topic is ag::dev::agent-harness::executor.
+agent-harness --serve --aether 127.0.0.1:50051 --aether-workspace dev \
+  --aether-specifier executor --memorylayer http://127.0.0.1:61001 \
+  --subagent-executor --base-url "$SAHARA_LLM_BASE_URL"
+
+# Parent. Ordinary spawn_subagent calls become targeted Aether tasks.
+agent-harness --serve --aether 127.0.0.1:50051 --aether-workspace dev \
+  --aether-specifier parent --memorylayer http://127.0.0.1:61001 \
+  --subagent-target ag::dev::agent-harness::executor \
+  --base-url "$SAHARA_LLM_BASE_URL"
+```
+
+The parent only observes Aether task state and reads the terminal result from
+shared history. The assignee receives task-derived OBO authority on the typed
+assignment field, claims exactly once, and never re-enters the parent's admission
+path. A running task redelivered after an executor gap is failed for inspection,
+not replayed. The descriptor, creator-supplied task metadata, and logs remain
+prompt- and credential-free.
 
 By default each client keeps a local copy of the conversation it witnessed, so a
 second client attaching mid-conversation sees only what arrives after it

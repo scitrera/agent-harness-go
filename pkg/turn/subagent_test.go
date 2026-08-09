@@ -38,6 +38,50 @@ type captureSubagentTasks struct {
 	onAdmit    func(subagent.TaskAdmission) error
 }
 
+type inlineExternalSubagentTasks struct {
+	runner    *Runner
+	admission subagent.TaskAdmission
+	starts    int
+	finishes  int
+}
+
+func (t *inlineExternalSubagentTasks) Admit(_ context.Context, admission subagent.TaskAdmission) (string, error) {
+	t.admission = admission
+	return "external-child-task", nil
+}
+
+func (t *inlineExternalSubagentTasks) Start(context.Context, string) error {
+	t.starts++
+	return nil
+}
+
+func (t *inlineExternalSubagentTasks) Finish(context.Context, string, subagent.TaskOutcome, string) error {
+	t.finishes++
+	return nil
+}
+
+func (*inlineExternalSubagentTasks) Recover(context.Context, string) (subagent.TaskRecovery, error) {
+	return subagent.TaskRecoveryRunning, nil
+}
+
+func (*inlineExternalSubagentTasks) ExecutesExternally() bool { return true }
+
+func (t *inlineExternalSubagentTasks) Await(ctx context.Context, taskID string, observe func(subagent.TaskRecovery)) (subagent.TaskRecovery, error) {
+	observe(subagent.TaskRecoveryRunning)
+	req, err := subagent.ReconstructExecutionRequest(
+		ctx, t.admission.Execution, nil,
+		t.admission.GrantID, t.admission.SubjectType, t.admission.SubjectID,
+	)
+	if err != nil {
+		return "", err
+	}
+	if _, err := t.runner.ExecuteAssignedSubagent(ctx, taskID, t.admission.Execution, req); err != nil {
+		return subagent.TaskRecoveryFailed, err
+	}
+	observe(subagent.TaskRecoveryCompleted)
+	return subagent.TaskRecoveryCompleted, nil
+}
+
 func (t *captureSubagentTasks) Admit(_ context.Context, admission subagent.TaskAdmission) (string, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -109,6 +153,43 @@ func Test_Runner_RunSubagent_returns_final_text(t *testing.T) {
 	}
 	if res.Text != "assistant response" {
 		t.Fatalf("expected sub-agent final text, got %q", res.Text)
+	}
+}
+
+func Test_Runner_RunSubagent_externalParentOnlyAwaitsSharedHistory(t *testing.T) {
+	store := &recordingStore{}
+	tasks := &inlineExternalSubagentTasks{}
+	observer := &captureSubagentLifecycle{}
+	runner, err := NewRunner(Config{
+		Store: store, Loader: fakeLoader{}, Provider: &fakeProvider{},
+		Assembler:     contextpack.NewAssembler(contextpack.Config{MaxHistoryMessages: 8}),
+		SubagentTasks: tasks, SubagentObserver: observer, SubagentDefaultWorkspace: "project-a",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tasks.runner = runner
+	result, err := runner.RunSubagent(context.Background(), subagent.Request{
+		Task: "review externally", Depth: 2, InvocationID: "call-external", ParentMessageID: "parent-message",
+		Parent: protocol.MessageAddress{WorkspaceID: "project-a", ThreadID: "parent", TaskID: "parent-task"},
+		Model:  "model-a", GrantID: "task-grant", SubjectType: "user", SubjectID: "alice",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Text != "assistant response" || result.ThreadID != tasks.admission.ChildSessionID {
+		t.Fatalf("result=%+v admission=%+v", result, tasks.admission)
+	}
+	if tasks.starts != 0 || tasks.finishes != 0 {
+		t.Fatalf("parent mutated externally owned task: starts=%d finishes=%d", tasks.starts, tasks.finishes)
+	}
+	events := observer.snapshot()
+	if len(events) != 3 || events[0].Record.Status != spec.SessionSubagentAdmitted || events[1].Record.Status != spec.SessionSubagentRunning || events[2].Record.Status != spec.SessionSubagentCompleted {
+		t.Fatalf("external lifecycle events = %#v", events)
+	}
+	childHistory := store.saved[result.ThreadID]
+	if len(childHistory) != 2 || childHistory[0].ID != tasks.admission.Execution.Input.RecordID || childHistory[1].Role != protocol.RoleAssistant {
+		t.Fatalf("shared child history = %#v", childHistory)
 	}
 }
 

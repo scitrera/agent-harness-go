@@ -19,6 +19,7 @@ import (
 const (
 	subagentTaskType       = "agent-harness.subagent.v1"
 	defaultTaskTimeout     = 10 * time.Second
+	defaultTaskPoll        = 200 * time.Millisecond
 	maxTaskFailureRunes    = 2048
 	taskAdmissionAttempts  = 2
 	taskMetadataComponent  = "agent-harness"
@@ -40,33 +41,60 @@ type TaskOperations interface {
 }
 
 // SubagentTaskBackend maps the neutral child execution contract to real Aether
-// tasks. The task is self-assigned because this harness still executes the
-// child in-process; task identity nevertheless owns admission and lifecycle.
-// When the triggering turn is an active Aether task, ParentTaskID asks Aether
-// to validate the caller's ownership and persist native task hierarchy.
+// tasks. Self-assigned tasks execute in-process; opt-in targeted tasks are
+// executed by another connected harness. When the triggering turn is an active
+// Aether task, ParentTaskID asks Aether to validate the caller's ownership and
+// persist native task hierarchy.
 type SubagentTaskBackend struct {
 	tasks          TaskOperations
 	workspace      string
 	namespace      string
 	timeout        time.Duration
+	pollInterval   time.Duration
+	targetAgentID  string
 	bindChildReply func(parentTaskID, childTaskID string)
 	unbindReply    func(taskID string)
 }
 
+// SubagentTaskBackendConfig selects local self-assigned execution (the zero
+// TargetAgentID default) or opt-in targeted execution by another connected
+// Aether agent.
+type SubagentTaskBackendConfig struct {
+	RoutingWorkspace string
+	Namespace        string
+	Timeout          time.Duration
+	PollInterval     time.Duration
+	TargetAgentID    string
+}
+
 func NewSubagentTaskBackend(tasks TaskOperations, workspace, namespace string, timeout time.Duration) (*SubagentTaskBackend, error) {
+	return NewSubagentTaskBackendWithConfig(tasks, SubagentTaskBackendConfig{
+		RoutingWorkspace: workspace,
+		Namespace:        namespace,
+		Timeout:          timeout,
+	})
+}
+
+func NewSubagentTaskBackendWithConfig(tasks TaskOperations, cfg SubagentTaskBackendConfig) (*SubagentTaskBackend, error) {
 	if tasks == nil {
 		return nil, errors.New("aether: subagent task operations are required")
 	}
-	if strings.TrimSpace(workspace) == "" {
+	if strings.TrimSpace(cfg.RoutingWorkspace) == "" {
 		return nil, errors.New("aether: subagent task routing workspace is required")
 	}
-	if strings.TrimSpace(namespace) == "" {
+	if strings.TrimSpace(cfg.Namespace) == "" {
 		return nil, errors.New("aether: subagent task admission namespace is required")
 	}
-	if timeout <= 0 {
-		timeout = defaultTaskTimeout
+	if cfg.Timeout <= 0 {
+		cfg.Timeout = defaultTaskTimeout
 	}
-	return &SubagentTaskBackend{tasks: tasks, workspace: workspace, namespace: namespace, timeout: timeout}, nil
+	if cfg.PollInterval <= 0 {
+		cfg.PollInterval = defaultTaskPoll
+	}
+	return &SubagentTaskBackend{
+		tasks: tasks, workspace: cfg.RoutingWorkspace, namespace: cfg.Namespace,
+		timeout: cfg.Timeout, pollInterval: cfg.PollInterval, targetAgentID: strings.TrimSpace(cfg.TargetAgentID),
+	}, nil
 }
 
 // SubagentTaskBackend returns a task backend bound to this channel's Aether
@@ -74,6 +102,23 @@ func NewSubagentTaskBackend(tasks TaskOperations, workspace, namespace string, t
 // the parent-session projection.
 func (c *Channel) SubagentTaskBackend(timeout time.Duration) (*SubagentTaskBackend, error) {
 	backend, err := NewSubagentTaskBackend(c.client, c.workspace, c.client.Topic(), timeout)
+	if err != nil {
+		return nil, err
+	}
+	backend.bindChildReply = c.bindChildTaskReply
+	backend.unbindReply = c.unbindTaskReply
+	return backend, nil
+}
+
+// TargetedSubagentTaskBackend sends child executions to targetAgentID and lets
+// the parent await authoritative task state without claiming or finishing them.
+func (c *Channel) TargetedSubagentTaskBackend(timeout time.Duration, targetAgentID string) (*SubagentTaskBackend, error) {
+	backend, err := NewSubagentTaskBackendWithConfig(c.client, SubagentTaskBackendConfig{
+		RoutingWorkspace: c.workspace,
+		Namespace:        c.client.Topic(),
+		Timeout:          timeout,
+		TargetAgentID:    targetAgentID,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -91,6 +136,10 @@ func (b *SubagentTaskBackend) Admit(ctx context.Context, admission subagent.Task
 		return "", fmt.Errorf("aether: encode subagent execution payload: %w", err)
 	}
 	authorization, err := taskAuthorization(admission)
+	if err != nil {
+		return "", err
+	}
+	nativeParentTaskID, err := b.nativeParentTaskID(ctx, admission.ParentTaskID)
 	if err != nil {
 		return "", err
 	}
@@ -117,11 +166,19 @@ func (b *SubagentTaskBackend) Admit(ctx context.Context, admission subagent.Task
 	if admission.Background {
 		taskClass = pb.TaskClass_TASK_CLASS_BACKGROUND
 	}
+	assignmentMode := sdk.TaskAssignmentSelfAssign
+	if b.targetAgentID != "" {
+		assignmentMode = sdk.TaskAssignmentTargeted
+		metadata["scitrera.execution_mode"] = "external"
+	} else {
+		metadata["scitrera.execution_mode"] = "in_process"
+	}
 	opts := sdk.CreateTaskOptions{
 		TaskType:       subagentTaskType,
 		Workspace:      b.workspace,
-		AssignmentMode: sdk.TaskAssignmentSelfAssign,
-		ParentTaskID:   admission.ParentTaskID,
+		AssignmentMode: assignmentMode,
+		TargetAgentID:  b.targetAgentID,
+		ParentTaskID:   nativeParentTaskID,
 		Metadata:       metadata,
 		Payload:        executionPayload,
 		Authorization:  authorization,
@@ -157,6 +214,38 @@ func (b *SubagentTaskBackend) Admit(ctx context.Context, admission subagent.Task
 		b.bindChildReply(admission.ParentTaskID, response.TaskID)
 	}
 	return response.TaskID, nil
+}
+
+// nativeParentTaskID separates a harness request/task correlation ID from a
+// real Aether task. Direct chat turns legitimately carry synthetic task IDs;
+// those remain in lineage metadata but must not be sent as native parentage.
+func (b *SubagentTaskBackend) nativeParentTaskID(ctx context.Context, candidate string) (string, error) {
+	candidate = strings.TrimSpace(candidate)
+	if candidate == "" {
+		return "", nil
+	}
+	query, err := b.tasks.GetTask(ctx, candidate, b.timeout)
+	if err != nil {
+		return "", fmt.Errorf("aether: resolve native parent task: %w", err)
+	}
+	// Aether intentionally makes not-found and unauthorized indistinguishable.
+	// In either case this correlation ID is not usable as native parentage by
+	// this worker, so admission proceeds without asserting that relationship.
+	if query == nil {
+		return "", errors.New("aether: resolve native parent task returned no response")
+	}
+	if !query.Success || query.Task == nil {
+		return "", nil
+	}
+	if strings.TrimSpace(query.Task.AssignedTo) != b.namespace {
+		return "", errors.New("aether: native parent task is not assigned to this worker")
+	}
+	switch query.Task.Status {
+	case pb.TaskStatus_TASK_STATUS_QUEUED.String(), pb.TaskStatus_TASK_STATUS_RUNNING.String():
+		return candidate, nil
+	default:
+		return "", fmt.Errorf("aether: native parent task is not active (status %q)", query.Task.Status)
+	}
 }
 
 func (b *SubagentTaskBackend) Start(ctx context.Context, taskID string) error {
@@ -196,6 +285,69 @@ func (b *SubagentTaskBackend) Finish(ctx context.Context, taskID string, outcome
 }
 
 func (b *SubagentTaskBackend) Recover(ctx context.Context, taskID string) (subagent.TaskRecovery, error) {
+	recovery, err := b.inspect(ctx, taskID)
+	if err != nil {
+		return "", err
+	}
+	if b.ExecutesExternally() || (recovery != subagent.TaskRecoveryAdmitted && recovery != subagent.TaskRecoveryRunning) {
+		return recovery, nil
+	}
+	if err := b.Finish(ctx, taskID, subagent.TaskOutcomeFailed, "agent-harness owner restarted; in-process subagent execution is not resumable"); err != nil {
+		return "", fmt.Errorf("aether: terminate orphaned subagent task: %w", err)
+	}
+	return subagent.TaskRecoveryInterrupted, nil
+}
+
+// ExecutesExternally reports whether another Aether agent owns child execution.
+func (b *SubagentTaskBackend) ExecutesExternally() bool {
+	return b != nil && b.targetAgentID != ""
+}
+
+// Await polls authoritative task state without mutating it. The parent uses
+// this only for targeted execution and therefore never claims or finishes the
+// child task itself.
+func (b *SubagentTaskBackend) Await(ctx context.Context, taskID string, observe func(subagent.TaskRecovery)) (subagent.TaskRecovery, error) {
+	if !b.ExecutesExternally() {
+		return "", errors.New("aether: subagent task backend is not externally assigned")
+	}
+	defer func() {
+		if b.unbindReply != nil {
+			b.unbindReply(taskID)
+		}
+	}()
+	last := subagent.TaskRecovery("")
+	for {
+		recovery, err := b.inspect(ctx, taskID)
+		if err != nil {
+			return "", err
+		}
+		if recovery != last && observe != nil {
+			observe(recovery)
+			last = recovery
+		}
+		switch recovery {
+		case subagent.TaskRecoveryCompleted, subagent.TaskRecoveryFailed, subagent.TaskRecoveryCancelled:
+			return recovery, nil
+		case subagent.TaskRecoveryAdmitted, subagent.TaskRecoveryRunning:
+		default:
+			return "", fmt.Errorf("aether: unsupported awaited subagent task state %q", recovery)
+		}
+		timer := time.NewTimer(b.pollInterval)
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			return "", ctx.Err()
+		}
+	}
+}
+
+func (b *SubagentTaskBackend) inspect(ctx context.Context, taskID string) (subagent.TaskRecovery, error) {
 	query, err := b.tasks.GetTask(ctx, taskID, b.timeout)
 	if err != nil {
 		return "", fmt.Errorf("aether: get subagent task: %w", err)
@@ -215,15 +367,13 @@ func (b *SubagentTaskBackend) Recover(ctx context.Context, taskID string) (subag
 	case pb.TaskStatus_TASK_STATUS_CANCELLED.String():
 		return subagent.TaskRecoveryCancelled, nil
 	case pb.TaskStatus_TASK_STATUS_QUEUED.String(),
-		pb.TaskStatus_TASK_STATUS_RUNNING.String(),
 		pb.TaskStatus_TASK_STATUS_WAITING_INPUT.String(),
 		pb.TaskStatus_TASK_STATUS_WAITING_AUTHORITY.String(),
 		pb.TaskStatus_TASK_STATUS_WAITING_DEPENDENCY.String(),
 		pb.TaskStatus_TASK_STATUS_HIBERNATED.String():
-		if err := b.Finish(ctx, taskID, subagent.TaskOutcomeFailed, "agent-harness owner restarted; in-process subagent execution is not resumable"); err != nil {
-			return "", fmt.Errorf("aether: terminate orphaned subagent task: %w", err)
-		}
-		return subagent.TaskRecoveryInterrupted, nil
+		return subagent.TaskRecoveryAdmitted, nil
+	case pb.TaskStatus_TASK_STATUS_RUNNING.String():
+		return subagent.TaskRecoveryRunning, nil
 	default:
 		return "", fmt.Errorf("aether: subagent task %q has unsupported status %q", taskID, query.Task.Status)
 	}
@@ -281,6 +431,7 @@ func validateTaskAdmission(admission subagent.TaskAdmission) error {
 		admission.Execution.ParentTaskID != admission.ParentTaskID ||
 		admission.Execution.ParentMessageID != admission.ParentMessageID ||
 		admission.Execution.InvocationID != admission.InvocationID ||
+		admission.Execution.Depth != admission.Depth ||
 		admission.Execution.Background != admission.Background {
 		return errors.New("aether: subagent execution envelope identity does not match admission")
 	}
@@ -394,3 +545,4 @@ func (c *Channel) unbindTaskReply(taskID string) {
 }
 
 var _ subagent.TaskBackend = (*SubagentTaskBackend)(nil)
+var _ subagent.TaskAwaiter = (*SubagentTaskBackend)(nil)

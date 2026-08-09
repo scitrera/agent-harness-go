@@ -52,11 +52,23 @@ const (
 type TaskRecovery string
 
 const (
+	TaskRecoveryAdmitted    TaskRecovery = "admitted"
+	TaskRecoveryRunning     TaskRecovery = "running"
 	TaskRecoveryCompleted   TaskRecovery = "completed"
 	TaskRecoveryFailed      TaskRecovery = "failed"
 	TaskRecoveryCancelled   TaskRecovery = "cancelled"
 	TaskRecoveryInterrupted TaskRecovery = "interrupted"
 )
+
+// TaskAwaiter marks a backend whose admitted work is executed by another
+// assignee. The parent must not call Start or Finish in this mode. Await reports
+// authoritative state changes until a terminal state is reached; callbacks may
+// repeat and must be cheap and concurrency-safe.
+type TaskAwaiter interface {
+	TaskBackend
+	ExecutesExternally() bool
+	Await(ctx context.Context, taskID string, observe func(TaskRecovery)) (TaskRecovery, error)
+}
 
 // TaskBackend makes a durable task system the execution authority while the
 // SubagentRegistry remains a parent-session snapshot projection. Implementations

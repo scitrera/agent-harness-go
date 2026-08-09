@@ -104,6 +104,9 @@ func TestSubagentTaskBackendAdmitsIdempotentOBOExecution(t *testing.T) {
 	operations := &fakeTaskOperations{
 		createErrors:   []error{errors.New("response lost")},
 		createResponse: &sdk.CreateTaskResponse{Success: true, TaskID: "aether-child-1"},
+		queryResponses: []*sdk.TaskQueryResponse{{Success: true, Task: &sdk.TaskInfo{
+			TaskID: "parent-task", Status: pb.TaskStatus_TASK_STATUS_RUNNING.String(), AssignedTo: "agent-topic",
+		}}},
 	}
 	backend, err := NewSubagentTaskBackend(operations, "routing-workspace", "agent-topic", time.Second)
 	if err != nil {
@@ -164,6 +167,31 @@ func TestSubagentTaskBackendAdmitsIdempotentOBOExecution(t *testing.T) {
 	}
 }
 
+func TestSubagentTaskBackendKeepsSyntheticParentOutOfNativeParentage(t *testing.T) {
+	operations := &fakeTaskOperations{
+		queryResponses: []*sdk.TaskQueryResponse{{Success: false, Error: "task not found or not authorized"}},
+		createResponse: &sdk.CreateTaskResponse{Success: true, TaskID: "child-task"},
+	}
+	backend, err := NewSubagentTaskBackend(operations, "routing", "agent-topic", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	admission := subagent.TaskAdmission{
+		WorkspaceID: "project", ParentSessionID: "parent", ChildSessionID: "child",
+		ParentTaskID: "synthetic-turn-task", InvocationID: "call-1", Name: "subagent",
+	}
+	admission.Execution = executionForAdmission(t, admission, "review")
+	if _, err := backend.Admit(context.Background(), admission); err != nil {
+		t.Fatal(err)
+	}
+	if got := operations.createCalls[0].ParentTaskID; got != "" {
+		t.Fatalf("native parent = %q, want empty", got)
+	}
+	if got := operations.createCalls[0].Metadata["scitrera.parent_task_id"]; got != "synthetic-turn-task" {
+		t.Fatalf("lineage metadata parent = %q", got)
+	}
+}
+
 func TestSubagentTaskBackendRejectsPartialAuthority(t *testing.T) {
 	backend, _ := NewSubagentTaskBackend(&fakeTaskOperations{}, "routing", "agent-topic", time.Second)
 	admission := subagent.TaskAdmission{
@@ -173,6 +201,68 @@ func TestSubagentTaskBackendRejectsPartialAuthority(t *testing.T) {
 	_, err := backend.Admit(context.Background(), admission)
 	if err == nil || !strings.Contains(err.Error(), "requires grant, subject type, and subject id") {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestSubagentTaskBackendAdmitsTargetedExecutionAndOnlyAwaitsIt(t *testing.T) {
+	operations := &fakeTaskOperations{
+		createResponse: &sdk.CreateTaskResponse{Success: true, TaskID: "child-task"},
+		queryResponses: []*sdk.TaskQueryResponse{
+			{Success: true, Task: &sdk.TaskInfo{Status: pb.TaskStatus_TASK_STATUS_QUEUED.String()}},
+			{Success: true, Task: &sdk.TaskInfo{Status: pb.TaskStatus_TASK_STATUS_RUNNING.String()}},
+			{Success: true, Task: &sdk.TaskInfo{Status: pb.TaskStatus_TASK_STATUS_COMPLETED.String()}},
+		},
+	}
+	backend, err := NewSubagentTaskBackendWithConfig(operations, SubagentTaskBackendConfig{
+		RoutingWorkspace: "routing", Namespace: "parent-agent", PollInterval: time.Millisecond,
+		TargetAgentID: "ag::routing::agent-harness::executor",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	admission := subagent.TaskAdmission{
+		WorkspaceID: "project-a", ParentSessionID: "parent", ChildSessionID: "child", InvocationID: "call-1",
+		Name: "subagent", Depth: 1,
+	}
+	admission.Execution = executionForAdmission(t, admission, "review")
+	if _, err := backend.Admit(context.Background(), admission); err != nil {
+		t.Fatal(err)
+	}
+	opts := operations.createCalls[0]
+	if opts.AssignmentMode != sdk.TaskAssignmentTargeted || opts.TargetAgentID != "ag::routing::agent-harness::executor" || opts.Metadata["scitrera.execution_mode"] != "external" {
+		t.Fatalf("targeted options = %+v", opts)
+	}
+	var observed []subagent.TaskRecovery
+	recovery, err := backend.Await(context.Background(), "child-task", func(state subagent.TaskRecovery) {
+		observed = append(observed, state)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovery != subagent.TaskRecoveryCompleted || len(observed) != 3 || observed[0] != subagent.TaskRecoveryAdmitted || observed[1] != subagent.TaskRecoveryRunning || observed[2] != subagent.TaskRecoveryCompleted {
+		t.Fatalf("recovery=%q observed=%v", recovery, observed)
+	}
+	if operations.claimCalls != 0 || operations.completeCalls != 0 || operations.failCalls != 0 || operations.cancelCalls != 0 {
+		t.Fatalf("parent mutated targeted task: claim=%d complete=%d fail=%d cancel=%d", operations.claimCalls, operations.completeCalls, operations.failCalls, operations.cancelCalls)
+	}
+}
+
+func TestSubagentTaskBackendPreservesExternalRunningTaskDuringRecovery(t *testing.T) {
+	operations := &fakeTaskOperations{queryResponses: []*sdk.TaskQueryResponse{
+		{Success: true, Task: &sdk.TaskInfo{Status: pb.TaskStatus_TASK_STATUS_RUNNING.String()}},
+	}}
+	backend, err := NewSubagentTaskBackendWithConfig(operations, SubagentTaskBackendConfig{
+		RoutingWorkspace: "routing", Namespace: "parent-agent", TargetAgentID: "executor",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recovery, err := backend.Recover(context.Background(), "child-task")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovery != subagent.TaskRecoveryRunning || operations.failCalls != 0 {
+		t.Fatalf("recovery=%q fail=%d", recovery, operations.failCalls)
 	}
 }
 

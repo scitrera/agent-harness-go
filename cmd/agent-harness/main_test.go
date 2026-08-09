@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/scitrera/agent-harness-go/pkg/subagent"
@@ -60,6 +61,35 @@ func TestSelectAppModeSupportsExplicitInterfaces(t *testing.T) {
 func TestSelectAppModeRejectsConflictingInterfaces(t *testing.T) {
 	if _, err := selectAppMode(true, true, false, false, false, false); err == nil {
 		t.Fatal("expected conflicting interface modes to fail")
+	}
+}
+
+func TestValidateExternalSubagentConfigRequiresWorkerAndSharedHistory(t *testing.T) {
+	target := "ag::routing::agent-harness::executor"
+	for _, test := range []struct {
+		name     string
+		mode     appMode
+		target   string
+		executor bool
+		memory   string
+		wantErr  string
+	}{
+		{name: "disabled local mode", mode: appModeTUI},
+		{name: "targeted serve", mode: appModeServe, target: target, memory: "http://memorylayer"},
+		{name: "executor standalone", mode: appModeStandalone, executor: true, memory: "http://memorylayer"},
+		{name: "wrong mode", mode: appModeTUI, target: target, memory: "http://memorylayer", wantErr: "require --serve"},
+		{name: "local history", mode: appModeServe, target: target, wantErr: "require --memorylayer"},
+		{name: "short target", mode: appModeServe, target: "executor", memory: "http://memorylayer", wantErr: "full Aether agent topic"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := validateExternalSubagentConfig(test.mode, test.target, test.executor, test.memory)
+			if test.wantErr == "" && err != nil {
+				t.Fatal(err)
+			}
+			if test.wantErr != "" && (err == nil || !strings.Contains(err.Error(), test.wantErr)) {
+				t.Fatalf("error = %v, want %q", err, test.wantErr)
+			}
+		})
 	}
 }
 
