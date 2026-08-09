@@ -1,8 +1,10 @@
 package authhandoff
 
 import (
+	"encoding/json"
 	"testing"
 
+	"github.com/scitrera/agent-harness-go/pkg/protocol"
 	"github.com/scitrera/agent-harness-go/pkg/tools"
 )
 
@@ -52,5 +54,37 @@ func Test_Store_tokens_are_unique(t *testing.T) {
 	b := s.Put(tools.MemoryAuthority{SubjectID: "u2"})
 	if a == b {
 		t.Fatal("distinct Put calls must mint distinct tokens")
+	}
+}
+
+func Test_Store_resolve_message_consumes_opaque_handoff(t *testing.T) {
+	s := New()
+	auth := tools.MemoryAuthority{GrantID: "g1", SubjectType: "user", SubjectID: "u9"}
+	token := s.Put(auth)
+	raw, err := json.Marshal(map[string]string{"authority_handoff": token})
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := protocol.ChatMessage{Meta: map[string]json.RawMessage{"scitrera": raw}}
+
+	got, ok := s.ResolveMessage(message)
+	if !ok || got != auth {
+		t.Fatalf("ResolveMessage = %+v (ok=%v), want %+v", got, ok, auth)
+	}
+	if _, again := s.ResolveMessage(message); again {
+		t.Fatal("message handoff must remain single-use")
+	}
+}
+
+func Test_Store_resolve_message_rejects_malformed_metadata(t *testing.T) {
+	s := New()
+	for _, message := range []protocol.ChatMessage{
+		{},
+		{Meta: map[string]json.RawMessage{"scitrera": json.RawMessage(`{`)}},
+		{Meta: map[string]json.RawMessage{"scitrera": json.RawMessage(`{"other":"value"}`)}},
+	} {
+		if _, ok := s.ResolveMessage(message); ok {
+			t.Fatalf("malformed/absent handoff unexpectedly resolved: %+v", message.Meta)
+		}
 	}
 }

@@ -17,8 +17,10 @@ package authhandoff
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"sync"
 
+	"github.com/scitrera/agent-harness-go/pkg/protocol"
 	"github.com/scitrera/agent-harness-go/pkg/tools"
 )
 
@@ -61,6 +63,28 @@ func (s *Store) Resolve(token string) (auth tools.MemoryAuthority, ok bool) {
 		delete(s.m, token)
 	}
 	return auth, ok
+}
+
+// ResolveMessage consumes the authority-handoff token carried by message and
+// returns the authority previously stored for it. The wire metadata contains
+// only an opaque, single-use lookup key; it never contains the grant itself.
+// Unknown, malformed, empty, and already-consumed tokens are ordinary misses.
+func (s *Store) ResolveMessage(message protocol.ChatMessage) (tools.MemoryAuthority, bool) {
+	return s.Resolve(messageAuthorityHandoffToken(message))
+}
+
+func messageAuthorityHandoffToken(message protocol.ChatMessage) string {
+	raw := message.Meta["scitrera"]
+	if len(raw) == 0 {
+		return ""
+	}
+	var envelope struct {
+		AuthorityHandoff string `json:"authority_handoff"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return ""
+	}
+	return envelope.AuthorityHandoff
 }
 
 func newToken() string {

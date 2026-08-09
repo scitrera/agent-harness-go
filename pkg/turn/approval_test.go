@@ -241,3 +241,42 @@ func Test_Runner_grant_store_sees_turn_OBO_on_ctx(t *testing.T) {
 		t.Fatalf("grant store did not see the turn OBO on ctx: %#v", store.seen)
 	}
 }
+
+func Test_Runner_preserves_pre_resolved_context_authority_when_hook_is_empty(t *testing.T) {
+	policy := tools.NewDynamicPolicy(tools.StaticPolicy{Allowed: map[string]string{}}, nil)
+	registry := tools.NewAuditedRegistry(policy, nil)
+	if err := registry.Register("record", tools.HandlerFunc(func(_ context.Context, req tools.Request) (tools.Result, error) {
+		return tools.NewJSONResult(req.CallID, req.Name, json.RawMessage(`{"ok":true}`))
+	})); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	callPart, _ := protocol.NewToolCallPart(protocol.ToolInvokeEnvelope{CallID: "call-1", Name: "record", Args: protocol.RawToArgs(json.RawMessage(`{}`))})
+	finalPart, _ := protocol.NewTextPart("done")
+	prov := &scriptedProvider{responses: []provider.ChatResponse{
+		{Message: protocol.ChatMessage{ID: "a-tool", Role: protocol.RoleAssistant, Content: []protocol.ContentPart{callPart}}},
+		{Message: protocol.ChatMessage{ID: "a-final", Role: protocol.RoleAssistant, Content: []protocol.ContentPart{finalPart}}},
+	}}
+	store := &authCapturingStore{}
+	runner, err := NewRunner(Config{
+		Store: &fakeStore{}, Loader: fakeLoader{}, Registry: registry, Provider: prov,
+		Publisher: &fakePublisher{}, Assembler: contextpack.NewAssembler(contextpack.Config{}),
+		Approvals:       fakeAwaiter{decision: approval.Decision{Granted: false}},
+		ApprovalGranter: policy,
+		GrantStore:      store,
+		Authority: func(protocol.MessageAddress, protocol.ChatMessage) tools.MemoryAuthority {
+			return tools.MemoryAuthority{}
+		},
+	})
+	if err != nil {
+		t.Fatalf("runner: %v", err)
+	}
+	want := tools.MemoryAuthority{SubjectType: "user", SubjectID: "u1", GrantID: "g-context"}
+	ctx := tools.WithMemoryAuthority(context.Background(), want)
+	addr := protocol.MessageAddress{ThreadID: "th1", TaskID: "task1", WorkspaceID: "ws1"}
+	if _, err := runner.Run(ctx, addr, userTurn(t)); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !store.saw || store.seen != want {
+		t.Fatalf("grant store authority = %#v (saw=%v), want %#v", store.seen, store.saw, want)
+	}
+}

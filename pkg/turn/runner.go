@@ -785,9 +785,15 @@ func (r *Runner) Run(ctx context.Context, addr protocol.MessageAddress, user pro
 	// distribution reads the inbound grant; core leaves it zero so memory uses its
 	// default authority). Computed up front — before anything keys off the address
 	// — because thread-id minting may need it (an OBO write to the backend).
-	var auth tools.MemoryAuthority
+	// A trusted intermediary may already have resolved authority onto the
+	// context (for example, a background completion consumes its single-use
+	// in-process handoff before workspace routing). Preserve that authority when
+	// the address/message hook has nothing newer to derive.
+	auth, _ := tools.MemoryAuthorityFrom(ctx)
 	if r.authorityFn != nil {
-		auth = r.authorityFn(addr, user)
+		if derived := r.authorityFn(addr, user); derived != (tools.MemoryAuthority{}) || auth == (tools.MemoryAuthority{}) {
+			auth = derived
+		}
 	}
 	// Resolve a missing thread id before anything keys off it: a turn may arrive
 	// with no thread (a new chat from a "dumb" CLI/TUI/web client). Mint one — via
