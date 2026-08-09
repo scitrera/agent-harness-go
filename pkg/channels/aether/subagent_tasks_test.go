@@ -37,6 +37,24 @@ type fakeTaskOperations struct {
 	queryErrors      []error
 }
 
+func executionForAdmission(t *testing.T, admission subagent.TaskAdmission, task string) subagent.ExecutionEnvelope {
+	t.Helper()
+	envelope, err := subagent.NewExecutionEnvelope(subagent.Request{
+		Task: task, Depth: admission.Depth,
+		Parent: protocol.MessageAddress{
+			WorkspaceID: admission.WorkspaceID,
+			ThreadID:    admission.ParentSessionID,
+			TaskID:      admission.ParentTaskID,
+		},
+		InvocationID: admission.InvocationID, ParentMessageID: admission.ParentMessageID,
+		AgentName: subagent.AgentName(admission.Name), AgentType: subagent.AgentType(admission.Kind), Model: admission.Model,
+	}, admission.WorkspaceID, admission.ChildSessionID, admission.Background)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return envelope
+}
+
 func (f *fakeTaskOperations) CreateTaskSync(_ context.Context, _, _ string, opts sdk.CreateTaskOptions, _ time.Duration) (*sdk.CreateTaskResponse, error) {
 	f.createCalls = append(f.createCalls, opts)
 	index := len(f.createCalls) - 1
@@ -101,6 +119,7 @@ func TestSubagentTaskBackendAdmitsIdempotentOBOExecution(t *testing.T) {
 		Name: "reviewer", Kind: "review", Model: "model-a", Depth: 2, Background: true,
 		GrantID: "grant-1", SubjectType: "user", SubjectID: "alice",
 	}
+	admission.Execution = executionForAdmission(t, admission, "inspect private code")
 	taskID, err := backend.Admit(context.Background(), admission)
 	if err != nil {
 		t.Fatal(err)
@@ -127,8 +146,19 @@ func TestSubagentTaskBackendAdmitsIdempotentOBOExecution(t *testing.T) {
 	if first.Metadata["scitrera.logical_workspace"] != "project-a" || first.Metadata["scitrera.child_session_id"] != "child-session" || first.Metadata["scitrera.parent_task_id"] != "parent-task" {
 		t.Fatalf("metadata = %#v", first.Metadata)
 	}
+	execution, err := subagent.ParseExecutionEnvelope(first.Payload)
+	if err != nil {
+		t.Fatalf("execution payload: %v", err)
+	}
+	if execution.ExecutionID != admission.Execution.ExecutionID || execution.Input.RecordID != admission.Execution.Input.RecordID {
+		t.Fatalf("execution payload = %+v", execution)
+	}
+	if strings.Contains(string(first.Payload), "inspect private code") || first.Metadata["scitrera.execution_id"] != execution.ExecutionID {
+		t.Fatalf("task surfaces leaked input or lost execution identity: metadata=%#v payload=%s", first.Metadata, first.Payload)
+	}
 	changed := admission
 	changed.InvocationID = "tool-call-8"
+	changed.Execution = executionForAdmission(t, changed, "inspect private code")
 	if taskAdmissionKey("agent-topic", "routing-workspace", admission) == taskAdmissionKey("agent-topic", "routing-workspace", changed) {
 		t.Fatal("different spawn invocations must not collapse to one task")
 	}
@@ -136,11 +166,56 @@ func TestSubagentTaskBackendAdmitsIdempotentOBOExecution(t *testing.T) {
 
 func TestSubagentTaskBackendRejectsPartialAuthority(t *testing.T) {
 	backend, _ := NewSubagentTaskBackend(&fakeTaskOperations{}, "routing", "agent-topic", time.Second)
-	_, err := backend.Admit(context.Background(), subagent.TaskAdmission{
-		WorkspaceID: "project", ParentSessionID: "parent", ChildSessionID: "child", GrantID: "grant-only",
-	})
+	admission := subagent.TaskAdmission{
+		WorkspaceID: "project", ParentSessionID: "parent", ChildSessionID: "child", Name: "subagent", GrantID: "grant-only",
+	}
+	admission.Execution = executionForAdmission(t, admission, "review")
+	_, err := backend.Admit(context.Background(), admission)
 	if err == nil || !strings.Contains(err.Error(), "requires grant, subject type, and subject id") {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestSubagentTaskBackendAcceptsGenericDisplayNameForUnnamedPolicy(t *testing.T) {
+	operations := &fakeTaskOperations{createResponse: &sdk.CreateTaskResponse{Success: true, TaskID: "child-task"}}
+	backend, err := NewSubagentTaskBackend(operations, "routing", "agent-topic", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	admission := subagent.TaskAdmission{
+		WorkspaceID: "project", ParentSessionID: "parent", ChildSessionID: "child",
+		InvocationID: "tool-call-1", Name: "subagent",
+	}
+	admission.Execution, err = subagent.NewExecutionEnvelope(subagent.Request{
+		Task: "review", InvocationID: admission.InvocationID,
+		Parent: protocol.MessageAddress{WorkspaceID: admission.WorkspaceID, ThreadID: admission.ParentSessionID},
+	}, admission.WorkspaceID, admission.ChildSessionID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.Admit(context.Background(), admission); err != nil {
+		t.Fatal(err)
+	}
+	if len(operations.createCalls) != 1 {
+		t.Fatalf("create calls = %d", len(operations.createCalls))
+	}
+}
+
+func TestSubagentTaskBackendRejectsEnvelopeForDifferentWorkspaceOrSession(t *testing.T) {
+	operations := &fakeTaskOperations{}
+	backend, _ := NewSubagentTaskBackend(operations, "routing", "agent-topic", time.Second)
+	admission := subagent.TaskAdmission{
+		WorkspaceID: "project-a", ParentSessionID: "parent", ChildSessionID: "child-a", InvocationID: "tool-call-1",
+	}
+	other := admission
+	other.WorkspaceID = "project-b"
+	other.ChildSessionID = "child-b"
+	admission.Execution = executionForAdmission(t, other, "review")
+	if _, err := backend.Admit(context.Background(), admission); err == nil || !strings.Contains(err.Error(), "identity does not match") {
+		t.Fatalf("error = %v", err)
+	}
+	if len(operations.createCalls) != 0 {
+		t.Fatalf("task created for mismatched envelope: %d", len(operations.createCalls))
 	}
 }
 

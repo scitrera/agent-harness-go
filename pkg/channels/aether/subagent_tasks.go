@@ -86,6 +86,10 @@ func (b *SubagentTaskBackend) Admit(ctx context.Context, admission subagent.Task
 	if err := validateTaskAdmission(admission); err != nil {
 		return "", err
 	}
+	executionPayload, err := subagent.MarshalExecutionEnvelope(admission.Execution)
+	if err != nil {
+		return "", fmt.Errorf("aether: encode subagent execution payload: %w", err)
+	}
 	authorization, err := taskAuthorization(admission)
 	if err != nil {
 		return "", err
@@ -98,6 +102,9 @@ func (b *SubagentTaskBackend) Admit(ctx context.Context, admission subagent.Task
 		"scitrera.child_session_id":  admission.ChildSessionID,
 		"scitrera.depth":             strconv.Itoa(max(admission.Depth, 0)),
 		"scitrera.background":        strconv.FormatBool(admission.Background),
+		"scitrera.execution_schema":  admission.Execution.Schema,
+		"scitrera.execution_id":      admission.Execution.ExecutionID,
+		"scitrera.policy_digest":     admission.Execution.Policy.SnapshotDigest,
 	}
 	addTaskMetadata(metadata, "scitrera.parent_task_id", admission.ParentTaskID)
 	addTaskMetadata(metadata, "scitrera.parent_message_id", admission.ParentMessageID)
@@ -116,6 +123,7 @@ func (b *SubagentTaskBackend) Admit(ctx context.Context, admission subagent.Task
 		AssignmentMode: sdk.TaskAssignmentSelfAssign,
 		ParentTaskID:   admission.ParentTaskID,
 		Metadata:       metadata,
+		Payload:        executionPayload,
 		Authorization:  authorization,
 		RetryPolicy:    &pb.RetryPolicy{MaxAttempts: 1},
 		TaskClass:      taskClass,
@@ -264,6 +272,30 @@ func validateTaskAdmission(admission subagent.TaskAdmission) error {
 	case strings.TrimSpace(admission.ChildSessionID) == "":
 		return errors.New("aether: subagent child session is required")
 	}
+	if err := admission.Execution.Validate(); err != nil {
+		return fmt.Errorf("aether: invalid subagent execution envelope: %w", err)
+	}
+	if admission.Execution.WorkspaceID != admission.WorkspaceID ||
+		admission.Execution.ParentSessionID != admission.ParentSessionID ||
+		admission.Execution.ChildSessionID != admission.ChildSessionID ||
+		admission.Execution.ParentTaskID != admission.ParentTaskID ||
+		admission.Execution.ParentMessageID != admission.ParentMessageID ||
+		admission.Execution.InvocationID != admission.InvocationID ||
+		admission.Execution.Background != admission.Background {
+		return errors.New("aether: subagent execution envelope identity does not match admission")
+	}
+	executionName := admission.Execution.Policy.AgentName
+	if executionName == "" {
+		executionName = admission.Execution.Policy.AgentType
+	}
+	if executionName == "" {
+		executionName = "subagent"
+	}
+	if executionName != admission.Name ||
+		admission.Execution.Policy.AgentType != admission.Kind ||
+		admission.Execution.Policy.Model != strings.TrimSpace(admission.Model) {
+		return errors.New("aether: subagent execution policy does not match admission")
+	}
 	return nil
 }
 
@@ -295,6 +327,9 @@ func taskContextID(namespace string, admission subagent.TaskAdmission) string {
 }
 
 func taskAdmissionKey(namespace, routingWorkspace string, admission subagent.TaskAdmission) string {
+	if admission.Execution.ExecutionID != "" {
+		return taskAdmissionKeyPrefix + hashTaskIdentity(namespace, routingWorkspace, admission.Execution.ExecutionID)
+	}
 	return taskAdmissionKeyPrefix + hashTaskIdentity(
 		namespace,
 		routingWorkspace,

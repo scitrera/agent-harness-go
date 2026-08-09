@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/scitrera/agent-harness-go/pkg/bootstrap"
@@ -17,6 +18,7 @@ import (
 )
 
 type fakeStore struct {
+	mu       sync.Mutex
 	messages []protocol.ChatMessage
 }
 
@@ -48,12 +50,16 @@ func (s *workspaceRecordingStore) SaveWorkspaceHistory(_ context.Context, worksp
 }
 
 func (s *fakeStore) LoadHistory(_ context.Context, _ string) ([]protocol.ChatMessage, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	out := make([]protocol.ChatMessage, len(s.messages))
 	copy(out, s.messages)
 	return out, nil
 }
 
 func (s *fakeStore) SaveHistory(_ context.Context, _ string, messages []protocol.ChatMessage) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.messages = make([]protocol.ChatMessage, len(messages))
 	copy(s.messages, messages)
 	return nil

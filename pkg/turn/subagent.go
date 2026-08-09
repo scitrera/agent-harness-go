@@ -29,8 +29,15 @@ import (
 // invocation's threadID unique (so sibling subagents get distinct kernels).
 var subagentSeq atomic.Uint64
 
+// subagentExecutionSeq supplies a process-local invocation identity only for
+// direct Runner callers that omit the tool-call ID. The production spawn tool
+// supplies InvocationID, so retries there remain deterministically keyed.
+var subagentExecutionSeq atomic.Uint64
+
 // nextSubagentSeq returns the next process-wide subagent sequence number.
 func nextSubagentSeq() uint64 { return subagentSeq.Add(1) }
+
+func nextSubagentExecutionSeq() uint64 { return subagentExecutionSeq.Add(1) }
 
 // RunSubagent runs a bounded sub-agent turn on its OWN durable, persisted child
 // thread and returns its final text plus the re-addressable thread handle. It
@@ -51,10 +58,11 @@ func (r *Runner) RunSubagent(ctx context.Context, req subagent.Request) (_ subag
 	ctx, span := telemetry.StartSubagent(ctx, req.Depth)
 	defer telemetry.Finish(span, &err)
 	childThreadID, resume := r.resolveSubagentThread(ctx, req)
-	execution, err := r.admitSubagent(ctx, req, childThreadID, false)
+	execution, err := r.admitSubagent(ctx, req, childThreadID, resume, false)
 	if err != nil {
 		return subagent.Result{}, err
 	}
+	req = execution.req
 	if err := r.startSubagent(ctx, execution); err != nil {
 		return subagent.Result{}, err
 	}
@@ -62,7 +70,7 @@ func (r *Runner) RunSubagent(ctx context.Context, req subagent.Request) (_ subag
 	if r.streamSubagents {
 		publisher = r.publisher
 	}
-	result, runErr := r.runSubagentOn(ctx, req, childThreadID, resume, publisher, &execution)
+	result, runErr := r.runSubagentOn(ctx, req, childThreadID, publisher, &execution)
 	return result, r.finishSubagent(ctx, execution, runErr)
 }
 
@@ -73,21 +81,34 @@ type subagentExecution struct {
 	admittedAt    time.Time
 	model         string
 	childUsage    map[string]json.RawMessage
+	envelope      subagent.ExecutionEnvelope
 }
 
-// admitSubagent creates the durable execution task before projecting admission.
-// A backend failure is fail-closed: no model or tool work starts without the
-// execution authority accepting the child. Local mode has no task backend and
-// retains the historical observer-only behavior.
-func (r *Runner) admitSubagent(ctx context.Context, req subagent.Request, childThreadID string, background bool) (subagentExecution, error) {
+// admitSubagent first persists the immutable referenced input, then creates the
+// durable execution task before projecting admission. This ordering lets a
+// future external assignee resolve the task payload immediately after claim.
+// A backend failure is fail-closed: the prepared input may remain auditable, but
+// no model or tool work starts without execution authority accepting the child.
+func (r *Runner) admitSubagent(ctx context.Context, req subagent.Request, childThreadID string, resume, background bool) (subagentExecution, error) {
+	if strings.TrimSpace(req.InvocationID) == "" {
+		req.InvocationID = fmt.Sprintf("local-execution-%d", nextSubagentExecutionSeq())
+	}
+	workspaceID := r.subagentWorkspace(req)
+	envelope, err := subagent.NewExecutionEnvelope(req, workspaceID, childThreadID, background)
+	if err != nil {
+		return subagentExecution{}, fmt.Errorf("subagent execution envelope: %w", err)
+	}
 	execution := subagentExecution{
 		req:           req,
 		childThreadID: childThreadID,
 		admittedAt:    r.subagentLifecycleNow(),
 		model:         req.Model,
+		envelope:      envelope,
+	}
+	if err := r.prepareSubagentInput(ctx, &execution, resume); err != nil {
+		return subagentExecution{}, err
 	}
 	if r.subagentTasks != nil {
-		workspaceID := r.subagentWorkspace(req)
 		taskID, err := r.subagentTasks.Admit(ctx, subagent.TaskAdmission{
 			WorkspaceID:     workspaceID,
 			ParentSessionID: req.Parent.ThreadID,
@@ -103,6 +124,7 @@ func (r *Runner) admitSubagent(ctx context.Context, req subagent.Request, childT
 			GrantID:         req.GrantID,
 			SubjectType:     req.SubjectType,
 			SubjectID:       req.SubjectID,
+			Execution:       envelope,
 		})
 		if err != nil {
 			return subagentExecution{}, fmt.Errorf("subagent task admission: %w", err)
@@ -114,6 +136,43 @@ func (r *Runner) admitSubagent(ctx context.Context, req subagent.Request, childT
 	}
 	r.observeSubagent(ctx, req, childThreadID, execution.taskID, spec.SessionSubagentAdmitted, execution.admittedAt, execution.admittedAt, "", nil)
 	return execution, nil
+}
+
+// prepareSubagentInput stores the exact user message referenced by the
+// execution envelope before a durable task can become claimable. The input uses
+// a task-neutral address because the backend owns the child task ID and assigns
+// it only after this write. Lifecycle and output records carry that task ID.
+func (r *Runner) prepareSubagentInput(ctx context.Context, execution *subagentExecution, resume bool) error {
+	req := execution.req
+	addr := req.Parent
+	addr.WorkspaceID = execution.envelope.WorkspaceID
+	addr.ThreadID = execution.childThreadID
+	addr.TaskID = ""
+	auth := tools.MemoryAuthority{GrantID: req.GrantID, SubjectType: req.SubjectType, SubjectID: req.SubjectID}
+	ctx = tools.WithMemoryAuthority(ctx, auth)
+	session, err := harness.NewSession(ctx, addr, r.store, r.registry, auth)
+	if err != nil {
+		return fmt.Errorf("subagent prepare session: %w", err)
+	}
+	taskPart, err := protocol.NewTextPart(req.Task)
+	if err != nil {
+		return fmt.Errorf("subagent prepare input: %w", err)
+	}
+	userMsg := protocol.ChatMessage{
+		ID: execution.envelope.Input.RecordID, Role: protocol.RoleUser, Addr: addr,
+		Content: []protocol.ContentPart{taskPart},
+	}
+	if !resume {
+		userMsg.Ref = &protocol.MessageRef{ParentThreadID: req.Parent.ThreadID, ParentMessageID: req.ParentMessageID}
+		userMsg.Meta = stampSubagentSpawnMeta(userMsg.Meta, req.Parent.AgentID)
+	}
+	if err := session.Append(ctx, userMsg); err != nil {
+		return fmt.Errorf("subagent persist execution input: %w", err)
+	}
+	if _, _, err := execution.envelope.ResolveInput(session.History()); err != nil {
+		return fmt.Errorf("subagent verify persisted execution input: %w", err)
+	}
+	return nil
 }
 
 // startSubagent claims the durable task before projecting running. If claim
@@ -221,9 +280,8 @@ func (r *Runner) resolveSubagentThread(ctx context.Context, req subagent.Request
 // OBO carried through, cross-thread back-ref + spawn meta on new child threads,
 // and the durable commit of task+assistant. The optional thread registrar has
 // already resolved the canonical id before this function is called.
-func (r *Runner) runSubagentOn(ctx context.Context, req subagent.Request, childThreadID string, resume bool, publisher channel.Publisher, execution *subagentExecution) (result subagent.Result, err error) {
+func (r *Runner) runSubagentOn(ctx context.Context, req subagent.Request, childThreadID string, publisher channel.Publisher, execution *subagentExecution) (result subagent.Result, err error) {
 	ctx = withWorkingDirectoryPrompt(ctx)
-	parentThread := req.Parent.ThreadID
 	addr := req.Parent
 	addr.ThreadID = childThreadID
 	if execution.taskID != "" {
@@ -241,20 +299,12 @@ func (r *Runner) runSubagentOn(ctx context.Context, req subagent.Request, childT
 	if err != nil {
 		return subagent.Result{}, fmt.Errorf("subagent session: %w", err)
 	}
-	taskPart, err := protocol.NewTextPart(req.Task)
+	userMsg, task, err := execution.envelope.ResolveInput(session.History())
 	if err != nil {
-		return subagent.Result{}, err
+		return subagent.Result{}, fmt.Errorf("subagent resolve execution input: %w", err)
 	}
-	userMsg := protocol.ChatMessage{Role: protocol.RoleUser, Addr: addr, Content: []protocol.ContentPart{taskPart}}
-	if !resume {
-		// New child thread: stamp the cross-thread back-ref to the spawning message
-		// and the spawn provenance meta. On resume the thread already exists, so we
-		// skip both (the follow-up is just another turn on the same child thread).
-		userMsg.Ref = &protocol.MessageRef{ParentThreadID: parentThread, ParentMessageID: req.ParentMessageID}
-		userMsg.Meta = stampSubagentSpawnMeta(userMsg.Meta, req.Parent.AgentID)
-	}
-	if err := session.Append(ctx, userMsg); err != nil {
-		return subagent.Result{}, fmt.Errorf("subagent append task: %w", err)
+	if task != req.Task {
+		return subagent.Result{}, errors.New("subagent resolve execution input: request text mismatch")
 	}
 	bootstrap, err := r.loader.LoadBootstrap(ctx)
 	if err != nil {
@@ -317,10 +367,11 @@ func (r *Runner) StartBackground(ctx context.Context, req subagent.Request) (str
 		return "", subagent.ErrBackgroundUnsupported
 	}
 	childThreadID, resume := r.resolveSubagentThread(ctx, req)
-	execution, err := r.admitSubagent(ctx, req, childThreadID, true)
+	execution, err := r.admitSubagent(ctx, req, childThreadID, resume, true)
 	if err != nil {
 		return "", err
 	}
+	req = execution.req
 	// Snapshot the parent OBO so the woken completion turn can act as the same
 	// principal. It is handed off out-of-band via a single-use token (never the
 	// credential on the message); a zero authority (local dev, no OBO) yields an
@@ -345,7 +396,7 @@ func (r *Runner) StartBackground(ctx context.Context, req subagent.Request) (str
 			publisher = r.publisher
 		}
 		var res subagent.Result
-		res, err = r.runSubagentOn(sctx, req, childThreadID, resume, publisher, &execution)
+		res, err = r.runSubagentOn(sctx, req, childThreadID, publisher, &execution)
 		err = r.finishSubagent(sctx, execution, err)
 		r.notifySubagentComplete(sctx, req, childThreadID, parentAuth, res, err)
 	}()
@@ -403,7 +454,10 @@ func (r *Runner) subagentWorkspace(req subagent.Request) string {
 	if req.Parent.WorkspaceID != "" {
 		return req.Parent.WorkspaceID
 	}
-	return r.subagentDefaultWorkspace
+	if r.subagentDefaultWorkspace != "" {
+		return r.subagentDefaultWorkspace
+	}
+	return "default"
 }
 
 func sessionUsageProjection(message protocol.ChatMessage) map[string]json.RawMessage {

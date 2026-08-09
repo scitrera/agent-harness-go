@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -34,6 +35,7 @@ type captureSubagentTasks struct {
 	startErr   error
 	finishErr  error
 	finishRuns int
+	onAdmit    func(subagent.TaskAdmission) error
 }
 
 func (t *captureSubagentTasks) Admit(_ context.Context, admission subagent.TaskAdmission) (string, error) {
@@ -41,6 +43,11 @@ func (t *captureSubagentTasks) Admit(_ context.Context, admission subagent.TaskA
 	defer t.mu.Unlock()
 	t.calls = append(t.calls, "admit")
 	t.admission = admission
+	if t.onAdmit != nil {
+		if err := t.onAdmit(admission); err != nil {
+			return "", err
+		}
+	}
 	return "aether-child-task", nil
 }
 
@@ -148,10 +155,23 @@ func Test_Runner_RunSubagent_observesDurableLifecycle(t *testing.T) {
 
 func Test_Runner_RunSubagent_usesTaskAuthorityBeforeLifecycleProjection(t *testing.T) {
 	observer := &captureSubagentLifecycle{}
-	tasks := &captureSubagentTasks{}
+	store := &fakeStore{}
+	tasks := &captureSubagentTasks{onAdmit: func(admission subagent.TaskAdmission) error {
+		if len(store.messages) != 1 {
+			return fmt.Errorf("durable input messages before admission = %d", len(store.messages))
+		}
+		_, task, err := admission.Execution.ResolveInput(store.messages)
+		if err != nil {
+			return err
+		}
+		if task != "review" {
+			return fmt.Errorf("prepared task = %q", task)
+		}
+		return nil
+	}}
 	publisher := &fakePublisher{}
 	runner, err := NewRunner(Config{
-		Store: &fakeStore{}, Loader: fakeLoader{}, Provider: &fakeProvider{}, Publisher: publisher,
+		Store: store, Loader: fakeLoader{}, Provider: &fakeProvider{}, Publisher: publisher,
 		Assembler:        contextpack.NewAssembler(contextpack.Config{MaxHistoryMessages: 8}),
 		SubagentObserver: observer, SubagentDefaultWorkspace: "project-a", SubagentTasks: tasks,
 		StreamSubagents: true,
@@ -173,6 +193,13 @@ func Test_Runner_RunSubagent_usesTaskAuthorityBeforeLifecycleProjection(t *testi
 	}
 	if admission.ChildSessionID != result.ThreadID || admission.ParentTaskID != "parent-task" || admission.InvocationID != "tool-call-7" || admission.ParentMessageID != "message-3" {
 		t.Fatalf("task admission = %+v", admission)
+	}
+	if err := admission.Execution.Validate(); err != nil || admission.Execution.Input.RecordID == "" {
+		t.Fatalf("execution envelope = %+v err=%v", admission.Execution, err)
+	}
+	resolvedResult, err := admission.Execution.ResolveResult(store.messages)
+	if err != nil || resolvedResult.ID != "assistant-1" {
+		t.Fatalf("execution result = %+v err=%v", resolvedResult, err)
 	}
 	events := observer.snapshot()
 	if len(events) != 3 {
@@ -246,6 +273,46 @@ func Test_Runner_RunSubagent_neverExecutesAfterTaskStartFailure(t *testing.T) {
 	events := observer.snapshot()
 	if len(events) != 2 || events[0].Record.Status != spec.SessionSubagentAdmitted || events[1].Record.Status != spec.SessionSubagentCancelled {
 		t.Fatalf("lifecycle events = %#v", events)
+	}
+}
+
+func Test_Runner_RunSubagent_persistsReferencedInputBeforeTaskAdmission(t *testing.T) {
+	store := &fakeStore{}
+	provider := &scriptedProvider{}
+	tasks := &captureSubagentTasks{onAdmit: func(admission subagent.TaskAdmission) error {
+		if len(store.messages) != 1 {
+			return fmt.Errorf("prepared messages = %d", len(store.messages))
+		}
+		message, task, err := admission.Execution.ResolveInput(store.messages)
+		if err != nil {
+			return err
+		}
+		if message.ID != admission.Execution.Input.RecordID || task != "review before claim" {
+			return fmt.Errorf("prepared message=%+v task=%q", message, task)
+		}
+		return errors.New("admission rejected")
+	}}
+	observer := &captureSubagentLifecycle{}
+	runner, err := NewRunner(Config{
+		Store: store, Loader: fakeLoader{}, Provider: provider,
+		Assembler:        contextpack.NewAssembler(contextpack.Config{MaxHistoryMessages: 8}),
+		SubagentObserver: observer, SubagentDefaultWorkspace: "project-a", SubagentTasks: tasks,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = runner.RunSubagent(context.Background(), subagent.Request{
+		Task: "review before claim", InvocationID: "tool-call-prepare",
+		Parent: protocol.MessageAddress{WorkspaceID: "project-a", ThreadID: "parent-1", TaskID: "parent-task"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "admission rejected") {
+		t.Fatalf("error = %v", err)
+	}
+	if len(provider.requests) != 0 {
+		t.Fatalf("provider ran after failed admission: %d requests", len(provider.requests))
+	}
+	if events := observer.snapshot(); len(events) != 0 {
+		t.Fatalf("lifecycle projected before admission: %#v", events)
 	}
 }
 

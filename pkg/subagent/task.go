@@ -31,6 +31,10 @@ type TaskAdmission struct {
 	GrantID         string
 	SubjectType     string
 	SubjectID       string
+	// Execution is the immutable, non-secret payload descriptor for an eventual
+	// assignee. It references durable input/result/checkpoint state and records
+	// claim/replay ownership without embedding prompt text or credentials.
+	Execution ExecutionEnvelope
 }
 
 // TaskOutcome is the requested durable terminal state for one execution task.

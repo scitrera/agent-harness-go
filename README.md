@@ -194,6 +194,16 @@ inspection and non-Aether backends. The shared session protocol needs no extra
 field for this: revision 3 already carries the child `task_id`, while Aether owns
 task identity, idempotency, authorization, and parentage semantics.
 
+Each child also carries the strict OSS
+[`agent-harness.subagent.execution` v1 descriptor](docs/subagent-execution-v1.md)
+in its Aether task payload. The descriptor contains workspace-isolated durable
+input/result/checkpoint references, hashes, policy identity, and claim/recovery
+rules—not prompt text or credentials. The runner persists the referenced child
+input before task admission and resolves that same input for today's in-process
+execution. Tasks remain self-assigned until the optional external executor can
+claim this payload against a shared history backend without re-entering the
+parent admission path.
+
 By default each client keeps a local copy of the conversation it witnessed, so a
 second client attaching mid-conversation sees only what arrives after it
 connects. Point both the worker and its clients at a shared MemoryLayer to give
