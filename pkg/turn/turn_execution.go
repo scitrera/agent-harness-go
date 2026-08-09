@@ -1,6 +1,7 @@
 package turn
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -354,7 +355,7 @@ func journalMessageRef(message protocol.ChatMessage, workspaceID, sessionID stri
 	if strings.TrimSpace(message.ID) == "" || strings.TrimSpace(workspaceID) == "" || strings.TrimSpace(sessionID) == "" {
 		return turnjournal.HistoryMessageRef{}, errors.New("turn: journal message requires workspace, session, and message identity")
 	}
-	encoded, err := json.Marshal(message)
+	encoded, err := canonicalJournalMessage(message)
 	if err != nil {
 		return turnjournal.HistoryMessageRef{}, fmt.Errorf("turn: encode journal message: %w", err)
 	}
@@ -364,6 +365,30 @@ func journalMessageRef(message protocol.ChatMessage, workspaceID, sessionID stri
 		MessageID:   message.ID,
 		Digest:      digestJournalBytes(encoded),
 	}, nil
+}
+
+// canonicalJournalMessage hashes the durable protocol projection rather than
+// byte-for-byte storage output. MemoryLayer assigns created_at and exposes the
+// address workspace through its native app_workspace metadata on reload; both
+// are store-owned projections of fields already represented elsewhere and are
+// not part of the message mutation boundary. Decoding with UseNumber also
+// canonicalizes nested RawMessage key order without losing large JSON numbers.
+func canonicalJournalMessage(message protocol.ChatMessage) ([]byte, error) {
+	encoded, err := json.Marshal(message)
+	if err != nil {
+		return nil, err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	decoder.UseNumber()
+	var canonical map[string]any
+	if err := decoder.Decode(&canonical); err != nil {
+		return nil, err
+	}
+	delete(canonical, "created_at")
+	if meta, ok := canonical["meta"].(map[string]any); ok {
+		delete(meta, "app_workspace")
+	}
+	return json.Marshal(canonical)
 }
 
 func digestJournalBytes(value []byte) string {

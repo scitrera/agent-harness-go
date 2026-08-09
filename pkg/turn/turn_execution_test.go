@@ -6,6 +6,8 @@ import (
 	"errors"
 	"testing"
 
+	spec "github.com/scitrera/ecosystem-messaging-spec/go"
+
 	"github.com/scitrera/agent-harness-go/pkg/contextpack"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 	"github.com/scitrera/agent-harness-go/pkg/provider"
@@ -14,6 +16,55 @@ import (
 	"github.com/scitrera/agent-harness-go/pkg/turncancel"
 	"github.com/scitrera/agent-harness-go/pkg/turnjournal"
 )
+
+func TestJournalMessageRefSurvivesMemoryLayerProjection(t *testing.T) {
+	addr := protocol.MessageAddress{
+		WorkspaceID: "project-a", ThreadID: "thread-a", TaskID: "task-a",
+		UserID: "alice", Ownership: "workspace",
+	}
+	part, err := protocol.NewTextPart("resume me")
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := protocol.ChatMessage{
+		SchemaVersion: "1.0", ID: "user-a", Role: protocol.RoleUser,
+		Addr: addr, Content: []protocol.ContentPart{part},
+		Meta: map[string]json.RawMessage{
+			"scitrera": json.RawMessage(`{ "z": 2, "authority_grant_id": "grant-a", "a": 1 }`),
+		},
+	}
+	ref, err := journalMessageRef(message, addr.WorkspaceID, addr.ThreadID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	persisted, err := spec.ToMemoryLayerPayload(message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	persisted["id"] = "memorylayer-native-id"
+	persisted["thread_id"] = addr.ThreadID
+	persisted["created_at"] = "2026-08-09T06:13:20.881945+00:00"
+	reloaded, err := spec.FromMemoryLayerMessage(persisted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.CreatedAt == "" || reloaded.Meta["app_workspace"] == nil {
+		t.Fatalf("test did not reproduce MemoryLayer projection: %+v", reloaded)
+	}
+	if _, err := journalMessageByRef([]protocol.ChatMessage{reloaded}, ref); err != nil {
+		t.Fatalf("stable MemoryLayer projection failed journal verification: %v", err)
+	}
+
+	changedPart, err := protocol.NewTextPart("changed input")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reloaded.Content = []protocol.ContentPart{changedPart}
+	if _, err := journalMessageByRef([]protocol.ChatMessage{reloaded}, ref); err == nil {
+		t.Fatal("semantic input mutation passed journal verification")
+	}
+}
 
 func TestRunnerTurnJournalConfirmsToolAndCompletes(t *testing.T) {
 	journal, err := turnjournal.NewFileStore(t.TempDir())
