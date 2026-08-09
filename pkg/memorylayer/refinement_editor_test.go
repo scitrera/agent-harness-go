@@ -107,6 +107,38 @@ func TestRefinementResourceEditorReplayRecoversBeforeSnapshotFromHistory(t *test
 	}
 }
 
+func TestRefinementResourceEditorRestoresPromptNoteTombstone(t *testing.T) {
+	requests := 0
+	transport := &refinementTransport{roundTrip: func(request *memorylayersdk.Request) *memorylayersdk.Response {
+		requests++
+		switch requests {
+		case 1:
+			if request.Method != http.MethodGet || request.Query.Get("include_deleted") != "true" {
+				t.Fatalf("get tombstone request = %#v", request)
+			}
+			return refinementJSONResponse(http.StatusOK, `{"note":{"id":"note-1","workspace_id":"project-a","key":"note","title":"Old","content":"Old","enabled":true,"schema_version":1,"metadata":{},"revision":2,"etag":"e2","deleted_at":"2026-08-09T00:00:00Z"}}`)
+		case 2:
+			if request.Method != http.MethodPost || request.Path != "/prompt-notes/note-1/restore" || request.Header.Get("If-Match") != "e2" {
+				t.Fatalf("restore request = %#v", request)
+			}
+			return refinementJSONResponse(http.StatusOK, `{"note":{"id":"note-1","workspace_id":"project-a","key":"note","title":"Old","content":"Old","enabled":true,"schema_version":1,"metadata":{},"revision":3,"etag":"e3"}}`)
+		default:
+			t.Fatalf("unexpected request %d: %#v", requests, request)
+			return nil
+		}
+	}}
+	editor, _ := NewRefinementResourceEditor(Config{}, WithRefinementResourceTransport(transport))
+	mutation, err := editor.Apply(context.Background(), "project-a", "restore-op", refinement.Edit{
+		Action: refinement.ActionRestore, ResourceKind: refinement.ResourcePromptNote, ResourceKey: "note", ResourceID: "note-1", ExpectedETag: "e2",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mutation.Before == nil || !mutation.Before.Deleted || mutation.Before.ETag != "e2" || mutation.After == nil || mutation.After.Deleted || mutation.After.ETag != "e3" {
+		t.Fatalf("restore mutation = %#v", mutation)
+	}
+}
+
 func TestRefinementResourceEditorRejectsUnknownContentFieldsBeforeMutation(t *testing.T) {
 	transport := &refinementTransport{roundTrip: func(request *memorylayersdk.Request) *memorylayersdk.Response {
 		t.Fatalf("unexpected request: %#v", request)

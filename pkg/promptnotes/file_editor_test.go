@@ -75,6 +75,12 @@ func TestFileEditorCreateReplayReplaceDeleteUsesSameProviderAuthority(t *testing
 	if err != nil || !deleteReplay.Replayed || !deleteReplay.After.Deleted {
 		t.Fatalf("delete replay = %#v, %v", deleteReplay, err)
 	}
+	if _, err := editor.Apply(context.Background(), "project-a", "restore-op", refinement.Edit{
+		Action: refinement.ActionRestore, ResourceKind: refinement.ResourcePromptNote, ResourceKey: "coding/conventions",
+		ResourceID: created.After.ResourceID, ExpectedETag: deleted.After.ETag,
+	}); !errors.Is(err, refinement.ErrUnsupportedResource) {
+		t.Fatalf("local restore error = %v", err)
+	}
 }
 
 func TestFileProviderSynthesizesCASIdentityForLegacyNotes(t *testing.T) {

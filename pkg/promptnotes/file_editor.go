@@ -169,6 +169,8 @@ func applyFileEdit(workspaceID string, document *fileDocument, edit refinement.E
 			return refinement.Mutation{Before: before, After: fileNoteSnapshot(note)}, nil
 		}
 		return refinement.Mutation{}, fmt.Errorf("%w: prompt note %s", refinement.ErrNotFound, edit.ResourceID)
+	case refinement.ActionRestore:
+		return refinement.Mutation{}, fmt.Errorf("%w: local prompt-note tombstone restoration is not supported", refinement.ErrUnsupportedResource)
 	default:
 		return refinement.Mutation{}, fmt.Errorf("%w: unsupported prompt-note action %q", refinement.ErrInvalid, edit.Action)
 	}

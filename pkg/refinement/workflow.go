@@ -114,6 +114,8 @@ func Assess(plan Plan, policy Policy) Assessment {
 		switch edit.Action {
 		case ActionDelete:
 			escalate(RiskHigh, "deletion can remove authoritative behavior or knowledge")
+		case ActionRestore:
+			escalate(RiskHigh, "restoration reactivates previously deleted authoritative state")
 		case ActionReplace:
 			if edit.ExpectedETag == "" {
 				escalate(RiskHigh, "replacement lacks an optimistic concurrency precondition")
@@ -163,7 +165,7 @@ func (s *Service) Propose(ctx context.Context, workspaceID string, request Propo
 		Outcome:            OutcomeProposed,
 		RollbackOfRecordID: request.RollbackOfRecordID,
 		TaskRef:            request.TaskRef,
-		SchemaVersion:      1,
+		SchemaVersion:      schemaVersionForPlan(request.Plan),
 		Metadata:           metadata,
 	})
 	if err != nil {
@@ -214,7 +216,7 @@ func (s *Service) Apply(ctx context.Context, workspaceID string, request ApplyRe
 		RollbackOfRecordID: proposal.RollbackOfRecordID,
 		TaskRef:            proposal.TaskRef,
 		ApprovalRef:        request.Approval.Reference,
-		SchemaVersion:      1,
+		SchemaVersion:      proposal.SchemaVersion,
 		Metadata:           map[string]any{"assessment": assessment},
 	})
 	if err != nil {
@@ -285,7 +287,7 @@ func (s *Service) Apply(ctx context.Context, workspaceID string, request ApplyRe
 		RollbackOfRecordID: proposal.RollbackOfRecordID,
 		TaskRef:            proposal.TaskRef,
 		ApprovalRef:        request.Approval.Reference,
-		SchemaVersion:      1,
+		SchemaVersion:      proposal.SchemaVersion,
 		Metadata:           map[string]any{"assessment": assessment},
 	})
 	if appendErr != nil {
@@ -314,7 +316,7 @@ func BuildRollbackPlan(application Record, refinementID string) (Plan, error) {
 		if original.Applied == nil || !*original.Applied {
 			continue
 		}
-		if original.After == nil && original.Action != ActionDelete {
+		if original.After == nil {
 			return Plan{}, fmt.Errorf("%w: edit %d lacks its authoritative after snapshot", ErrInvalid, i)
 		}
 		reverse := Edit{
@@ -337,10 +339,19 @@ func BuildRollbackPlan(application Record, refinementID string) (Plan, error) {
 			reverse.ExpectedETag = snapshotETag(original.After)
 			reverse.Content = cloneMap(original.Before.Content)
 		case ActionDelete:
-			// A durable tombstone still owns its stable key. Recreating the key is
-			// not a safe rollback, and v1 has no explicit restore action. Keep this
-			// fail-closed until authorities expose native tombstone restoration.
-			return Plan{}, fmt.Errorf("%w: deletion rollback requires a native restore operation", ErrUnsupportedResource)
+			if original.Before == nil || original.Before.Deleted || !original.After.Deleted || original.After.ETag == "" {
+				return Plan{}, fmt.Errorf("%w: deletion edit %d lacks a valid active-before/tombstone-after pair", ErrInvalid, i)
+			}
+			reverse.Action = ActionRestore
+			reverse.ResourceID = firstNonEmpty(snapshotID(original.After), snapshotID(original.Before), original.ResourceID)
+			reverse.ExpectedETag = snapshotETag(original.After)
+		case ActionRestore:
+			if original.Before == nil || !original.Before.Deleted || original.After.Deleted || original.After.ETag == "" {
+				return Plan{}, fmt.Errorf("%w: restore edit %d lacks a valid tombstone-before/active-after pair", ErrInvalid, i)
+			}
+			reverse.Action = ActionDelete
+			reverse.ResourceID = firstNonEmpty(snapshotID(original.After), original.ResourceID)
+			reverse.ExpectedETag = snapshotETag(original.After)
 		default:
 			return Plan{}, fmt.Errorf("%w: unknown action %q", ErrInvalid, original.Action)
 		}
@@ -388,6 +399,10 @@ func validateApplicablePlan(plan Plan) error {
 			if edit.ResourceID == "" || edit.ExpectedETag == "" || len(edit.Content) != 0 {
 				return fmt.Errorf("%w: delete edit %d requires resource id and expected ETag and no content", ErrInvalid, i)
 			}
+		case ActionRestore:
+			if edit.ResourceID == "" || edit.ExpectedETag == "" || len(edit.Content) != 0 {
+				return fmt.Errorf("%w: restore edit %d requires resource id and tombstone ETag and no content", ErrInvalid, i)
+			}
 		}
 		encoded, err := json.Marshal(edit.Content)
 		if err != nil {
@@ -431,6 +446,15 @@ func containsSensitiveControl(content map[string]any) bool {
 		return false
 	}
 	return walk(content)
+}
+
+func schemaVersionForPlan(plan Plan) int {
+	for _, edit := range plan.Edits {
+		if edit.Action == ActionRestore {
+			return 2
+		}
+	}
+	return 1
 }
 
 func riskRank(level RiskLevel) int {

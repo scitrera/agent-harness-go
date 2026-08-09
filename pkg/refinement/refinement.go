@@ -1,6 +1,6 @@
-// Package refinement defines backend-neutral continual-refinement plans and
-// append-only audit records. It deliberately does not apply edits: hosts keep
-// proposal execution, approval, and recovery under their existing authorities.
+// Package refinement defines backend-neutral continual-refinement plans,
+// append-only audit records, and an approval-aware workflow over authoritative
+// resource editors. Task lifecycle and distributed recovery remain host-owned.
 package refinement
 
 import (
@@ -55,6 +55,7 @@ const (
 	ActionCreate  Action = "create"
 	ActionReplace Action = "replace"
 	ActionDelete  Action = "delete"
+	ActionRestore Action = "restore"
 
 	EvidenceMessage          EvidenceKind = "message"
 	EvidenceToolResult       EvidenceKind = "tool_result"
@@ -95,7 +96,8 @@ type Edit struct {
 	AfterETag    string       `json:"after_etag,omitempty"`
 	Reason       string       `json:"reason"`
 	// Content is the desired authority-neutral resource document for create and
-	// replace actions. Delete actions leave it empty.
+	// replace actions. Delete and restore actions leave it empty; restore asks
+	// the authority to reactivate the exact tombstoned head.
 	Content map[string]any    `json:"content,omitempty"`
 	Before  *ResourceSnapshot `json:"before,omitempty"`
 	After   *ResourceSnapshot `json:"after,omitempty"`
@@ -170,7 +172,7 @@ func (r AppendRequest) Validate() error {
 	if r.SchemaVersion == 0 {
 		r.SchemaVersion = 1
 	}
-	if r.SchemaVersion != 1 {
+	if r.SchemaVersion != 1 && r.SchemaVersion != 2 {
 		return fmt.Errorf("%w: unsupported schema version %d", ErrInvalid, r.SchemaVersion)
 	}
 	for name, value := range map[string]string{
@@ -201,6 +203,9 @@ func (r AppendRequest) Validate() error {
 	for i, edit := range r.Plan.Edits {
 		if !validAction(edit.Action) || !validResourceKind(edit.ResourceKind) || !validKey.MatchString(edit.ResourceKey) || strings.TrimSpace(edit.Reason) == "" {
 			return fmt.Errorf("%w: invalid edit at index %d (action=%q resource_kind=%q resource_key=%q has_reason=%t)", ErrInvalid, i, edit.Action, edit.ResourceKind, edit.ResourceKey, strings.TrimSpace(edit.Reason) != "")
+		}
+		if edit.Action == ActionRestore && r.SchemaVersion < 2 {
+			return fmt.Errorf("%w: restore edit at index %d requires schema version 2", ErrInvalid, i)
 		}
 	}
 	if !validPhaseOutcome(r.Phase, r.Outcome) {
@@ -236,7 +241,7 @@ func validEvidenceKind(kind EvidenceKind) bool {
 }
 
 func validAction(action Action) bool {
-	return action == ActionCreate || action == ActionReplace || action == ActionDelete
+	return action == ActionCreate || action == ActionReplace || action == ActionDelete || action == ActionRestore
 }
 
 func validResourceKind(kind ResourceKind) bool {

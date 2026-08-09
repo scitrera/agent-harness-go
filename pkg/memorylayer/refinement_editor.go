@@ -97,7 +97,7 @@ func (e *RefinementResourceEditor) applyPromptNote(ctx context.Context, workspac
 			return refinement.Mutation{}, mapRefinementMutationError("create prompt note", err)
 		}
 		return refinement.Mutation{After: promptNoteSnapshot(result.Note), Replayed: result.Replayed}, nil
-	case refinement.ActionReplace, refinement.ActionDelete:
+	case refinement.ActionReplace, refinement.ActionDelete, refinement.ActionRestore:
 		if strings.TrimSpace(edit.ResourceID) == "" {
 			return refinement.Mutation{}, fmt.Errorf("%w: prompt-note %s requires resource_id", refinement.ErrInvalid, edit.Action)
 		}
@@ -111,20 +111,24 @@ func (e *RefinementResourceEditor) applyPromptNote(ctx context.Context, workspac
 			return refinement.Mutation{}, fmt.Errorf("%w: prompt-note id %s has key %q, not %q", refinement.ErrConflict, edit.ResourceID, current.Key, edit.ResourceKey)
 		}
 		var result *memorylayersdk.PromptNoteMutationResult
-		if edit.Action == refinement.ActionReplace {
+		switch edit.Action {
+		case refinement.ActionReplace:
 			var input memorylayersdk.PromptNoteReplaceInput
 			if err := decodeRefinementContent(edit.Content, &input); err != nil {
 				return refinement.Mutation{}, err
 			}
 			result, err = e.client.PromptNotes.Replace(ctx, edit.ResourceID, input, opts)
-		} else {
+		case refinement.ActionDelete:
 			result, err = e.client.PromptNotes.Delete(ctx, edit.ResourceID, opts)
+		case refinement.ActionRestore:
+			result, err = e.client.PromptNotes.Restore(ctx, edit.ResourceID, opts)
 		}
 		if err != nil {
 			return refinement.Mutation{}, mapRefinementMutationError(string(edit.Action)+" prompt note", err)
 		}
 		before := promptNoteSnapshot(*current)
-		if before.ETag != edit.ExpectedETag || before.Deleted {
+		expectedDeleted := edit.Action == refinement.ActionRestore
+		if before.ETag != edit.ExpectedETag || before.Deleted != expectedDeleted {
 			if !result.Replayed {
 				return refinement.Mutation{}, fmt.Errorf("%w: authority accepted a mutation whose observed head did not match its expected ETag", refinement.ErrConflict)
 			}
@@ -156,7 +160,7 @@ func (e *RefinementResourceEditor) applyAgentSpecification(ctx context.Context, 
 			return refinement.Mutation{}, mapRefinementMutationError("create agent specification", err)
 		}
 		return refinement.Mutation{After: agentSpecificationSnapshot(result.Specification), Replayed: result.Replayed}, nil
-	case refinement.ActionReplace, refinement.ActionDelete:
+	case refinement.ActionReplace, refinement.ActionDelete, refinement.ActionRestore:
 		if strings.TrimSpace(edit.ResourceID) == "" {
 			return refinement.Mutation{}, fmt.Errorf("%w: agent-specification %s requires resource_id", refinement.ErrInvalid, edit.Action)
 		}
@@ -170,20 +174,24 @@ func (e *RefinementResourceEditor) applyAgentSpecification(ctx context.Context, 
 			return refinement.Mutation{}, fmt.Errorf("%w: agent-specification id %s has key %q, not %q", refinement.ErrConflict, edit.ResourceID, current.Key, edit.ResourceKey)
 		}
 		var result *memorylayersdk.AgentSpecificationMutationResult
-		if edit.Action == refinement.ActionReplace {
+		switch edit.Action {
+		case refinement.ActionReplace:
 			var input memorylayersdk.AgentSpecificationReplaceInput
 			if err := decodeRefinementContent(edit.Content, &input); err != nil {
 				return refinement.Mutation{}, err
 			}
 			result, err = e.client.AgentSpecifications.Replace(ctx, edit.ResourceID, input, opts)
-		} else {
+		case refinement.ActionDelete:
 			result, err = e.client.AgentSpecifications.Delete(ctx, edit.ResourceID, opts)
+		case refinement.ActionRestore:
+			result, err = e.client.AgentSpecifications.Restore(ctx, edit.ResourceID, opts)
 		}
 		if err != nil {
 			return refinement.Mutation{}, mapRefinementMutationError(string(edit.Action)+" agent specification", err)
 		}
 		before := agentSpecificationSnapshot(*current)
-		if before.ETag != edit.ExpectedETag || before.Deleted {
+		expectedDeleted := edit.Action == refinement.ActionRestore
+		if before.ETag != edit.ExpectedETag || before.Deleted != expectedDeleted {
 			if !result.Replayed {
 				return refinement.Mutation{}, fmt.Errorf("%w: authority accepted a mutation whose observed head did not match its expected ETag", refinement.ErrConflict)
 			}

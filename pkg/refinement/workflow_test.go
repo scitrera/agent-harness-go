@@ -169,7 +169,7 @@ func TestProposeRejectsUnsafeMutationShape(t *testing.T) {
 	}
 }
 
-func TestBuildRollbackPlanFailsClosedForDeletedResources(t *testing.T) {
+func TestBuildRollbackPlanUsesSchemaV2NativeRestoreForDeletedResources(t *testing.T) {
 	applied := true
 	application := Record{
 		ID: "application-1",
@@ -177,13 +177,27 @@ func TestBuildRollbackPlanFailsClosedForDeletedResources(t *testing.T) {
 			Plan: Plan{Scope: ScopeWorkspace, Summary: "delete note", Edits: []Edit{{
 				Action: ActionDelete, ResourceKind: ResourcePromptNote, ResourceKey: "note", Applied: &applied,
 				Before: &ResourceSnapshot{ResourceID: "note-1", ResourceKey: "note", ETag: "e1", Content: map[string]any{"title": "Old"}},
+				After:  &ResourceSnapshot{ResourceID: "note-1", ResourceKey: "note", ETag: "e2", Content: map[string]any{"title": "Old"}, Deleted: true},
 			}}},
 			Phase: PhaseApplication, Outcome: OutcomeApplied,
 		},
 	}
-	_, err := BuildRollbackPlan(application, "rollback-1")
-	if !errors.Is(err, ErrUnsupportedResource) {
-		t.Fatalf("deletion rollback error = %v", err)
+	plan, err := BuildRollbackPlan(application, "rollback-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Edits) != 1 || plan.Edits[0].Action != ActionRestore || plan.Edits[0].ResourceID != "note-1" || plan.Edits[0].ExpectedETag != "e2" {
+		t.Fatalf("restore rollback = %+v", plan.Edits)
+	}
+	service := &Service{Store: newTestStore(t)}
+	proposal, err := service.Propose(context.Background(), "ws", ProposeRequest{
+		OperationID: "rollback-proposal", Key: "rollback/proposal", Plan: plan, RollbackOfRecordID: application.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if proposal.Record.SchemaVersion != 2 || proposal.Assessment.Risk != RiskHigh || !proposal.Assessment.RequiresApproval {
+		t.Fatalf("restore proposal = %+v", proposal)
 	}
 }
 

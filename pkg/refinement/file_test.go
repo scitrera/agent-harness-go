@@ -144,4 +144,15 @@ func TestAppendRequestValidatesPhaseOutcomeEvidenceAndRollback(t *testing.T) {
 	if err := request.Validate(); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("rollback link error = %v", err)
 	}
+	request = proposal("refinements/r1/restore")
+	request.Edits = []Edit{{
+		Action: ActionRestore, ResourceKind: ResourcePromptNote, ResourceKey: "note", ResourceID: "note-1", ExpectedETag: "e2", Reason: "restore deletion",
+	}}
+	if err := request.Validate(); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("schema v1 restore error = %v", err)
+	}
+	request.SchemaVersion = 2
+	if err := request.Validate(); err != nil {
+		t.Fatalf("schema v2 restore error = %v", err)
+	}
 }
