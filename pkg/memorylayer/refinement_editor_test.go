@@ -139,6 +139,75 @@ func TestRefinementResourceEditorRestoresPromptNoteTombstone(t *testing.T) {
 	}
 }
 
+func TestRefinementResourceEditorCreatesNativeSkillManifest(t *testing.T) {
+	transport := &refinementTransport{roundTrip: func(request *memorylayersdk.Request) *memorylayersdk.Response {
+		if request.Method != http.MethodPost || request.Path != "/skills" {
+			t.Fatalf("request = %s %s", request.Method, request.Path)
+		}
+		if request.Header.Get("If-None-Match") != "*" || request.Header.Get("Idempotency-Key") != "skill-op" {
+			t.Fatalf("conditional headers = %#v", request.Header)
+		}
+		var body map[string]any
+		if err := json.Unmarshal(request.Body, &body); err != nil {
+			t.Fatal(err)
+		}
+		if body["workspace_id"] != "project-a" || body["name"] != "review-workflow" {
+			t.Fatalf("body = %#v", body)
+		}
+		return refinementJSONResponse(http.StatusCreated, `{"skill":{"id":"skl-1","workspace_id":"project-a","name":"review-workflow","description":"Review changes","version":"0.1.0","body":"## Process","metadata":{"source":"refinement"},"source_mode":"server","manifest_hash":"mh","bundle_hash":"","enabled":true,"revision":1,"etag":"s1"}}`)
+	}}
+	editor, err := NewRefinementResourceEditor(Config{}, WithRefinementResourceTransport(transport))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutation, err := editor.Apply(context.Background(), "project-a", "skill-op", refinement.Edit{
+		Action: refinement.ActionCreate, ResourceKind: refinement.ResourceSkill, ResourceKey: "review-workflow",
+		Content: map[string]any{
+			"description": "Review changes", "version": "0.1.0", "body": "## Process",
+			"metadata": map[string]any{"source": "refinement"}, "source_mode": "server",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mutation.After == nil || mutation.After.ResourceID != "skl-1" || mutation.After.ResourceKey != "review-workflow" || mutation.After.ETag != "s1" {
+		t.Fatalf("mutation = %#v", mutation)
+	}
+}
+
+func TestRefinementResourceEditorRestoresNativeSkillTombstone(t *testing.T) {
+	requests := 0
+	transport := &refinementTransport{roundTrip: func(request *memorylayersdk.Request) *memorylayersdk.Response {
+		requests++
+		switch requests {
+		case 1:
+			if request.Path != "/skills/skl-1" || request.Query.Get("include_deleted") != "true" {
+				t.Fatalf("get tombstone request = %#v", request)
+			}
+			return refinementJSONResponse(http.StatusOK, `{"skill":{"id":"skl-1","workspace_id":"project-a","name":"review-workflow","description":"Review changes","version":"0.1.0","body":"## Process","metadata":{},"source_mode":"server","manifest_hash":"mh","bundle_hash":"bh","enabled":true,"revision":2,"etag":"s2","deleted_at":"2026-08-09T00:00:00Z"}}`)
+		case 2:
+			if request.Path != "/skills/skl-1/restore" || request.Header.Get("If-Match") != "s2" {
+				t.Fatalf("restore request = %#v", request)
+			}
+			return refinementJSONResponse(http.StatusOK, `{"skill":{"id":"skl-1","workspace_id":"project-a","name":"review-workflow","description":"Review changes","version":"0.1.0","body":"## Process","metadata":{},"source_mode":"server","manifest_hash":"mh","bundle_hash":"bh","enabled":true,"revision":3,"etag":"s3"}}`)
+		default:
+			t.Fatalf("unexpected request %d: %#v", requests, request)
+			return nil
+		}
+	}}
+	editor, _ := NewRefinementResourceEditor(Config{}, WithRefinementResourceTransport(transport))
+	mutation, err := editor.Apply(context.Background(), "project-a", "restore-skill", refinement.Edit{
+		Action: refinement.ActionRestore, ResourceKind: refinement.ResourceSkill,
+		ResourceKey: "review-workflow", ResourceID: "skl-1", ExpectedETag: "s2",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mutation.Before == nil || !mutation.Before.Deleted || mutation.After == nil || mutation.After.Deleted || mutation.After.ETag != "s3" {
+		t.Fatalf("mutation = %#v", mutation)
+	}
+}
+
 func TestRefinementResourceEditorRejectsUnknownContentFieldsBeforeMutation(t *testing.T) {
 	transport := &refinementTransport{roundTrip: func(request *memorylayersdk.Request) *memorylayersdk.Response {
 		t.Fatalf("unexpected request: %#v", request)

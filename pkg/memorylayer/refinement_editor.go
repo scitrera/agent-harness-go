@@ -17,9 +17,9 @@ import (
 const maxRefinementHistoryPages = 10
 
 // RefinementResourceEditor applies conflict-checked prompt-note and
-// agent-specification edits against MemoryLayer's revisioned resource APIs.
-// Memories and skills remain unsupported until they expose equivalent native
-// CAS and history semantics.
+// agent-specification and skill-manifest edits against MemoryLayer's
+// revisioned native resource APIs. Memories remain unsupported until they
+// expose equivalent native CAS and history semantics.
 type RefinementResourceEditor struct {
 	client *memorylayersdk.Client
 }
@@ -75,8 +75,73 @@ func (e *RefinementResourceEditor) Apply(ctx context.Context, workspaceID, opera
 		return e.applyPromptNote(ctx, workspaceID, operationID, edit)
 	case refinement.ResourceAgentSpecification:
 		return e.applyAgentSpecification(ctx, workspaceID, operationID, edit)
+	case refinement.ResourceSkill:
+		return e.applySkill(ctx, workspaceID, operationID, edit)
 	default:
 		return refinement.Mutation{}, fmt.Errorf("%w: %s", refinement.ErrUnsupportedResource, edit.ResourceKind)
+	}
+}
+
+func (e *RefinementResourceEditor) applySkill(ctx context.Context, workspaceID, operationID string, edit refinement.Edit) (refinement.Mutation, error) {
+	authority := promptNoteAuthority(ctx)
+	opts := memorylayersdk.SkillManifestMutationOptions{
+		WorkspaceID: workspaceID, IdempotencyKey: operationID, ETag: edit.ExpectedETag, Authority: authority,
+	}
+	switch edit.Action {
+	case refinement.ActionCreate:
+		var input memorylayersdk.SkillManifestCreateInput
+		if err := decodeRefinementContent(edit.Content, &input); err != nil {
+			return refinement.Mutation{}, err
+		}
+		input.Name = edit.ResourceKey
+		result, err := e.client.Skills.CreateVersioned(ctx, input, opts)
+		if err != nil {
+			return refinement.Mutation{}, mapRefinementMutationError("create skill manifest", err)
+		}
+		return refinement.Mutation{After: skillSnapshot(result.Skill), Replayed: result.Replayed}, nil
+	case refinement.ActionReplace, refinement.ActionDelete, refinement.ActionRestore:
+		if strings.TrimSpace(edit.ResourceID) == "" {
+			return refinement.Mutation{}, fmt.Errorf("%w: skill %s requires resource_id", refinement.ErrInvalid, edit.Action)
+		}
+		current, err := e.client.Skills.GetWithOptions(ctx, edit.ResourceID, memorylayersdk.SkillGetOptions{
+			WorkspaceID: workspaceID, IncludeDeleted: true, Authority: authority,
+		})
+		if err != nil {
+			return refinement.Mutation{}, mapRefinementMutationError("get skill manifest", err)
+		}
+		if current.Name != edit.ResourceKey {
+			return refinement.Mutation{}, fmt.Errorf("%w: skill id %s has name %q, not %q", refinement.ErrConflict, edit.ResourceID, current.Name, edit.ResourceKey)
+		}
+		var result *memorylayersdk.SkillMutationResult
+		switch edit.Action {
+		case refinement.ActionReplace:
+			var input memorylayersdk.SkillManifestReplaceInput
+			if err := decodeRefinementContent(edit.Content, &input); err != nil {
+				return refinement.Mutation{}, err
+			}
+			result, err = e.client.Skills.ReplaceManifest(ctx, edit.ResourceID, input, opts)
+		case refinement.ActionDelete:
+			result, err = e.client.Skills.DeleteVersioned(ctx, edit.ResourceID, opts)
+		case refinement.ActionRestore:
+			result, err = e.client.Skills.Restore(ctx, edit.ResourceID, opts)
+		}
+		if err != nil {
+			return refinement.Mutation{}, mapRefinementMutationError(string(edit.Action)+" skill manifest", err)
+		}
+		before := skillSnapshot(*current)
+		expectedDeleted := edit.Action == refinement.ActionRestore
+		if before.ETag != edit.ExpectedETag || before.Deleted != expectedDeleted {
+			if !result.Replayed {
+				return refinement.Mutation{}, fmt.Errorf("%w: authority accepted a skill mutation whose observed head did not match its expected ETag", refinement.ErrConflict)
+			}
+			before, err = e.findSkillSnapshot(ctx, workspaceID, edit.ResourceID, edit.ExpectedETag, authority)
+			if err != nil {
+				return refinement.Mutation{}, err
+			}
+		}
+		return refinement.Mutation{Before: before, After: skillSnapshot(result.Skill), Replayed: result.Replayed}, nil
+	default:
+		return refinement.Mutation{}, fmt.Errorf("%w: unsupported skill action %q", refinement.ErrInvalid, edit.Action)
 	}
 }
 
@@ -250,6 +315,28 @@ func (e *RefinementResourceEditor) findAgentSpecificationSnapshot(ctx context.Co
 	return nil, fmt.Errorf("%w: expected agent-specification revision %s is absent from bounded history", refinement.ErrConflict, etag)
 }
 
+func (e *RefinementResourceEditor) findSkillSnapshot(ctx context.Context, workspaceID, resourceID, etag string, authority *memorylayersdk.AuthorityContext) (*refinement.ResourceSnapshot, error) {
+	pageToken := ""
+	for page := 0; page < maxRefinementHistoryPages; page++ {
+		history, err := e.client.Skills.History(ctx, resourceID, memorylayersdk.SkillHistoryOptions{
+			WorkspaceID: workspaceID, Limit: 100, PageToken: pageToken, Authority: authority,
+		})
+		if err != nil {
+			return nil, mapRefinementMutationError("read skill history", err)
+		}
+		for _, revision := range history.Revisions {
+			if revision.Skill.ETag == etag {
+				return skillSnapshot(revision.Skill), nil
+			}
+		}
+		if history.NextPageToken == "" {
+			break
+		}
+		pageToken = history.NextPageToken
+	}
+	return nil, fmt.Errorf("%w: expected skill revision %s is absent from bounded history", refinement.ErrConflict, etag)
+}
+
 func decodeRefinementContent(content map[string]any, output any) error {
 	encoded, err := json.Marshal(content)
 	if err != nil {
@@ -290,6 +377,26 @@ func agentSpecificationSnapshot(specification memorylayersdk.AgentSpecification)
 		},
 		Metadata: specification.Metadata, Deleted: specification.DeletedAt != nil,
 	}
+}
+
+func skillSnapshot(skill memorylayersdk.SkillModel) *refinement.ResourceSnapshot {
+	return &refinement.ResourceSnapshot{
+		ResourceID: skill.ID, ResourceKey: skill.Name, ETag: skill.ETag, SchemaVersion: 1,
+		Content: map[string]any{
+			"description": skill.Description, "version": skill.Version,
+			"license": optionalStringValue(skill.License), "compatibility": optionalStringValue(skill.Compatibility),
+			"allowed_tools": optionalStringValue(skill.AllowedTools), "body": skill.Body,
+			"metadata": skill.Metadata, "source_mode": skill.SourceMode, "enabled": skill.Enabled,
+		},
+		Metadata: skill.Metadata, Deleted: skill.DeletedAt != nil,
+	}
+}
+
+func optionalStringValue(value *string) any {
+	if value == nil {
+		return nil
+	}
+	return *value
 }
 
 func mapRefinementMutationError(action string, err error) error {
