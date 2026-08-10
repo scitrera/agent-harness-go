@@ -19,6 +19,7 @@ import (
 	"github.com/scitrera/agent-harness-go/pkg/memorylayer"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 	"github.com/scitrera/agent-harness-go/pkg/tools"
+	workspacepkg "github.com/scitrera/agent-harness-go/pkg/workspace"
 )
 
 // TestLiveAetherClientWorkspaceToolRouting is an opt-in deterministic E2E. It
@@ -225,7 +226,9 @@ func TestLiveAetherScheduledWorkerView(t *testing.T) {
 		ID: "once-" + suffix, Name: "E2E scheduled view", Enabled: true,
 		ScheduleType: "once", ScheduleExpression: fireAt, MissPolicy: "fire_once",
 		ThreadID: "scheduled-e2e", Prompt: "Inspect the exact worker view", Binding: binding,
-		ViewPolicy: aetherchan.ScheduledViewPolicy{AllowMutableView: true},
+		ViewPolicy: aetherchan.ScheduledViewPolicy{
+			WriteAccess: workspacepkg.ViewWriteAccessReadOnly, AllowMutableView: true,
+		},
 	}}, nil, 0); err != nil {
 		t.Fatal(err)
 	}

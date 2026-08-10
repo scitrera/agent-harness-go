@@ -135,13 +135,13 @@ func toolEnvelopeExecutionScope(envelope spec.ToolInvokeEnvelope) (workspacepkg.
 	if err := binding.Validate(); err != nil {
 		return workspacepkg.ExecutionScope{}, err
 	}
-	policy := workspacepkg.ExecutionViewPolicy{WriteAccess: workspacepkg.ViewWriteAccessReadWrite}
-	if rawPolicy := envelope.Meta[workspacepkg.ExecutionViewPolicyMetaKey]; len(rawPolicy) > 0 {
-		var err error
-		policy, err = workspacepkg.DecodeExecutionViewPolicy(rawPolicy)
-		if err != nil {
-			return workspacepkg.ExecutionScope{}, err
-		}
+	rawPolicy := envelope.Meta[workspacepkg.ExecutionViewPolicyMetaKey]
+	if len(rawPolicy) == 0 {
+		return workspacepkg.ExecutionScope{}, fmt.Errorf("tool invocation has no execution view policy")
+	}
+	policy, err := workspacepkg.DecodeExecutionViewPolicy(rawPolicy)
+	if err != nil {
+		return workspacepkg.ExecutionScope{}, err
 	}
 	return workspacepkg.NewExecutionScope(binding, policy)
 }

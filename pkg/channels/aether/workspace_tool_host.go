@@ -176,7 +176,7 @@ type WorkerToolAccessAuthorizer interface {
 // ScheduledViewPolicy is captured with a versioned task envelope. False values
 // are the safe default: require a clean Git worktree.
 type ScheduledViewPolicy struct {
-	WriteAccess      workspacepkg.ViewWriteAccess `json:"write_access,omitempty"`
+	WriteAccess      workspacepkg.ViewWriteAccess `json:"write_access"`
 	AllowMutableView bool                         `json:"allow_mutable_view"`
 	AllowDirtyView   bool                         `json:"allow_dirty_view"`
 }
@@ -195,15 +195,8 @@ func (p ScheduledViewPolicy) Validate() error {
 }
 
 func (p ScheduledViewPolicy) executionViewPolicy() workspacepkg.ExecutionViewPolicy {
-	access := p.WriteAccess
-	if access == "" {
-		access = workspacepkg.ViewWriteAccessReadOnly
-		if p.AllowDirtyView {
-			access = workspacepkg.ViewWriteAccessReadWrite
-		}
-	}
 	return workspacepkg.ExecutionViewPolicy{
-		WriteAccess: access, AllowMutableView: p.AllowMutableView, AllowDirtyView: p.AllowDirtyView,
+		WriteAccess: p.WriteAccess, AllowMutableView: p.AllowMutableView, AllowDirtyView: p.AllowDirtyView,
 	}
 }
 

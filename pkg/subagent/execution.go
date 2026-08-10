@@ -22,10 +22,10 @@ const (
 	// carried by a durable task backend. It is an execution-plane contract, not
 	// part of the ecosystem session-message protocol.
 	ExecutionEnvelopeSchema = "agent-harness.subagent.execution"
-	// Revision 2 adds an exact workspace execution scope. Revision 1 remains
-	// readable for already-admitted unbound tasks during rolling upgrades.
-	ExecutionEnvelopeSchemaRevision       = 2
-	executionEnvelopeLegacySchemaRevision = 1
+	// Revision 1 includes the exact workspace execution scope. This contract is
+	// still unreleased, so iterative local shapes are not retained as separate
+	// compatibility revisions.
+	ExecutionEnvelopeSchemaRevision = 1
 
 	ExecutionBackendHistory        = "history"
 	ExecutionBackendTaskCheckpoint = "task_checkpoint"
@@ -111,7 +111,7 @@ type ExecutionEnvelope struct {
 func NewExecutionEnvelope(req Request, workspaceID, childSessionID string, background bool) (ExecutionEnvelope, error) {
 	workspaceID = strings.TrimSpace(workspaceID)
 	childSessionID = strings.TrimSpace(childSessionID)
-	executionID := "ahx-v2-" + hashExecutionIdentity(
+	executionID := "ahx-v1-" + hashExecutionIdentity(
 		workspaceID,
 		req.Parent.ThreadID,
 		childSessionID,
@@ -154,7 +154,7 @@ func NewExecutionEnvelope(req Request, workspaceID, childSessionID string, backg
 		Checkpoint: ExecutionArtifactRef{
 			Backend:  ExecutionBackendTaskCheckpoint,
 			Kind:     ExecutionArtifactCheckpoint,
-			RecordID: "agent-harness/subagent/" + executionID + "/v2",
+			RecordID: "agent-harness/subagent/" + executionID + "/v1",
 		},
 		Policy: policy,
 		Ownership: ExecutionOwnership{
@@ -179,12 +179,11 @@ func (e ExecutionEnvelope) Validate() error {
 	switch {
 	case e.Schema != ExecutionEnvelopeSchema:
 		return fmt.Errorf("subagent: unsupported execution schema %q", e.Schema)
-	case e.SchemaRevision != executionEnvelopeLegacySchemaRevision && e.SchemaRevision != ExecutionEnvelopeSchemaRevision:
+	case e.SchemaRevision != ExecutionEnvelopeSchemaRevision:
 		return fmt.Errorf("subagent: unsupported execution schema revision %d", e.SchemaRevision)
 	case e.Depth < 0:
 		return errors.New("subagent: execution depth must not be negative")
 	}
-	prefix := "ahx-v1-"
 	identity := []string{
 		e.WorkspaceID,
 		e.ParentSessionID,
@@ -194,14 +193,9 @@ func (e ExecutionEnvelope) Validate() error {
 		e.InvocationID,
 		strconv.Itoa(e.Depth),
 		strconv.FormatBool(e.Background),
+		digestExecutionScope(e.ExecutionScope),
 	}
-	if e.SchemaRevision == ExecutionEnvelopeSchemaRevision {
-		prefix = "ahx-v2-"
-		identity = append(identity, digestExecutionScope(e.ExecutionScope))
-	} else if e.ExecutionScope != nil {
-		return errors.New("subagent: revision 1 execution cannot carry an execution scope")
-	}
-	wantExecutionID := prefix + hashExecutionIdentity(identity...)
+	wantExecutionID := "ahx-v1-" + hashExecutionIdentity(identity...)
 	if e.ExecutionID != wantExecutionID {
 		return errors.New("subagent: invalid execution id")
 	}
@@ -493,8 +487,7 @@ func cloneExecutionScope(scope *workspacepkg.ExecutionScope) *workspacepkg.Execu
 }
 
 func isExecutionInputID(id string) bool {
-	return strings.HasSuffix(id, "-input") &&
-		(strings.HasPrefix(id, "ahx-v1-") || strings.HasPrefix(id, "ahx-v2-"))
+	return strings.HasPrefix(id, "ahx-v1-") && strings.HasSuffix(id, "-input")
 }
 
 func hashExecutionIdentity(parts ...string) string {

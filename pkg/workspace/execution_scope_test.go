@@ -19,7 +19,7 @@ func testExecutionScope(t *testing.T, access ViewWriteAccess) ExecutionScope {
 	return scope
 }
 
-func TestExecutionScopeMessageRoundTripAndLegacyDefault(t *testing.T) {
+func TestExecutionScopeMessageRoundTripRequiresExplicitPolicy(t *testing.T) {
 	scope := testExecutionScope(t, ViewWriteAccessReadOnly)
 	message := spec.NewChatMessage("message-1", spec.RoleUser)
 	if err := PutExecutionScope(&message, scope); err != nil {
@@ -30,13 +30,12 @@ func TestExecutionScopeMessageRoundTripAndLegacyDefault(t *testing.T) {
 		t.Fatalf("scope = %#v, %v", got, err)
 	}
 
-	legacy := spec.NewChatMessage("message-2", spec.RoleUser)
-	if err := spec.PutExecutionBinding(&legacy, scope.Binding); err != nil {
+	missingPolicy := spec.NewChatMessage("message-2", spec.RoleUser)
+	if err := spec.PutExecutionBinding(&missingPolicy, scope.Binding); err != nil {
 		t.Fatal(err)
 	}
-	got, err = GetExecutionScope(legacy)
-	if err != nil || got.Policy.WriteAccess != ViewWriteAccessReadWrite {
-		t.Fatalf("legacy scope = %#v, %v", got, err)
+	if _, err = GetExecutionScope(missingPolicy); err == nil {
+		t.Fatal("expected binding without explicit policy to fail")
 	}
 }
 

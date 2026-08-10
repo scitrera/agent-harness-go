@@ -687,8 +687,8 @@ func latestSubagentExecutionScope(messages []protocol.ChatMessage) (*workspacepk
 	var latest *workspacepkg.ExecutionScope
 	found := false
 	for _, message := range messages {
-		if message.Role != protocol.RoleUser || !strings.HasSuffix(message.ID, "-input") ||
-			(!strings.HasPrefix(message.ID, "ahx-v1-") && !strings.HasPrefix(message.ID, "ahx-v2-")) {
+		if message.Role != protocol.RoleUser || !strings.HasPrefix(message.ID, "ahx-v1-") ||
+			!strings.HasSuffix(message.ID, "-input") {
 			continue
 		}
 		scope, err := workspacepkg.GetExecutionScope(message)

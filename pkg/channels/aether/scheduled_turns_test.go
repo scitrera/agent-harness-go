@@ -12,6 +12,7 @@ import (
 	spec "github.com/scitrera/ecosystem-messaging-spec/go"
 
 	"github.com/scitrera/agent-harness-go/pkg/channel"
+	workspacepkg "github.com/scitrera/agent-harness-go/pkg/workspace"
 )
 
 type recordingBoundTurnEnqueuer struct {
@@ -43,7 +44,9 @@ func scheduledRegistration() ScheduledTurnRegistration {
 		ID: "daily-review", Name: "Daily review", ScheduleType: "cron",
 		ScheduleExpression: "0 9 * * *", ThreadID: "scheduled-daily-review",
 		Prompt: "Review this workspace", MissPolicy: "fire_once", Enabled: true,
-		Binding: binding, ViewPolicy: ScheduledViewPolicy{AllowDirtyView: true},
+		Binding: binding, ViewPolicy: ScheduledViewPolicy{
+			WriteAccess: workspacepkg.ViewWriteAccessReadWrite, AllowDirtyView: true,
+		},
 	}
 }
 

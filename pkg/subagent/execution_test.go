@@ -198,32 +198,14 @@ func TestExecutionEnvelopePolicySnapshotFailsClosedOnCatalogDrift(t *testing.T) 
 	}
 }
 
-func TestExecutionEnvelopeRevisionOneCompatibilityIsUnbound(t *testing.T) {
-	req := executionTestRequest()
-	req.ExecutionScope = nil
-	envelope, err := NewExecutionEnvelope(req, "project-a", "child-session", false)
+func TestExecutionEnvelopeRejectsUnreleasedAlternateRevision(t *testing.T) {
+	envelope, err := NewExecutionEnvelope(executionTestRequest(), "project-a", "child-session", false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	envelope.SchemaRevision = executionEnvelopeLegacySchemaRevision
-	envelope.ExecutionID = "ahx-v1-" + hashExecutionIdentity(
-		envelope.WorkspaceID, envelope.ParentSessionID, envelope.ChildSessionID,
-		envelope.ParentTaskID, envelope.ParentMessageID, envelope.InvocationID,
-		"2", "false",
-	)
-	envelope.Input.RecordID = envelope.ExecutionID + "-input"
-	envelope.Result.RecordID = envelope.ExecutionID
-	envelope.Checkpoint.RecordID = "agent-harness/subagent/" + envelope.ExecutionID + "/v1"
-	data, err := MarshalExecutionEnvelope(envelope)
-	if err != nil {
-		t.Fatal(err)
-	}
-	decoded, err := ParseExecutionEnvelope(data)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if decoded.SchemaRevision != 1 || decoded.ExecutionScope != nil {
-		t.Fatalf("legacy envelope = %+v", decoded)
+	envelope.SchemaRevision = 2
+	if err := envelope.Validate(); err == nil || !strings.Contains(err.Error(), "unsupported execution schema revision") {
+		t.Fatalf("alternate revision error = %v", err)
 	}
 }
 

@@ -104,7 +104,7 @@ func ExecutionScopeFrom(ctx context.Context) (ExecutionScope, bool) {
 }
 
 // PutExecutionScope stores the portable binding plus Sahara's private policy
-// extension on a message. Older readers still see the standard binding.
+// extension on a message.
 func PutExecutionScope(message *spec.ChatMessage, scope ExecutionScope) error {
 	if message == nil {
 		return errors.New("workspace execution scope: message is required")
@@ -126,9 +126,9 @@ func PutExecutionScope(message *spec.ChatMessage, scope ExecutionScope) error {
 	return nil
 }
 
-// GetExecutionScope accepts legacy binding-only messages as read-write. That
-// preserves existing interactive behavior while all newly persisted child and
-// scheduled records carry an explicit policy.
+// GetExecutionScope requires a policy whenever a binding is present. The scope
+// contract is unreleased, so missing authority is rejected rather than mapped
+// through a transitional default.
 func GetExecutionScope(message spec.ChatMessage) (*ExecutionScope, error) {
 	binding, err := spec.GetExecutionBinding(message)
 	if err != nil {
@@ -141,11 +141,12 @@ func GetExecutionScope(message spec.ChatMessage) (*ExecutionScope, error) {
 		}
 		return nil, nil
 	}
-	policy := ExecutionViewPolicy{WriteAccess: ViewWriteAccessReadWrite}
-	if len(raw) != 0 {
-		if err := decodeExecutionViewPolicy(raw, &policy); err != nil {
-			return nil, err
-		}
+	if len(raw) == 0 {
+		return nil, errors.New("workspace execution scope: binding has no policy")
+	}
+	var policy ExecutionViewPolicy
+	if err := decodeExecutionViewPolicy(raw, &policy); err != nil {
+		return nil, err
 	}
 	scope := &ExecutionScope{Binding: *binding, Policy: policy}
 	if err := scope.Validate(); err != nil {

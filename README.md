@@ -272,18 +272,18 @@ field for this: revision 3 already carries the child `task_id`, while Aether own
 task identity, idempotency, authorization, and parentage semantics.
 
 Each child also carries the strict OSS
-[`agent-harness.subagent.execution` v2 descriptor](docs/subagent-execution-v2.md)
+[`agent-harness.subagent.execution` v1 descriptor](docs/subagent-execution-v1.md)
 in its Aether task payload. The descriptor contains workspace-isolated durable
 input/result/checkpoint references, hashes, policy identity, and claim/recovery
 rules—not prompt text or credentials. The runner persists the referenced child
 input before task admission and resolves that same input for in-process
-execution. Version 2 additionally pins the parent's exact workspace execution
-view and write ceiling. Synchronous and detached children inherit it by default;
+execution. The descriptor pins the parent's exact workspace execution view and
+write ceiling. Synchronous and detached children inherit it by default;
 `permission_mode: read_only` may narrow access, while a different view or a
 write-access expansion requires the host's explicit authorization seam. The
 scope is also stamped on background completion turns so the parent cannot
-silently resume against the worker's default checkout. Already-admitted unbound
-version-1 tasks remain readable during rolling upgrades.
+silently resume against the worker's default checkout. The contract remains
+unreleased, so replaced local shapes are not retained as compatibility formats.
 
 External execution is an explicit two-worker deployment. Both processes must
 use the same MemoryLayer workspace, and named agent definitions must match (the

@@ -62,17 +62,13 @@ func (d remoteToolDelegate) InvokeTool(ctx context.Context, req tools.Request) (
 func (c *Channel) TurnContext(ctx context.Context, addr protocol.MessageAddress) context.Context {
 	c.mu.Lock()
 	binding, ok := c.executionBindings[addr.TaskID]
-	policy, hasPolicy := c.executionPolicies[addr.TaskID]
+	policy := c.executionPolicies[addr.TaskID]
 	access := c.executionAccess[addr.TaskID]
 	c.mu.Unlock()
 	if !ok {
 		return ctx
 	}
 	viewPolicy := policy.executionViewPolicy()
-	if !hasPolicy {
-		viewPolicy.WriteAccess = workspacepkg.ViewWriteAccessReadWrite
-		policy.WriteAccess = workspacepkg.ViewWriteAccessReadWrite
-	}
 	scope, err := workspacepkg.NewExecutionScope(binding, viewPolicy)
 	if err == nil {
 		ctx = workspacepkg.WithExecutionScope(ctx, scope)
@@ -158,16 +154,13 @@ func (c *Channel) invokeClientTool(
 ) (tools.Result, error) {
 	c.mu.Lock()
 	current, bound := c.executionBindings[req.Addr.TaskID]
-	routePolicy, hasPolicy := c.executionPolicies[req.Addr.TaskID]
+	routePolicy := c.executionPolicies[req.Addr.TaskID]
 	access := c.executionAccess[req.Addr.TaskID]
 	c.mu.Unlock()
 	if !bound || current.ToolHostID != binding.ToolHostID || current.ViewID != binding.ViewID {
 		return tools.Result{}, fmt.Errorf("aether: client execution binding is no longer active")
 	}
 	policy := routePolicy.executionViewPolicy()
-	if !hasPolicy {
-		policy.WriteAccess = workspacepkg.ViewWriteAccessReadWrite
-	}
 	return c.invokeClientToolWithAccess(ctx, binding, policy, access, req)
 }
 

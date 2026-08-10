@@ -53,8 +53,11 @@ func TestClientBoundToolExecutesOnExactClientWithoutWorkerFallback(t *testing.T)
 	addr := protocol.MessageAddress{WorkspaceID: "default", ThreadID: "thread-1", TaskID: "task-1"}
 	worker.mu.Lock()
 	worker.executionBindings[addr.TaskID] = binding
+	worker.executionPolicies[addr.TaskID] = ScheduledViewPolicy{WriteAccess: workspacepkg.ViewWriteAccessReadWrite}
 	worker.executionAccess[addr.TaskID] = workspacepkg.ExecutionBindingAuthorizationRequest{
-		Binding: binding, SourceTopic: binding.ToolHostID,
+		Binding: binding, ViewPolicy: workspacepkg.ExecutionViewPolicy{
+			WriteAccess: workspacepkg.ViewWriteAccessReadWrite,
+		}, SourceTopic: binding.ToolHostID,
 	}
 	worker.replyTo[addr.TaskID] = client.ToolHostID()
 	worker.mu.Unlock()
@@ -318,13 +321,18 @@ func TestClientToolHostDefaultPolicyRejectsDifferentAgent(t *testing.T) {
 		t.Fatal(err)
 	}
 	bindingJSON, _ := json.Marshal(binding)
+	policyJSON, _ := workspacepkg.EncodeExecutionViewPolicy(workspacepkg.ExecutionViewPolicy{
+		WriteAccess: workspacepkg.ViewWriteAccessReadWrite,
+	})
 	envelope := spec.ToolInvokeEnvelope{
 		SchemaVersion: spec.ToolsSchemaVersion,
 		CallID:        "call-denied",
 		Name:          "read_file",
 		Args:          map[string]json.RawMessage{"path": json.RawMessage(`"identity.txt"`)},
 		Addr:          spec.MessageAddress{WorkspaceID: "default", TaskID: "task-denied"},
-		Meta:          map[string]json.RawMessage{spec.ExecutionBindingMetaKey: bindingJSON},
+		Meta: map[string]json.RawMessage{
+			spec.ExecutionBindingMetaKey: bindingJSON, workspacepkg.ExecutionViewPolicyMetaKey: policyJSON,
+		},
 	}
 	_, err = host.invoke(context.Background(), ClientToolAccessRequest{AgentTopic: "ag::other"}, envelope)
 	if err == nil || !strings.Contains(err.Error(), "unexpected agent") {
@@ -359,11 +367,16 @@ func TestClientToolHostPolicyReceivesCallerAndOBOSubject(t *testing.T) {
 		t.Fatal(err)
 	}
 	bindingJSON, _ := json.Marshal(binding)
+	policyJSON, _ := workspacepkg.EncodeExecutionViewPolicy(workspacepkg.ExecutionViewPolicy{
+		WriteAccess: workspacepkg.ViewWriteAccessReadWrite,
+	})
 	envelope := spec.ToolInvokeEnvelope{
 		SchemaVersion: spec.ToolsSchemaVersion, CallID: "call-shared", Name: "read_file",
 		Args: map[string]json.RawMessage{"path": json.RawMessage(`"identity.txt"`)},
 		Addr: spec.MessageAddress{WorkspaceID: "shared", TaskID: "task-shared"},
-		Meta: map[string]json.RawMessage{spec.ExecutionBindingMetaKey: bindingJSON},
+		Meta: map[string]json.RawMessage{
+			spec.ExecutionBindingMetaKey: bindingJSON, workspacepkg.ExecutionViewPolicyMetaKey: policyJSON,
+		},
 	}
 	_, err = host.invoke(context.Background(), ClientToolAccessRequest{
 		AgentTopic: "ag::sahara",
@@ -405,6 +418,7 @@ func TestReverseToolCallCarriesProviderAuthorization(t *testing.T) {
 	addr := spec.MessageAddress{WorkspaceID: "shared", ThreadID: "thread-1", TaskID: "task-1"}
 	worker.mu.Lock()
 	worker.executionBindings[addr.TaskID] = binding
+	worker.executionPolicies[addr.TaskID] = ScheduledViewPolicy{WriteAccess: workspacepkg.ViewWriteAccessReadWrite}
 	worker.executionAccess[addr.TaskID] = access
 	worker.mu.Unlock()
 	auth := &pb.AuthorizationContext{
@@ -455,6 +469,7 @@ func TestCrossHostReverseToolCallRejectsMissingOBOGrant(t *testing.T) {
 	addr := spec.MessageAddress{WorkspaceID: "shared", ThreadID: "thread-1", TaskID: "task-1"}
 	worker.mu.Lock()
 	worker.executionBindings[addr.TaskID] = binding
+	worker.executionPolicies[addr.TaskID] = ScheduledViewPolicy{WriteAccess: workspacepkg.ViewWriteAccessReadWrite}
 	worker.executionAccess[addr.TaskID] = access
 	worker.mu.Unlock()
 	worker.SetToolCallAuthorizationProvider(&recordingToolAuthorizationProvider{})
@@ -479,6 +494,7 @@ func TestCrossHostReverseToolCallRejectsMissingAuthorizationProvider(t *testing.
 	addr := spec.MessageAddress{WorkspaceID: "shared", ThreadID: "thread-1", TaskID: "task-1"}
 	worker.mu.Lock()
 	worker.executionBindings[addr.TaskID] = binding
+	worker.executionPolicies[addr.TaskID] = ScheduledViewPolicy{WriteAccess: workspacepkg.ViewWriteAccessReadWrite}
 	worker.executionAccess[addr.TaskID] = access
 	worker.mu.Unlock()
 	worker.sendToolMessage = func(string, []byte) error {

@@ -426,7 +426,11 @@ func (c *Channel) onMessage(ctx context.Context, msg *sdk.Message) error {
 	var access *workspacepkg.ExecutionBindingAuthorizationRequest
 	if binding != nil {
 		request := workspacepkg.ExecutionBindingAuthorizationRequest{
-			Binding: *binding, SourceTopic: msg.SourceTopic, RequestUserID: chatMsg.Addr.UserID,
+			Binding: *binding,
+			ViewPolicy: workspacepkg.ExecutionViewPolicy{
+				WriteAccess: workspacepkg.ViewWriteAccessReadWrite,
+			},
+			SourceTopic: msg.SourceTopic, RequestUserID: chatMsg.Addr.UserID,
 		}
 		if msg.OnBehalfSubject != nil {
 			request.OnBehalfOf = workspacepkg.Principal{
@@ -510,6 +514,11 @@ func (c *Channel) enqueueTurn(ctx context.Context, sourceTopic string, chatMsg p
 	if access != nil {
 		c.mu.Lock()
 		c.executionBindings[chatMsg.Addr.TaskID] = access.Binding
+		c.executionPolicies[chatMsg.Addr.TaskID] = ScheduledViewPolicy{
+			WriteAccess:      access.ViewPolicy.WriteAccess,
+			AllowMutableView: access.ViewPolicy.AllowMutableView,
+			AllowDirtyView:   access.ViewPolicy.AllowDirtyView,
+		}
 		c.executionAccess[chatMsg.Addr.TaskID] = *access
 		c.mu.Unlock()
 	}
