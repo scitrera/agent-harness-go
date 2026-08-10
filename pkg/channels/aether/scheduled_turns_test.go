@@ -3,7 +3,10 @@ package aether
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,6 +15,7 @@ import (
 	spec "github.com/scitrera/ecosystem-messaging-spec/go"
 
 	"github.com/scitrera/agent-harness-go/pkg/channel"
+	"github.com/scitrera/agent-harness-go/pkg/tools"
 	workspacepkg "github.com/scitrera/agent-harness-go/pkg/workspace"
 )
 
@@ -202,6 +206,123 @@ func TestScheduledTurnExecutorEnqueuesPinnedWorkerTurn(t *testing.T) {
 	gotBinding, err := spec.GetExecutionBinding(enqueuer.inbound.Message)
 	if err != nil || gotBinding == nil || !reflect.DeepEqual(*gotBinding, registration.Binding) {
 		t.Fatalf("message binding = %+v err=%v", gotBinding, err)
+	}
+}
+
+func TestScheduledTurnExecutorRecoversQueuedAssignmentAfterDeathBeforeClaim(t *testing.T) {
+	registration := scheduledRegistration()
+	envelope, err := scheduledTurnEnvelopeFor(registration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, _ := json.Marshal(envelope)
+	info := &sdk.TaskInfo{
+		TaskID: "task-before-claim", TaskType: ScheduledTurnTaskType,
+		Status: pb.TaskStatus_TASK_STATUS_QUEUED.String(), Workspace: "routing",
+		AssignedTo: registration.Binding.ToolHostID, Metadata: scheduledTurnMetadata(envelope),
+	}
+
+	// The first process receives and enqueues the assignment, then disappears
+	// before the runtime lifecycle decorator can claim it.
+	firstOps := &fakeTaskOperations{queryResponses: []*sdk.TaskQueryResponse{{Success: true, Task: info}}}
+	firstQueue := &recordingBoundTurnEnqueuer{}
+	first, err := NewScheduledTurnExecutor(
+		firstOps, "routing", registration.Binding.ToolHostID,
+		[]ScheduledTurnRegistration{registration}, firstQueue, nil, time.Second,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := first.HandleAssignment(context.Background(), &sdk.TaskAssignment{
+		TaskID: info.TaskID, TaskType: info.TaskType, AssignedTo: info.AssignedTo,
+		Workspace: info.Workspace, Metadata: info.Metadata, Payload: payload,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if firstQueue.inbound.Addr.TaskID != info.TaskID || firstOps.claimCalls != 0 {
+		t.Fatalf("first delivery=%+v claim_calls=%d", firstQueue.inbound, firstOps.claimCalls)
+	}
+
+	// Aether's assigned state still projects as QUEUED. A fresh worker recovers
+	// the exact digest-bound payload; claim remains the next, fail-closed runtime
+	// boundary rather than an untracked side effect of assignment delivery.
+	restartedOps := &fakeTaskOperations{
+		listResponses:  []*sdk.TaskQueryResponse{{Success: true, Tasks: []*sdk.TaskInfo{info}, TotalCount: 1}},
+		queryResponses: []*sdk.TaskQueryResponse{{Success: true, Task: info}},
+	}
+	restartedQueue := &recordingBoundTurnEnqueuer{}
+	restarted, err := NewScheduledTurnExecutor(
+		restartedOps, "routing", registration.Binding.ToolHostID,
+		[]ScheduledTurnRegistration{registration}, restartedQueue, nil, time.Second,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := restarted.RecoverQueued(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if restartedQueue.inbound.Addr.TaskID != info.TaskID || restartedOps.claimCalls != 0 || len(restartedOps.listCalls) != 1 {
+		t.Fatalf("recovered delivery=%+v ops=%+v", restartedQueue.inbound, restartedOps)
+	}
+}
+
+func TestPrepareTurnRecoveryRestoresExactScheduledWorkerView(t *testing.T) {
+	ctx := context.Background()
+	worker, _ := newTestChannel(t)
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "identity.txt"), []byte("recovered scheduled view"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	host, err := NewWorkerToolHost(ctx, WorkerToolHostConfig{
+		WorkspaceID: "project-a", WorkspaceRoot: root, StateDir: t.TempDir(), ToolHostID: worker.Topic(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker.SetWorkerToolHost(host)
+	binding, err := host.ScheduledExecutionBindingForDirectory(ctx, root, true, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registration := scheduledRegistration()
+	registration.Binding = binding
+	registration.ViewPolicy = ScheduledViewPolicy{WriteAccess: workspacepkg.ViewWriteAccessReadOnly, AllowMutableView: true}
+	executor, err := NewScheduledTurnExecutor(
+		&fakeTaskOperations{}, worker.workspace, worker.Topic(),
+		[]ScheduledTurnRegistration{registration}, &recordingBoundTurnEnqueuer{}, nil, time.Second,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker.scheduledTurns = executor
+	envelope, err := scheduledTurnEnvelopeFor(registration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info := &sdk.TaskInfo{
+		TaskID: "running-schedule", TaskType: ScheduledTurnTaskType,
+		Status: pb.TaskStatus_TASK_STATUS_RUNNING.String(), Workspace: worker.workspace,
+		AssignedTo: worker.Topic(), Metadata: scheduledTurnMetadata(envelope),
+	}
+	cleanup, err := worker.PrepareTurnRecovery(ctx, info)
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := spec.MessageAddress{WorkspaceID: binding.WorkspaceID, ThreadID: registration.ThreadID, TaskID: info.TaskID}
+	turnCtx := worker.TurnContext(ctx, addr)
+	delegate := tools.ToolDelegateFrom(turnCtx)
+	if delegate == nil {
+		t.Fatal("scheduled recovery did not restore the exact-view delegate")
+	}
+	result, err := delegate.InvokeTool(turnCtx, tools.Request{
+		CallID: "read-recovered", Name: "read_file", Arguments: json.RawMessage(`{"path":"identity.txt"}`), Addr: addr,
+	})
+	if err != nil || !strings.Contains(string(result.Payload), "recovered scheduled view") {
+		t.Fatalf("recovered view result=%s err=%v", result.Payload, err)
+	}
+	cleanup()
+	if tools.ToolDelegateFrom(worker.TurnContext(ctx, addr)) != nil {
+		t.Fatal("scheduled recovery cleanup retained the process-local binding")
 	}
 }
 

@@ -695,3 +695,65 @@ func (c *Channel) ReconcileScheduledTurns(ctx context.Context) error {
 	}
 	return executor.RecoverQueued(ctx)
 }
+
+// PrepareTurnRecovery reconstructs process-local exact-view authority for a
+// RUNNING scheduled turn before the durable turn journal resumes it. Aether task
+// state and the current declaration digest are authoritative; no workspace path
+// or policy is recovered from untrusted chat history. Non-scheduled tasks need
+// no process-local binding and return a no-op cleanup.
+func (c *Channel) PrepareTurnRecovery(ctx context.Context, info *sdk.TaskInfo) (func(), error) {
+	cleanup := func() {}
+	if info == nil || info.TaskType != ScheduledTurnTaskType {
+		return cleanup, nil
+	}
+	if info.TaskID == "" || info.AssignedTo != c.Topic() || (info.Workspace != "" && info.Workspace != c.workspace) {
+		return nil, errors.New("aether: scheduled turn recovery task identity mismatch")
+	}
+	c.scheduledTurnsMu.RLock()
+	executor := c.scheduledTurns
+	c.scheduledTurnsMu.RUnlock()
+	if executor == nil {
+		return nil, errors.New("aether: scheduled turns are not enabled for turn recovery")
+	}
+	assignment, err := executor.recoveryAssignment(info)
+	if err != nil {
+		return nil, fmt.Errorf("aether: reconstruct scheduled turn recovery envelope: %w", err)
+	}
+	envelope, err := parseScheduledTurnEnvelope(assignment.Payload)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateScheduledTurnMetadata(info.Metadata, envelope); err != nil {
+		return nil, err
+	}
+	registration, ok := executor.registration(envelope.ScheduleID)
+	if !ok {
+		return nil, errors.New("aether: scheduled turn recovery declaration is unavailable")
+	}
+	if err := registration.ViewPolicy.Validate(); err != nil {
+		return nil, fmt.Errorf("aether: scheduled turn recovery view policy: %w", err)
+	}
+	c.sessionMu.Lock()
+	host := c.workerToolHost
+	c.sessionMu.Unlock()
+	if host == nil || host.local == nil {
+		return nil, errors.New("aether: worker workspace tool host is not configured")
+	}
+	if err := host.validateScheduledBinding(ctx, envelope.Binding, registration.ViewPolicy); err != nil {
+		return nil, fmt.Errorf("aether: scheduled turn recovery view is unavailable: %w", err)
+	}
+	c.mu.Lock()
+	if _, exists := c.executionBindings[info.TaskID]; exists {
+		c.mu.Unlock()
+		return nil, fmt.Errorf("aether: task %q already has an execution binding", info.TaskID)
+	}
+	c.executionBindings[info.TaskID] = envelope.Binding
+	c.executionPolicies[info.TaskID] = registration.ViewPolicy
+	c.mu.Unlock()
+	return func() {
+		c.mu.Lock()
+		delete(c.executionBindings, info.TaskID)
+		delete(c.executionPolicies, info.TaskID)
+		c.mu.Unlock()
+	}, nil
+}

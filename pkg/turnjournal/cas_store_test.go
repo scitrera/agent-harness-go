@@ -119,6 +119,34 @@ func TestCASStore_RevisionConflictAcrossReplicas(t *testing.T) {
 	}
 }
 
+func TestCASStore_PendingFailureRetainsReasonAcrossRestart(t *testing.T) {
+	blobs := newMemoryCASStore()
+	store, _ := NewCASStore(CASStoreConfig{Blobs: blobs})
+	ctx := context.Background()
+	record, err := store.Create(ctx, preparedRecord("project-a", "thread-1", "task-1", "owner"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	record.Phase = PhaseFailing
+	record.FailureReason = "provider failed after claim"
+	if _, err := store.Update(ctx, record, record.Revision); err != nil {
+		t.Fatal(err)
+	}
+	restarted, _ := NewCASStore(CASStoreConfig{Blobs: blobs})
+	active, err := restarted.ListActive(ctx, "owner")
+	if err != nil || len(active) != 1 || active[0].Phase != PhaseFailing || active[0].FailureReason != "provider failed after claim" {
+		t.Fatalf("pending failure = %+v err=%v", active, err)
+	}
+	active[0].Phase = PhaseFailed
+	terminal, err := restarted.Update(ctx, active[0], active[0].Revision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !terminal.Terminal() || terminal.FailureReason != "provider failed after claim" {
+		t.Fatalf("acknowledged failure = %+v", terminal)
+	}
+}
+
 func TestCASStore_IndexFirstMissingRecordIsHarmlessAndLaterCreateSucceeds(t *testing.T) {
 	blobs := newMemoryCASStore()
 	store, _ := NewCASStore(CASStoreConfig{Blobs: blobs})

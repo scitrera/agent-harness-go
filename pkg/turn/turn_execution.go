@@ -13,6 +13,7 @@ import (
 	"github.com/scitrera/agent-harness-go/pkg/harness"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 	"github.com/scitrera/agent-harness-go/pkg/subagent"
+	"github.com/scitrera/agent-harness-go/pkg/tasklifecycle"
 	"github.com/scitrera/agent-harness-go/pkg/tools"
 	"github.com/scitrera/agent-harness-go/pkg/turncancel"
 	"github.com/scitrera/agent-harness-go/pkg/turnjournal"
@@ -174,20 +175,30 @@ func (e *turnExecution) finish(ctx context.Context, runErr error) error {
 	if e == nil || e.record.Terminal() {
 		return nil
 	}
+	managed := tasklifecycle.IsManagedTask(ctx)
 	phase := turnjournal.PhaseCompleted
+	if managed {
+		phase = turnjournal.PhaseCompleting
+	}
 	reason := ""
 	if runErr != nil {
 		phase = turnjournal.PhaseFailed
+		if managed {
+			phase = turnjournal.PhaseFailing
+		}
 		reason = boundedJournalReason(runErr.Error())
 		if errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded) || errors.Is(runErr, turncancel.ErrTurnCancelled) || errors.Is(runErr, subagent.ErrParentCheckpointUncertain) || errors.Is(runErr, ErrRecoveryUnsafe) ||
 			(e.record.Tool != nil && e.record.Tool.Outcome == turnjournal.ToolOutcomeRequested) {
 			phase = turnjournal.PhaseInterrupted
+			if managed && !errors.Is(runErr, turncancel.ErrTurnCancelled) {
+				phase = turnjournal.PhaseInterrupting
+			}
 		}
 	}
 	return e.update(ctx, func(record *turnjournal.Record) {
 		record.Phase = phase
 		record.FailureReason = reason
-		if phase == turnjournal.PhaseInterrupted && record.Tool != nil && record.Tool.Outcome == turnjournal.ToolOutcomeRequested {
+		if (phase == turnjournal.PhaseInterrupted || phase == turnjournal.PhaseInterrupting) && record.Tool != nil && record.Tool.Outcome == turnjournal.ToolOutcomeRequested {
 			record.Tool.Outcome = turnjournal.ToolOutcomeUncertain
 		}
 	})
@@ -199,11 +210,52 @@ func (e *turnExecution) interrupt(ctx context.Context, reason string) error {
 	}
 	return e.update(ctx, func(record *turnjournal.Record) {
 		record.Phase = turnjournal.PhaseInterrupted
+		if tasklifecycle.IsManagedTask(ctx) {
+			record.Phase = turnjournal.PhaseInterrupting
+		}
 		record.FailureReason = boundedJournalReason(reason)
 		if record.Tool != nil && record.Tool.Outcome == turnjournal.ToolOutcomeRequested {
 			record.Tool.Outcome = turnjournal.ToolOutcomeUncertain
 		}
 	})
+}
+
+// AcknowledgeTaskTerminal closes the journal-side outbox record only after the
+// external task lifecycle decorator (or startup reconciler) has confirmed the
+// authoritative task terminal state. It is idempotent for a concurrently
+// acknowledged record and a no-op when this runner did not journal the turn.
+func (r *Runner) AcknowledgeTaskTerminal(ctx context.Context, workspaceID, taskID string) error {
+	if r.turnJournal == nil {
+		return nil
+	}
+	record, err := r.turnJournal.Get(ctx, workspaceID, taskID)
+	if errors.Is(err, turnjournal.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("turn: load execution for terminal acknowledgment: %w", err)
+	}
+	if record.OwnerIdentity != r.turnOwnerIdentity {
+		return fmt.Errorf("%w: execution owner does not match this runner", ErrRecoveryUnsafe)
+	}
+	if record.Terminal() {
+		return nil
+	}
+	phase, ok := record.AcknowledgedPhase()
+	if !ok {
+		return fmt.Errorf("%w: execution phase %q has no pending task terminal intent", ErrRecoveryUnsafe, record.Phase)
+	}
+	record.Phase = phase
+	if _, err := r.turnJournal.Update(ctx, record, record.Revision); err != nil {
+		if errors.Is(err, turnjournal.ErrConflict) {
+			current, getErr := r.turnJournal.Get(ctx, workspaceID, taskID)
+			if getErr == nil && current.Terminal() {
+				return nil
+			}
+		}
+		return fmt.Errorf("turn: acknowledge execution terminal state: %w", err)
+	}
+	return nil
 }
 
 type recoveredTurnContextKey struct{}

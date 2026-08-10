@@ -19,7 +19,7 @@ import (
 
 const (
 	Schema                     = "agent-harness.turn.execution"
-	SchemaRevision             = 1
+	SchemaRevision             = 2
 	maxExternalDescriptorBytes = 256 << 10
 )
 
@@ -33,9 +33,11 @@ var (
 )
 
 // Phase identifies the last durably confirmed boundary in a parent turn. Only
-// WaitingExternalChild and ChildResolved are automatically recoverable in
-// revision 1; other non-terminal phases become interrupted when ownership is
-// lost because their next mutation cannot be proven safe from this record alone.
+// WaitingExternalChild and ChildResolved may resume model/tool execution.
+// Completing/Failing/Interrupting are an outbox boundary: the turn-side outcome
+// is durable, but the authoritative task host has not yet acknowledged the
+// corresponding terminal state. Recovery may finish that idempotent handshake
+// without replaying the model or tools.
 type Phase string
 
 const (
@@ -44,6 +46,9 @@ const (
 	PhaseToolPending          Phase = "tool_pending"
 	PhaseWaitingExternalChild Phase = "waiting_external_child"
 	PhaseChildResolved        Phase = "child_resolved"
+	PhaseCompleting           Phase = "completing"
+	PhaseFailing              Phase = "failing"
+	PhaseInterrupting         Phase = "interrupting"
 	PhaseCompleted            Phase = "completed"
 	PhaseFailed               Phase = "failed"
 	PhaseInterrupted          Phase = "interrupted"
@@ -198,8 +203,15 @@ func validateTerminal(r Record) error {
 		}
 		return nil
 	}
-	if r.CompletedAt != nil || r.FailureReason != "" {
+	if r.CompletedAt != nil {
 		return fmt.Errorf("%w: active phase cannot carry terminal fields", ErrInvalidRecord)
+	}
+	if r.Phase == PhaseFailing || r.Phase == PhaseInterrupting {
+		if strings.TrimSpace(r.FailureReason) == "" {
+			return fmt.Errorf("%w: pending failure/interruption requires a reason", ErrInvalidRecord)
+		}
+	} else if r.FailureReason != "" {
+		return fmt.Errorf("%w: active phase cannot carry a failure reason", ErrInvalidRecord)
 	}
 	return nil
 }
@@ -227,15 +239,15 @@ func validateToolForPhase(r Record) error {
 	}
 	switch t.Outcome {
 	case ToolOutcomeRequested:
-		if t.External != nil || t.Result != nil || (r.Phase != PhaseToolPending && r.Phase != PhaseFailed) {
+		if t.External != nil || t.Result != nil || (r.Phase != PhaseToolPending && r.Phase != PhaseFailed && r.Phase != PhaseFailing) {
 			return fmt.Errorf("%w: requested tool has incompatible phase or result", ErrInvalidRecord)
 		}
 	case ToolOutcomeUncertain:
-		if t.Result != nil || r.Phase != PhaseInterrupted {
+		if t.Result != nil || (r.Phase != PhaseInterrupted && r.Phase != PhaseInterrupting) {
 			return fmt.Errorf("%w: uncertain tool must terminate as interrupted", ErrInvalidRecord)
 		}
 	case ToolOutcomeAdmitted:
-		if t.External == nil || t.Result != nil || (r.Phase != PhaseWaitingExternalChild && r.Phase != PhaseFailed && r.Phase != PhaseInterrupted) {
+		if t.External == nil || t.Result != nil || (r.Phase != PhaseWaitingExternalChild && r.Phase != PhaseFailed && r.Phase != PhaseInterrupted && r.Phase != PhaseFailing && r.Phase != PhaseInterrupting) {
 			return fmt.Errorf("%w: admitted tool must retain one external child in a compatible phase", ErrInvalidRecord)
 		}
 	case ToolOutcomeConfirmed:
@@ -245,7 +257,7 @@ func validateToolForPhase(r Record) error {
 		if err := validateHistoryRef("tool result", *t.Result, r.WorkspaceID, r.SessionID); err != nil {
 			return err
 		}
-		if r.Phase != PhaseChildResolved && !r.Terminal() && r.Phase != PhaseProviderPending {
+		if r.Phase != PhaseChildResolved && !r.Terminal() && !r.PendingTerminal() && r.Phase != PhaseProviderPending {
 			return fmt.Errorf("%w: confirmed tool has incompatible phase %q", ErrInvalidRecord, r.Phase)
 		}
 	default:
@@ -304,9 +316,36 @@ func (r Record) Terminal() bool {
 	}
 }
 
+// PendingTerminal reports whether the local outcome is durable but still
+// awaits acknowledgment from the authoritative task host.
+func (r Record) PendingTerminal() bool {
+	switch r.Phase {
+	case PhaseCompleting, PhaseFailing, PhaseInterrupting:
+		return true
+	default:
+		return false
+	}
+}
+
+// AcknowledgedPhase returns the immutable local terminal phase that follows a
+// successful authoritative task transition.
+func (r Record) AcknowledgedPhase() (Phase, bool) {
+	switch r.Phase {
+	case PhaseCompleting:
+		return PhaseCompleted, true
+	case PhaseFailing:
+		return PhaseFailed, true
+	case PhaseInterrupting:
+		return PhaseInterrupted, true
+	default:
+		return "", false
+	}
+}
+
 func validPhase(phase Phase) bool {
 	switch phase {
-	case PhasePrepared, PhaseProviderPending, PhaseToolPending, PhaseWaitingExternalChild, PhaseChildResolved, PhaseCompleted, PhaseFailed, PhaseInterrupted:
+	case PhasePrepared, PhaseProviderPending, PhaseToolPending, PhaseWaitingExternalChild, PhaseChildResolved,
+		PhaseCompleting, PhaseFailing, PhaseInterrupting, PhaseCompleted, PhaseFailed, PhaseInterrupted:
 		return true
 	default:
 		return false
@@ -386,7 +425,15 @@ func allowedPhaseTransition(from, to Phase) bool {
 	if from == to {
 		return true
 	}
-	if to == PhaseFailed || to == PhaseInterrupted {
+	switch from {
+	case PhaseCompleting:
+		return to == PhaseCompleted || to == PhaseInterrupted
+	case PhaseFailing:
+		return to == PhaseFailed || to == PhaseInterrupted
+	case PhaseInterrupting:
+		return to == PhaseInterrupted
+	}
+	if to == PhaseFailed || to == PhaseInterrupted || to == PhaseCompleting || to == PhaseFailing || to == PhaseInterrupting {
 		return true
 	}
 	switch from {

@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	defaultCASPrefix  = "agent-harness/turn-executions/v1"
+	defaultCASPrefix  = "agent-harness/turn-executions/v2"
 	defaultCASRetries = 32
 	casIndexVersion   = 1
 )
@@ -162,7 +162,9 @@ func (s *CASStore) Update(ctx context.Context, record Record, expectedRevision u
 		next.CompletedAt = &completed
 	} else {
 		next.CompletedAt = nil
-		next.FailureReason = ""
+		if next.Phase != PhaseFailing && next.Phase != PhaseInterrupting {
+			next.FailureReason = ""
+		}
 	}
 	if err := validateTransition(current, next); err != nil {
 		return Record{}, err

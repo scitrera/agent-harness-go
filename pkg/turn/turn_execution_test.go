@@ -12,6 +12,7 @@ import (
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 	"github.com/scitrera/agent-harness-go/pkg/provider"
 	"github.com/scitrera/agent-harness-go/pkg/subagent"
+	"github.com/scitrera/agent-harness-go/pkg/tasklifecycle"
 	"github.com/scitrera/agent-harness-go/pkg/tools"
 	"github.com/scitrera/agent-harness-go/pkg/turncancel"
 	"github.com/scitrera/agent-harness-go/pkg/turnjournal"
@@ -123,6 +124,74 @@ func TestRunnerTurnJournalConfirmsToolAndCompletes(t *testing.T) {
 	}
 	if len(active) != 0 {
 		t.Fatalf("completed turn remained active: %+v", active)
+	}
+}
+
+type terminalFailureTaskOps struct {
+	completeErr error
+	claimed     int
+	completed   int
+}
+
+func (o *terminalFailureTaskOps) ClaimTask(context.Context, string) error {
+	o.claimed++
+	return nil
+}
+
+func (o *terminalFailureTaskOps) CompleteTask(context.Context, string) error {
+	o.completed++
+	return o.completeErr
+}
+
+func (*terminalFailureTaskOps) FailTask(context.Context, string, string) error { return nil }
+
+func TestRunnerManagedTurnRetainsTerminalIntentUntilTaskAcknowledgment(t *testing.T) {
+	journal, err := turnjournal.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	answer, err := protocol.NewTextPart("durable answer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner, err := NewRunner(Config{
+		Store: &fakeStore{}, Loader: fakeLoader{}, Registry: tools.NewRegistry(),
+		Provider: &scriptedProvider{responses: []provider.ChatResponse{{
+			Message: protocol.ChatMessage{ID: "assistant-final", Role: protocol.RoleAssistant, Content: []protocol.ContentPart{answer}},
+		}}},
+		Publisher: &fakePublisher{}, Assembler: contextpack.NewAssembler(contextpack.Config{MaxHistoryMessages: 10}),
+		TurnJournal: journal, TurnOwnerIdentity: "agent-a",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ops := &terminalFailureTaskOps{completeErr: errors.New("completion response lost")}
+	executor := tasklifecycle.Wrap(runner, ops)
+	addr := protocol.MessageAddress{WorkspaceID: "project-a", ThreadID: "thread-a", TaskID: "task-a"}
+	message, runErr := executor.Run(context.Background(), addr, userMessage(t, "run once"))
+	if runErr == nil || textOf(message) != "durable answer" || ops.claimed != 1 || ops.completed != 1 {
+		t.Fatalf("message=%+v err=%v ops=%+v", message, runErr, ops)
+	}
+	pending, err := journal.Get(context.Background(), addr.WorkspaceID, addr.TaskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending.Phase != turnjournal.PhaseCompleting || pending.Terminal() || !pending.PendingTerminal() {
+		t.Fatalf("pending completion = %+v", pending)
+	}
+	active, err := runner.ActiveTurnExecutions(context.Background())
+	if err != nil || len(active) != 1 || active[0].TaskID != addr.TaskID {
+		t.Fatalf("active terminal intent = %+v err=%v", active, err)
+	}
+	if err := runner.AcknowledgeTaskTerminal(context.Background(), addr.WorkspaceID, addr.TaskID); err != nil {
+		t.Fatal(err)
+	}
+	terminal, err := journal.Get(context.Background(), addr.WorkspaceID, addr.TaskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if terminal.Phase != turnjournal.PhaseCompleted || !terminal.Terminal() {
+		t.Fatalf("acknowledged completion = %+v", terminal)
 	}
 }
 

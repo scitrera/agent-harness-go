@@ -206,6 +206,41 @@ func TestFileStore_ListActiveIsOwnerScopedAndDeterministic(t *testing.T) {
 	}
 }
 
+func TestFileStore_PendingTerminalIntentRemainsRecoverableUntilAcknowledged(t *testing.T) {
+	store, _ := newTestStore(t)
+	ctx := context.Background()
+	record, err := store.Create(ctx, preparedRecord("project-a", "thread-1", "task-1", "owner"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	record.Phase = PhaseCompleting
+	record, err = store.Update(ctx, record, record.Revision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.Terminal() || !record.PendingTerminal() || record.CompletedAt != nil {
+		t.Fatalf("pending intent = %+v", record)
+	}
+	active, err := store.ListActive(ctx, "owner")
+	if err != nil || len(active) != 1 || active[0].Phase != PhaseCompleting {
+		t.Fatalf("active intent = %+v err=%v", active, err)
+	}
+	changedIntent := record
+	changedIntent.Phase = PhaseFailing
+	changedIntent.FailureReason = "must not change completion to failure"
+	if _, err := store.Update(ctx, changedIntent, changedIntent.Revision); !errors.Is(err, ErrInvalidTransition) {
+		t.Fatalf("changed terminal intent error = %v", err)
+	}
+	record.Phase = PhaseCompleted
+	record, err = store.Update(ctx, record, record.Revision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !record.Terminal() || record.CompletedAt == nil {
+		t.Fatalf("acknowledged intent = %+v", record)
+	}
+}
+
 func TestFileStore_RejectsUnsafeTransitionAndUncertainMutationCanOnlyInterrupt(t *testing.T) {
 	store, _ := newTestStore(t)
 	ctx := context.Background()

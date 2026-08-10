@@ -127,7 +127,9 @@ func (s *FileStore) Update(ctx context.Context, record Record, expectedRevision 
 		next.CompletedAt = &completed
 	} else {
 		next.CompletedAt = nil
-		next.FailureReason = ""
+		if next.Phase != PhaseFailing && next.Phase != PhaseInterrupting {
+			next.FailureReason = ""
+		}
 	}
 	if err := validateTransition(current, next); err != nil {
 		return Record{}, err
