@@ -21,7 +21,6 @@ import (
 
 const (
 	scheduledTurnConfigVersion = 1
-	workerViewRenewInterval    = 2 * time.Minute
 )
 
 type scheduledTurnConfigFile struct {
@@ -173,12 +172,16 @@ func configureAetherWorkerViews(
 		return nil, fmt.Errorf("worker workspace view: %w", err)
 	}
 	ch.SetWorkerToolHost(host)
-	go renewAetherWorkerViews(ctx, host)
+	go renewAetherWorkspaceViews(ctx, "worker", host)
 	return host, nil
 }
 
-func renewAetherWorkerViews(ctx context.Context, host *aetherchan.WorkerToolHost) {
-	ticker := time.NewTicker(workerViewRenewInterval)
+type workspaceViewRenewer interface {
+	Renew(context.Context) error
+}
+
+func renewAetherWorkspaceViews(ctx context.Context, role string, host workspaceViewRenewer) {
+	ticker := time.NewTicker(workspacepkg.ViewObservationRenewInterval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -186,7 +189,7 @@ func renewAetherWorkerViews(ctx context.Context, host *aetherchan.WorkerToolHost
 			return
 		case <-ticker.C:
 			if err := host.Renew(ctx); err != nil && ctx.Err() == nil {
-				slog.WarnContext(ctx, "worker workspace view renewal failed", slog.Any("err", err))
+				slog.WarnContext(ctx, role+" workspace view renewal failed", slog.Any("err", err))
 			}
 		}
 	}

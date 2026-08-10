@@ -3,6 +3,7 @@ package aether
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -39,6 +40,19 @@ type ClientToolHost struct {
 	local            *boundWorkspaceToolHost
 	agentTopic       string
 	accessAuthorizer ClientToolAccessAuthorizer
+}
+
+type clientToolCallKey struct {
+	sourceTopic string
+	workspaceID string
+	taskID      string
+	callID      string
+}
+
+type activeClientToolCall struct {
+	cancel     context.CancelFunc
+	address    spec.MessageAddress
+	onBehalfOf workspacepkg.Principal
 }
 
 // ClientToolAccessRequest carries both the logical binding and the identities
@@ -97,6 +111,10 @@ func (h *ClientToolHost) ExecutionBindingForDirectory(ctx context.Context, dir s
 func (h *ClientToolHost) ResolveWorkspaceForDirectory(ctx context.Context, dir string) (string, error) {
 	return h.local.views.ResolveWorkspaceForDirectory(ctx, dir)
 }
+
+// Renew republishes every view hosted by this client before its authoritative
+// observation lease expires.
+func (h *ClientToolHost) Renew(ctx context.Context) error { return h.local.Renew(ctx) }
 
 func (h *ClientToolHost) invoke(ctx context.Context, access ClientToolAccessRequest, envelope spec.ToolInvokeEnvelope) (tools.Result, error) {
 	if envelope.SchemaVersion != spec.ToolsSchemaVersion {
@@ -165,7 +183,11 @@ func toolResultBody(envelope spec.ToolInvokeEnvelope, result tools.Result, invok
 		IsError: result.IsError || invokeErr != nil,
 	}
 	if invokeErr != nil {
-		body.Error = &spec.ToolError{Type: "tool_execution_error", Message: invokeErr.Error()}
+		errorType := "tool_execution_error"
+		if errors.Is(invokeErr, context.Canceled) {
+			errorType = "tool_cancelled"
+		}
+		body.Error = &spec.ToolError{Type: errorType, Message: invokeErr.Error()}
 	}
 	if metadata, err := json.Marshal(result.Metadata); err == nil && string(metadata) != "{}" {
 		body.Meta = map[string]json.RawMessage{toolResultMetadataKey: metadata}
@@ -187,36 +209,134 @@ func (c *Client) onToolCallMessage(ctx context.Context, msg *sdk.Message) error 
 	}
 	copyMessage := *msg
 	copyMessage.Payload = append([]byte(nil), msg.Payload...)
-	go c.handleToolCall(context.WithoutCancel(ctx), &copyMessage)
+	c.handleToolCall(context.WithoutCancel(ctx), &copyMessage)
 	return nil
 }
 
 func (c *Client) handleToolCall(ctx context.Context, msg *sdk.Message) {
+	var header struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(msg.Payload, &header); err != nil {
+		return
+	}
+	if header.Type == spec.ToolCancelType {
+		var envelope spec.ToolCancelEnvelope
+		if err := json.Unmarshal(msg.Payload, &envelope); err != nil || envelope.Validate() != nil {
+			return
+		}
+		c.cancelClientToolCall(msg, envelope)
+		return
+	}
+	if header.Type != "" {
+		return
+	}
 	var envelope spec.ToolInvokeEnvelope
 	if err := json.Unmarshal(msg.Payload, &envelope); err != nil || envelope.CallID == "" {
 		return
 	}
+	key := clientToolKey(msg.SourceTopic, envelope.Addr, envelope.CallID)
+	callCtx, cancel := context.WithCancel(ctx)
+	active := &activeClientToolCall{
+		cancel: cancel, address: envelope.Addr, onBehalfOf: toolMessagePrincipal(msg),
+	}
 	c.mu.Lock()
 	host := c.toolHost
+	if _, exists := c.activeToolCalls[key]; exists {
+		c.mu.Unlock()
+		cancel()
+		return
+	}
+	c.activeToolCalls[key] = active
 	c.mu.Unlock()
+	go c.executeClientToolCall(callCtx, msg, envelope, host, key, active)
+}
+
+func (c *Client) executeClientToolCall(
+	ctx context.Context,
+	msg *sdk.Message,
+	envelope spec.ToolInvokeEnvelope,
+	host *ClientToolHost,
+	key clientToolCallKey,
+	active *activeClientToolCall,
+) {
+	defer func() {
+		c.mu.Lock()
+		if c.activeToolCalls[key] == active {
+			delete(c.activeToolCalls, key)
+		}
+		c.mu.Unlock()
+		active.cancel()
+	}()
 	var result tools.Result
 	var invokeErr error
 	if host == nil {
 		invokeErr = fmt.Errorf("client workspace tool host is not configured")
 	} else {
-		access := ClientToolAccessRequest{AgentTopic: msg.SourceTopic}
-		if msg.OnBehalfSubject != nil {
-			access.OnBehalfOf = workspacepkg.Principal{
-				Type: msg.OnBehalfSubject.GetPrincipalType(), ID: msg.OnBehalfSubject.GetPrincipalId(),
-			}
-		}
+		access := ClientToolAccessRequest{AgentTopic: msg.SourceTopic, OnBehalfOf: active.onBehalfOf}
 		result, invokeErr = host.invoke(ctx, access, envelope)
+	}
+	if ctx.Err() != nil {
+		invokeErr = ctx.Err()
 	}
 	payload, err := json.Marshal(toolResultBody(envelope, result, invokeErr))
 	if err != nil {
 		return
 	}
 	_ = c.sendToolMessage(msg.SourceTopic, payload)
+}
+
+func (c *Client) cancelClientToolCall(msg *sdk.Message, envelope spec.ToolCancelEnvelope) {
+	key := clientToolKey(msg.SourceTopic, envelope.Addr, envelope.CallID)
+	onBehalfOf := toolMessagePrincipal(msg)
+	c.mu.Lock()
+	active := c.activeToolCalls[key]
+	if active == nil || !sameToolCallAddress(active.address, envelope.Addr) || active.onBehalfOf != onBehalfOf {
+		c.mu.Unlock()
+		return
+	}
+	c.mu.Unlock()
+	active.cancel()
+}
+
+func (c *Client) cancelAllActiveToolCalls() {
+	c.mu.Lock()
+	cancels := c.activeToolCancelsLocked()
+	c.mu.Unlock()
+	for _, cancel := range cancels {
+		cancel()
+	}
+}
+
+func (c *Client) activeToolCancelsLocked() []context.CancelFunc {
+	cancels := make([]context.CancelFunc, 0, len(c.activeToolCalls))
+	for _, active := range c.activeToolCalls {
+		cancels = append(cancels, active.cancel)
+	}
+	return cancels
+}
+
+func clientToolKey(sourceTopic string, addr spec.MessageAddress, callID string) clientToolCallKey {
+	return clientToolCallKey{
+		sourceTopic: sourceTopic, workspaceID: addr.WorkspaceID, taskID: addr.TaskID, callID: callID,
+	}
+}
+
+func toolMessagePrincipal(msg *sdk.Message) workspacepkg.Principal {
+	if msg == nil || msg.OnBehalfSubject == nil {
+		return workspacepkg.Principal{}
+	}
+	return workspacepkg.Principal{
+		Type: msg.OnBehalfSubject.GetPrincipalType(), ID: msg.OnBehalfSubject.GetPrincipalId(),
+	}
+}
+
+func sameToolCallAddress(left, right spec.MessageAddress) bool {
+	return left.TenantID == right.TenantID && left.WorkspaceID == right.WorkspaceID &&
+		left.UserID == right.UserID && left.ThreadID == right.ThreadID &&
+		left.AppID == right.AppID && left.AgentID == right.AgentID &&
+		left.TaskID == right.TaskID && left.RequestID == right.RequestID &&
+		left.Ownership == right.Ownership
 }
 
 var _ interface {

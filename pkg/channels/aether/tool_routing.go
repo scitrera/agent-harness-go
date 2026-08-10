@@ -232,8 +232,10 @@ func (c *Channel) invokeClientToolWithAccess(
 		return tools.Result{}, fmt.Errorf("aether: authorize cross-host client tool call: an on-behalf-of authorization provider is required")
 	}
 	var sendErr error
+	var authorization *pb.AuthorizationContext
 	if authorizationProvider != nil {
-		authorization, authErr := authorizationProvider.AuthorizationForClientTool(ctx, access, req.Name)
+		var authErr error
+		authorization, authErr = authorizationProvider.AuthorizationForClientTool(ctx, access, req.Name)
 		if authErr != nil {
 			return tools.Result{}, fmt.Errorf("aether: authorize client tool call: %w", authErr)
 		}
@@ -251,6 +253,7 @@ func (c *Channel) invokeClientToolWithAccess(
 	}
 	select {
 	case <-ctx.Done():
+		c.sendClientToolCancellation(topic, authorization, req, ctx.Err())
 		return tools.Result{}, ctx.Err()
 	case received := <-response:
 		if received.source != binding.ToolHostID {
@@ -273,6 +276,30 @@ func (c *Channel) invokeClientToolWithAccess(
 		}
 		return result, nil
 	}
+}
+
+func (c *Channel) sendClientToolCancellation(
+	topic string,
+	authorization *pb.AuthorizationContext,
+	req tools.Request,
+	cause error,
+) {
+	envelope := spec.NewToolCancelEnvelope(req.CallID, req.Addr)
+	switch {
+	case errors.Is(cause, context.DeadlineExceeded):
+		envelope.Reason = "deadline_exceeded"
+	case errors.Is(cause, context.Canceled):
+		envelope.Reason = "caller_cancelled"
+	}
+	payload, err := json.Marshal(envelope)
+	if err != nil {
+		return
+	}
+	if authorization != nil {
+		_ = c.sendAuthorizedToolMessage(topic, payload, authorization)
+		return
+	}
+	_ = c.sendToolMessage(topic, payload)
 }
 
 func validateCrossHostAuthorization(authorization *pb.AuthorizationContext, expected workspacepkg.Principal) error {

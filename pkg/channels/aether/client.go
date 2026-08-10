@@ -78,12 +78,14 @@ type Client struct {
 	// events that carry no address of their own (token deltas, part updates)
 	// can still be attributed to the right thread and turn. Without it the UI
 	// treats every delta as background activity for another thread.
-	mu            sync.Mutex
-	threadTask    map[workspaceThreadKey]string
-	taskAddr      map[string]protocol.MessageAddress
-	pendingAttach map[string]chan sessionAttachResponse
+	mu              sync.Mutex
+	threadTask      map[workspaceThreadKey]string
+	taskAddr        map[string]protocol.MessageAddress
+	pendingAttach   map[string]chan sessionAttachResponse
+	activeToolCalls map[clientToolCallKey]*activeClientToolCall
 
 	closeOnce sync.Once
+	closed    chan struct{}
 
 	// projection, when set, keeps a local copy of the conversation so the UI can
 	// render a thread it did not just watch happen (a restart, a thread switch).
@@ -190,6 +192,8 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		threadTask:       map[workspaceThreadKey]string{},
 		taskAddr:         map[string]protocol.MessageAddress{},
 		pendingAttach:    map[string]chan sessionAttachResponse{},
+		activeToolCalls:  map[clientToolCallKey]*activeClientToolCall{},
+		closed:           make(chan struct{}),
 	}
 	if c.sessionWorkspace == "" {
 		c.sessionWorkspace = c.workspace
@@ -276,13 +280,24 @@ func (c *Client) Start(ctx context.Context) error {
 		return fmt.Errorf("aether: connect: %w", err)
 	}
 	go func() { _ = c.client.Run(ctx) }()
+	go func() {
+		select {
+		case <-ctx.Done():
+			c.cancelAllActiveToolCalls()
+		case <-c.closed:
+		}
+	}()
 	return nil
 }
 
 // Close shuts down the client.
 func (c *Client) Close() error {
 	var err error
-	c.closeOnce.Do(func() { err = c.client.Close() })
+	c.closeOnce.Do(func() {
+		close(c.closed)
+		c.cancelAllActiveToolCalls()
+		err = c.client.Close()
+	})
 	return err
 }
 
@@ -298,8 +313,16 @@ func (c *Client) ToolHostID() string { return sdk.UserTopic(c.userID, c.windowID
 // SetToolHost enables exact-host workspace tool execution on this client.
 func (c *Client) SetToolHost(host *ClientToolHost) {
 	c.mu.Lock()
+	previous := c.toolHost
+	var cancels []context.CancelFunc
+	if previous != nil && previous != host {
+		cancels = c.activeToolCancelsLocked()
+	}
 	c.toolHost = host
 	c.mu.Unlock()
+	for _, cancel := range cancels {
+		cancel()
+	}
 }
 
 // ProxyHTTP routes a request over the frontend's existing Aether connection.

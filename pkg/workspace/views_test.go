@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	spec "github.com/scitrera/ecosystem-messaging-spec/go"
 )
@@ -237,6 +238,19 @@ func TestRenewRegisteredViewsRepublishesLease(t *testing.T) {
 	}
 	if len(publisher.observations) != 2 || publisher.observations[1].Sequence <= publisher.observations[0].Sequence {
 		t.Fatalf("renewed observations = %+v", publisher.observations)
+	}
+	if ViewObservationRenewInterval >= ViewObservationLeaseDuration {
+		t.Fatalf("renew interval %s must be shorter than lease %s", ViewObservationRenewInterval, ViewObservationLeaseDuration)
+	}
+	if remaining := time.Until(publisher.observations[1].ExpiresAt); remaining < ViewObservationLeaseDuration-time.Second {
+		t.Fatalf("renewed lease remaining = %s", remaining)
+	}
+	foundCancellation := false
+	for _, capability := range publisher.observations[1].Capabilities {
+		foundCancellation = foundCancellation || capability == spec.ToolCancelCapability
+	}
+	if !foundCancellation {
+		t.Fatalf("renewed capabilities = %v", publisher.observations[1].Capabilities)
 	}
 }
 

@@ -3,6 +3,7 @@ package aether_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -151,6 +152,59 @@ func TestLiveAetherClientWorkspaceToolRouting(t *testing.T) {
 	}
 	if output.Text != "client checkout" {
 		t.Fatalf("live routed read = %q, want client checkout", output.Text)
+	}
+
+	// Start a real client-hosted process, wait until it records its PID, then
+	// cancel from the worker side. A fast worker return alone would not prove
+	// the reverse cancellation crossed Aether; the client process must exit too.
+	cancelCtx, cancelTool := context.WithCancel(turnCtx)
+	cancelDone := make(chan error, 1)
+	pidFile := filepath.Join(clientRoot, "cancel.pid")
+	go func() {
+		_, invokeErr := registry.Invoke(cancelCtx, tools.Request{
+			CallID: "call-live-cancel", Name: "shell",
+			Arguments: json.RawMessage(`{"command":"/bin/sh","args":["-c","echo $$ > cancel.pid; exec sleep 20"]}`),
+			Addr:      inbound.Addr,
+		})
+		cancelDone <- invokeErr
+	}()
+	var pid int
+	for deadline := time.Now().Add(3 * time.Second); time.Now().Before(deadline); {
+		contents, readErr := os.ReadFile(pidFile)
+		if readErr == nil {
+			pid, err = strconv.Atoi(strings.TrimSpace(string(contents)))
+			if err != nil {
+				t.Fatalf("parse client tool pid: %v", err)
+			}
+			break
+		}
+		if !os.IsNotExist(readErr) {
+			t.Fatal(readErr)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if pid == 0 {
+		t.Fatal("live client tool did not start")
+	}
+	cancelTool()
+	select {
+	case invokeErr := <-cancelDone:
+		if !errors.Is(invokeErr, context.Canceled) {
+			t.Fatalf("live cancelled tool error = %v", invokeErr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("live worker tool call did not return after cancellation")
+	}
+	processPath := filepath.Join("/proc", strconv.Itoa(pid))
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); {
+		if _, statErr := os.Stat(processPath); os.IsNotExist(statErr) {
+			pid = 0
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if pid != 0 {
+		t.Fatalf("client-hosted process %d survived reverse cancellation", pid)
 	}
 
 	client.SetToolHost(nil)

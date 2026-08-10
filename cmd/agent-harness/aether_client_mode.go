@@ -94,6 +94,7 @@ func runTUIClient(cfg appConfig) error {
 		return fmt.Errorf("client workspace tool host: %w", err)
 	}
 	client.SetToolHost(toolHost)
+	go renewAetherWorkspaceViews(ctx, "client", toolHost)
 
 	modeStateDir := workspaceStateDir(cfg)
 

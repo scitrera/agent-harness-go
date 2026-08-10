@@ -116,6 +116,11 @@ that exact client window, not in the worker container. When MemoryLayer is
 available it stores the durable view plus the client's current Git observation
 and authorizes dynamically discovered project workspaces. Without MemoryLayer,
 the configured default and `--visible-workspaces` policy remains authoritative.
+Client and worker tool hosts refresh those observations every two minutes before
+their five-minute leases expire. Cancelling an in-flight turn also sends the
+spec-defined `tool_cancel` envelope to the exact client host; cross-host calls
+reuse the same narrow Aether OBO authorization, and the client matches source,
+address, call ID, and OBO subject before stopping local execution.
 The ordinary in-process TUI/CLI/web/ACP modes do not require either service.
 The filesystem reference store provides the same workspace-isolated TUI thread
 discovery when MemoryLayer is absent. In project mode, an in-process TUI grants

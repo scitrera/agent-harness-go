@@ -15,6 +15,15 @@ import (
 	spec "github.com/scitrera/ecosystem-messaging-spec/go"
 )
 
+const (
+	// ViewObservationLeaseDuration is the validity window published by a live
+	// tool host. It is intentionally longer than the shared renewal cadence.
+	ViewObservationLeaseDuration = 5 * time.Minute
+	// ViewObservationRenewInterval is shared by client and worker hosts so both
+	// remain discoverable without transport-specific magic numbers.
+	ViewObservationRenewInterval = 2 * time.Minute
+)
+
 // WorkspaceToolCapabilities is the deterministic capability set advertised by
 // a Sahara client that hosts the built-in workspace tools.
 var WorkspaceToolCapabilities = []string{
@@ -24,6 +33,7 @@ var WorkspaceToolCapabilities = []string{
 	"file.read",
 	"file.write",
 	"python.run",
+	spec.ToolCancelCapability,
 }
 
 // VCSObservation is the portable Git state published for a local view. IDs are
@@ -302,7 +312,7 @@ func (r *ViewRegistry) refreshObservation(ctx context.Context, view View) (View,
 			RootRef:       view.RootRef,
 			Capabilities:  append([]string(nil), WorkspaceToolCapabilities...),
 			VCS:           view.VCS,
-			ExpiresAt:     time.Now().Add(5 * time.Minute),
+			ExpiresAt:     time.Now().Add(ViewObservationLeaseDuration),
 		}
 		if err := r.publisher.PublishWorkspaceView(ctx, view, observation); err != nil {
 			return View{}, fmt.Errorf("refresh workspace view observation: %w", err)
@@ -427,7 +437,7 @@ func (r *ViewRegistry) register(ctx context.Context, dir string) (View, error) {
 			RootRef:       view.RootRef,
 			Capabilities:  append([]string(nil), WorkspaceToolCapabilities...),
 			VCS:           vcs,
-			ExpiresAt:     time.Now().Add(5 * time.Minute),
+			ExpiresAt:     time.Now().Add(ViewObservationLeaseDuration),
 		}
 		if err := r.publisher.PublishWorkspaceView(ctx, view, observation); err != nil {
 			return View{}, fmt.Errorf("publish workspace view: %w", err)

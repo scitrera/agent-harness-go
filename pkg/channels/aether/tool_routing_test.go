@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -123,6 +124,179 @@ func TestClientBoundToolExecutesOnExactClientWithoutWorkerFallback(t *testing.T)
 	})
 	if err == nil {
 		t.Fatal("missing client host silently fell back to the worker")
+	}
+}
+
+func TestReverseToolCancellationStopsExactClientExecution(t *testing.T) {
+	root := t.TempDir()
+	client, _ := newTestClient(t)
+	host, err := NewClientToolHost(context.Background(), ClientToolHostConfig{
+		WorkspaceID: "shared", WorkspaceRoot: root, StateDir: t.TempDir(),
+		ToolHostID: client.ToolHostID(), AgentTopic: client.AgentTopic(), Timeout: time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.SetToolHost(host)
+	binding, err := host.ExecutionBindingForDirectory(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	worker, _ := newTestChannel(t)
+	addr := protocol.MessageAddress{
+		WorkspaceID: "shared", UserID: "requester", ThreadID: "thread-1", TaskID: "task-cancel", RequestID: "window-2",
+	}
+	access := workspacepkg.ExecutionBindingAuthorizationRequest{
+		Binding: binding, SourceTopic: "us::requester::window-2",
+		OnBehalfOf: workspacepkg.Principal{Type: "user", ID: "requester"},
+	}
+	worker.mu.Lock()
+	worker.executionBindings[addr.TaskID] = binding
+	worker.executionPolicies[addr.TaskID] = ScheduledViewPolicy{WriteAccess: workspacepkg.ViewWriteAccessReadWrite}
+	worker.executionAccess[addr.TaskID] = access
+	worker.mu.Unlock()
+	authorization := &pb.AuthorizationContext{
+		AuthorityMode: "on_behalf_of",
+		Subject:       &pb.PrincipalRef{PrincipalType: "user", PrincipalId: "requester"},
+		GrantId:       "grant-cancel",
+	}
+	worker.SetToolCallAuthorizationProvider(&recordingToolAuthorizationProvider{auth: authorization})
+
+	invocationRegistered := make(chan struct{}, 1)
+	cancellationSent := make(chan spec.ToolCancelEnvelope, 1)
+	worker.sendToolMessage = func(string, []byte) error {
+		return errors.New("cross-host tool traffic bypassed its OBO authorization")
+	}
+	worker.sendAuthorizedToolMessage = func(topic string, payload []byte, got *pb.AuthorizationContext) error {
+		if topic != client.ToolHostID() || got != authorization {
+			return fmt.Errorf("authorized tool send topic=%q auth=%p", topic, got)
+		}
+		var header struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal(payload, &header); err != nil {
+			return err
+		}
+		message := &sdk.Message{
+			SourceTopic: worker.Topic(), Payload: payload, OnBehalfSubject: authorization.Subject,
+		}
+		client.handleToolCall(context.Background(), message)
+		if header.Type == spec.ToolCancelType {
+			var envelope spec.ToolCancelEnvelope
+			if err := json.Unmarshal(payload, &envelope); err != nil {
+				return err
+			}
+			cancellationSent <- envelope
+		} else {
+			invocationRegistered <- struct{}{}
+		}
+		return nil
+	}
+	terminalResult := make(chan spec.ToolResultPartBody, 1)
+	client.sendToolMessage = func(topic string, payload []byte) error {
+		if topic != worker.Topic() {
+			return fmt.Errorf("tool result target = %q", topic)
+		}
+		var body spec.ToolResultPartBody
+		if err := json.Unmarshal(payload, &body); err != nil {
+			return err
+		}
+		terminalResult <- body
+		return worker.onToolCallMessage(context.Background(), &sdk.Message{
+			SourceTopic: client.ToolHostID(), Payload: payload,
+		})
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, invokeErr := worker.invokeClientTool(ctx, binding, tools.Request{
+			CallID: "call-cancel", Name: "shell",
+			Arguments: json.RawMessage(`{"command":"sleep","args":["30"]}`), Addr: addr,
+		})
+		done <- invokeErr
+	}()
+	select {
+	case <-invocationRegistered:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for client invocation registration")
+	}
+	cancel()
+	select {
+	case invokeErr := <-done:
+		if !errors.Is(invokeErr, context.Canceled) {
+			t.Fatalf("cancelled invocation error = %v", invokeErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("worker invocation did not return after cancellation")
+	}
+	select {
+	case envelope := <-cancellationSent:
+		if err := envelope.Validate(); err != nil {
+			t.Fatal(err)
+		}
+		if envelope.Addr.TaskID != addr.TaskID || envelope.Reason != "caller_cancelled" {
+			t.Fatalf("tool cancellation = %+v", envelope)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("worker did not send tool cancellation")
+	}
+	select {
+	case body := <-terminalResult:
+		if body.Error == nil || body.Error.Type != "tool_cancelled" || !body.IsError {
+			t.Fatalf("cancelled tool result = %+v", body)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("client did not emit a terminal cancelled result")
+	}
+}
+
+func TestClientToolCancellationRequiresExactSourceAddressAndOBOSubject(t *testing.T) {
+	client, _ := newTestClient(t)
+	addr := spec.MessageAddress{
+		TenantID: "tenant", WorkspaceID: "workspace", UserID: "user", ThreadID: "thread",
+		AgentID: "agent", TaskID: "task", RequestID: "window",
+	}
+	principal := workspacepkg.Principal{Type: "user", ID: "user"}
+	callCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	key := clientToolKey("ag::workspace::sahara::worker", addr, "call")
+	client.mu.Lock()
+	client.activeToolCalls[key] = &activeClientToolCall{cancel: cancel, address: addr, onBehalfOf: principal}
+	client.mu.Unlock()
+	defer func() {
+		client.mu.Lock()
+		delete(client.activeToolCalls, key)
+		client.mu.Unlock()
+	}()
+
+	send := func(source string, subject *pb.PrincipalRef, envelope spec.ToolCancelEnvelope) {
+		payload, err := json.Marshal(envelope)
+		if err != nil {
+			t.Fatal(err)
+		}
+		client.handleToolCall(context.Background(), &sdk.Message{
+			SourceTopic: source, Payload: payload, OnBehalfSubject: subject,
+		})
+	}
+	subject := &pb.PrincipalRef{PrincipalType: principal.Type, PrincipalId: principal.ID}
+	envelope := spec.NewToolCancelEnvelope("call", addr)
+	send("ag::workspace::sahara::other", subject, envelope)
+	altered := envelope
+	altered.Addr.ThreadID = "other-thread"
+	send(key.sourceTopic, subject, altered)
+	send(key.sourceTopic, &pb.PrincipalRef{PrincipalType: "user", PrincipalId: "other"}, envelope)
+	select {
+	case <-callCtx.Done():
+		t.Fatal("mismatched cancellation stopped the exact client call")
+	default:
+	}
+	send(key.sourceTopic, subject, envelope)
+	select {
+	case <-callCtx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("exact cancellation did not stop the client call")
 	}
 }
 
