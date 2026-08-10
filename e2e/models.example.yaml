@@ -1,0 +1,31 @@
+# Copy to workspace/config/models.yaml, then replace every placeholder model ID.
+# Model names are sent to the selected upstream verbatim.
+default: replace-with-fast-text-model-id
+
+models:
+  # All entries without `provider` use SAHARA_LLM_BASE_URL/API_KEY/FORMAT from
+  # .env. This is the simplest way to compare several models on one endpoint.
+  - name: replace-with-fast-text-model-id
+    tier: fast
+    capabilities: {tools: true, vision: false}
+
+  - name: replace-with-strong-text-model-id
+    tier: strong
+    capabilities: {tools: true, vision: false}
+
+  - name: replace-with-vision-model-id
+    tier: vision
+    capabilities: {tools: true, vision: true}
+
+# Optional multi-provider shape. Uncomment providers and set `provider` on each
+# model when the models do not share the fallback endpoint. Keep credentials in
+# e2e/.env; api_key_env names an environment variable inside the agent container.
+# providers:
+#   - name: openai
+#     base_url: https://api.openai.com/v1
+#     api_key_env: OPENAI_API_KEY
+#     format: openai
+#   - name: openrouter
+#     base_url: https://openrouter.ai/api/v1
+#     api_key_env: OPENROUTER_API_KEY
+#     format: openai

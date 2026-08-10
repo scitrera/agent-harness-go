@@ -10,7 +10,10 @@
 # Layout assumed (override with the env vars below):
 #
 #   <root>/scitrera-app-monorepo2/agent-harness/oss   <- this repo
-#   <root>/scitrera-aether3-go/oss-repo               <- AETHER_REPO
+#   <root>/scitrera-app-monorepo2/scitrera-ecosystem-messaging-spec
+#                                                    <- ECOSYSTEM_SPEC_REPO
+#   <root>/scitrera-app-monorepo2/backend/scitrera-aether3-go/oss-repo
+#                                                    <- AETHER_REPO
 #   <root>/scitrera-memorylayer-ai-cc/oss             <- MEMORYLAYER_REPO
 #
 # Usage:
@@ -22,8 +25,10 @@ set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 oss_repo="$(cd "$here/.." && pwd)"
+monorepo_root="$(cd "$oss_repo/../.." && pwd)"
 
-AETHER_REPO="${AETHER_REPO:-$HOME/scitrera-aether3-go/oss-repo}"
+ECOSYSTEM_SPEC_REPO="${ECOSYSTEM_SPEC_REPO:-$monorepo_root/scitrera-ecosystem-messaging-spec}"
+AETHER_REPO="${AETHER_REPO:-$monorepo_root/backend/scitrera-aether3-go/oss-repo}"
 MEMORYLAYER_REPO="${MEMORYLAYER_REPO:-$HOME/scitrera-memorylayer-ai-cc/oss}"
 
 want_embed=0
@@ -62,8 +67,17 @@ if build memorylayer yes; then
 fi
 
 if build agent yes; then
+  [[ -d "$ECOSYSTEM_SPEC_REPO/go" ]] || fail_missing "the ecosystem messaging spec repo" "$ECOSYSTEM_SPEC_REPO" ECOSYSTEM_SPEC_REPO
+  [[ -d "$AETHER_REPO/sdk/go" ]] || fail_missing "the aether repo" "$AETHER_REPO" AETHER_REPO
+  [[ -d "$MEMORYLAYER_REPO/memorylayer-sdk-go" ]] || fail_missing "the memorylayer oss repo" "$MEMORYLAYER_REPO" MEMORYLAYER_REPO
   echo "==> agent-harness"
-  docker build -t agent-harness:local "$oss_repo"
+  docker build \
+    --build-context ecosystem_spec="$ECOSYSTEM_SPEC_REPO" \
+    --build-context aether_oss="$AETHER_REPO" \
+    --build-context memorylayer_sdk="$MEMORYLAYER_REPO/memorylayer-sdk-go" \
+    -f "$here/Dockerfile.agent-local" \
+    -t agent-harness:local \
+    "$oss_repo"
 fi
 
 if build embed "$([[ $want_embed == 1 || "$only" == embed ]] && echo yes || echo no)"; then

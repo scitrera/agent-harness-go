@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/scitrera/agent-harness-go/pkg/ids"
+	modelpkg "github.com/scitrera/agent-harness-go/pkg/model"
 )
 
 const shutdownTimeout = 5 * time.Second
@@ -45,6 +46,8 @@ type appConfig struct {
 	thread            string
 	baseURL           string
 	model             string
+	modelRegistry     *modelpkg.Registry
+	llmFormat         string
 	seed              bool
 	record            string // --record path: opt-in per-LLM-call JSONL trace log ("" = off)
 

@@ -44,6 +44,10 @@ workspace files (SOUL/AGENTS/…) on first run, persists history under
 `<workspace>/.agent-harness`, and streams replies to the active channel (SSE to
 the browser, the terminal UI, or stdout in `--cli` mode).
 
+For the full OSS local stack—AetherLite transport, MemoryLayer persistence, a
+containerized agent worker, a host TUI, and a capability-aware multi-model
+`config/models.yaml`—follow the [OSS E2E getting-started guide](e2e/README.md).
+
 ### Interfaces
 
 | Flag | Env | Default | Notes |

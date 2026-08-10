@@ -1,0 +1,43 @@
+# syntax=docker/dockerfile:1
+#
+# Local-replacement build for the OSS E2E stack. The release Dockerfile expects
+# published module versions; this one supplies the sibling source trees at the
+# absolute paths targeted by the development-time replace directives in go.mod.
+
+ARG GO_IMAGE=golang:1.25
+
+FROM --platform=$BUILDPLATFORM ${GO_IMAGE} AS builder
+
+ARG TARGETOS=linux
+ARG TARGETARCH
+
+WORKDIR /src
+
+COPY --from=ecosystem_spec . /scitrera-ecosystem-messaging-spec
+COPY --from=aether_oss . /scitrera-aether3-go/oss-repo
+COPY --from=memorylayer_sdk . /scitrera-memorylayer-ai-cc/oss/memorylayer-sdk-go
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build -ldflags="-s -w" -o /out/agent-harness ./cmd/agent-harness
+
+FROM alpine:3.23.4
+
+RUN apk add --no-cache ca-certificates tzdata python3 && \
+    addgroup -g 1000 harness && \
+    adduser -D -u 1000 -G harness harness && \
+    mkdir -p /workspace && chown harness:harness /workspace
+
+COPY --from=builder /out/agent-harness /usr/local/bin/agent-harness
+
+USER harness
+WORKDIR /workspace
+
+EXPOSE 8787
+
+ENTRYPOINT ["agent-harness"]
+CMD ["--serve"]

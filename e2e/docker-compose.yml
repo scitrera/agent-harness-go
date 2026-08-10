@@ -122,6 +122,11 @@ services:
       SAHARA_LLM_BASE_URL: ${SAHARA_LLM_BASE_URL:?set SAHARA_LLM_BASE_URL in .env}
       SAHARA_LLM_API_KEY: ${SAHARA_LLM_API_KEY:-}
       SAHARA_LLM_MODEL: ${SAHARA_LLM_MODEL:-gpt-4o-mini}
+      SAHARA_LLM_FORMAT: ${SAHARA_LLM_FORMAT:-openai}
+      # Optional named-provider credentials for config/models.yaml. Keep secrets
+      # in .env and refer to them with api_key_env; never put keys in the YAML.
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
     # So SAHARA_LLM_BASE_URL can name a model server running on the host (the
     # common case for a local llama.cpp/Ollama/vLLM). Linux has no built-in
     # host.docker.internal; host-gateway supplies it.

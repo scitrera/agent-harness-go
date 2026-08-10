@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	modelpkg "github.com/scitrera/agent-harness-go/pkg/model"
 	"github.com/scitrera/agent-harness-go/pkg/telemetry/otlpexport"
 	"github.com/scitrera/agent-harness-go/pkg/version"
 )
@@ -23,6 +24,7 @@ func main() {
 	thread := flag.String("thread", "cli", "chat thread id (CLI/TUI mode)")
 	baseURL := flag.String("base-url", os.Getenv("SAHARA_LLM_BASE_URL"), "OpenAI-compatible base URL")
 	model := flag.String("model", env("SAHARA_LLM_MODEL", "gpt-4o-mini"), "model id")
+	llmFormat := flag.String("llm-format", env("SAHARA_LLM_FORMAT", "openai"), "provider request format: openai or native")
 	seed := flag.Bool("seed", true, "seed default workspace files when missing")
 	cliMode := flag.Bool("cli", false, "run the stdin REPL")
 	tuiMode := flag.Bool("tui", false, "run the terminal UI (default)")
@@ -133,6 +135,14 @@ func main() {
 		fmt.Fprintln(os.Stderr, "error: set --base-url or SAHARA_LLM_BASE_URL (an OpenAI-compatible endpoint)")
 		os.Exit(2)
 	}
+	var modelRegistry *modelpkg.Registry
+	if selectedMode.runsTurnsLocally(*aetherAddr) {
+		modelRegistry, err = loadAppModelRegistry(*workspace)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "error: load model registry:", err)
+			os.Exit(2)
+		}
+	}
 	if err := setupAppLogging(*workspace, selectedMode == appModeTUI); err != nil {
 		fmt.Fprintln(os.Stderr, "error: setup logging:", err)
 		os.Exit(1)
@@ -152,7 +162,9 @@ func main() {
 		stateDir:          stateDir,
 		thread:            *thread,
 		baseURL:           *baseURL,
-		model:             *model,
+		model:             resolveAppModel(*model, modelRegistry),
+		modelRegistry:     modelRegistry,
+		llmFormat:         *llmFormat,
 		seed:              *seed,
 		record:            *record,
 

@@ -15,6 +15,7 @@ import (
 	"github.com/scitrera/agent-harness-go/pkg/contextpack"
 	"github.com/scitrera/agent-harness-go/pkg/goal"
 	"github.com/scitrera/agent-harness-go/pkg/localtools"
+	modelpkg "github.com/scitrera/agent-harness-go/pkg/model"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 	"github.com/scitrera/agent-harness-go/pkg/provider"
 	"github.com/scitrera/agent-harness-go/pkg/refinement"
@@ -110,7 +111,11 @@ func buildRunner(cfg appConfig, st stores, pub channel.Publisher, approvals appr
 	// StreamUsage: the oss CLI talks to a standard OpenAI-compatible endpoint that
 	// sends a terminal `[DONE]`/usage chunk, so request streamed token usage for
 	// trace/export. (Distributions behind a proxy that omits `[DONE]` leave it off.)
-	prov, err := provider.NewOpenAICompatClient(provider.OpenAICompatConfig{BaseURL: cfg.baseURL, AuthHeader: auth, Format: provider.FormatOpenAI, StreamUsage: true})
+	wireFormat := provider.FormatOpenAI
+	if cfg.llmFormat == "native" {
+		wireFormat = provider.FormatNative
+	}
+	prov, err := provider.NewOpenAICompatClient(provider.OpenAICompatConfig{BaseURL: cfg.baseURL, AuthHeader: auth, Format: wireFormat, StreamUsage: true})
 	if err != nil {
 		return nil, nil, fmt.Errorf("provider: %w", err)
 	}
@@ -176,7 +181,17 @@ func buildRunner(cfg appConfig, st stores, pub channel.Publisher, approvals appr
 			Model:              cfg.model,
 			Now:                time.Now,
 		}),
-		Model:              cfg.model,
+		Model:         cfg.model,
+		ModelRegistry: cfg.modelRegistry,
+		ProviderResolver: turn.NewProviderResolver(
+			cfg.modelRegistry,
+			modelpkg.ProviderConfig{
+				BaseURL: cfg.baseURL,
+				APIKey:  os.Getenv("SAHARA_LLM_API_KEY"),
+				Format:  cfg.llmFormat,
+			},
+			nil,
+		),
 		DefaultWorkspaceID: cfg.workspaceID,
 		Streaming:          true,
 		// Semantic recall from MemoryLayer, when configured. Auto-commit stays
