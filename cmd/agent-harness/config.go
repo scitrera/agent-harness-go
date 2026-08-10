@@ -118,7 +118,8 @@ type appConfig struct {
 	goalMaxContinuations uint32
 	// scheduleConfig declares Aether WorkflowEngine schedules whose task payload
 	// is pinned to a MemoryLayer-authoritative worker view.
-	scheduleConfig string
+	scheduleConfig         string
+	scheduleReloadInterval time.Duration
 
 	// streamFlush is the token-delta coalescing interval handed to the turn
 	// runner; 0 streams every delta.

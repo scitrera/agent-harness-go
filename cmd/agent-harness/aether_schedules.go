@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -38,6 +41,7 @@ type scheduledTurnDeclaration struct {
 	RelativeDirectory string                `yaml:"relative_directory"`
 	AllowMutableView  bool                  `yaml:"allow_mutable_view"`
 	AllowDirtyView    bool                  `yaml:"allow_dirty_view"`
+	OfflinePolicy     string                `yaml:"offline_policy"`
 }
 
 type scheduledTurnSchedule struct {
@@ -46,32 +50,29 @@ type scheduledTurnSchedule struct {
 	MissPolicy string `yaml:"miss_policy"`
 }
 
-func loadScheduledTurnDeclarations(path string) ([]scheduledTurnDeclaration, error) {
-	file, err := os.Open(path)
+func loadScheduledTurnDeclarations(path string) ([]scheduledTurnDeclaration, [sha256.Size]byte, error) {
+	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("open scheduled turn config: %w", err)
+		return nil, [sha256.Size]byte{}, fmt.Errorf("read scheduled turn config: %w", err)
 	}
-	defer func() { _ = file.Close() }()
-	decoder := yaml.NewDecoder(file)
+	digest := sha256.Sum256(data)
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
 	decoder.KnownFields(true)
 	var config scheduledTurnConfigFile
 	if err := decoder.Decode(&config); err != nil {
-		return nil, fmt.Errorf("decode scheduled turn config: %w", err)
+		return nil, digest, fmt.Errorf("decode scheduled turn config: %w", err)
 	}
 	var trailing any
 	if err := decoder.Decode(&trailing); err != io.EOF {
 		if err == nil {
-			return nil, errors.New("scheduled turn config must contain one YAML document")
+			return nil, digest, errors.New("scheduled turn config must contain one YAML document")
 		}
-		return nil, fmt.Errorf("decode scheduled turn config trailer: %w", err)
+		return nil, digest, fmt.Errorf("decode scheduled turn config trailer: %w", err)
 	}
 	if config.Version != scheduledTurnConfigVersion {
-		return nil, fmt.Errorf("scheduled turn config version %d is unsupported (want %d)", config.Version, scheduledTurnConfigVersion)
+		return nil, digest, fmt.Errorf("scheduled turn config version %d is unsupported (want %d)", config.Version, scheduledTurnConfigVersion)
 	}
-	if len(config.Schedules) == 0 {
-		return nil, errors.New("scheduled turn config has no schedules")
-	}
-	return config.Schedules, nil
+	return config.Schedules, digest, nil
 }
 
 func prepareScheduledTurnRegistrations(
@@ -80,10 +81,30 @@ func prepareScheduledTurnRegistrations(
 	workspaceRoot string,
 	host *aetherchan.WorkerToolHost,
 ) ([]aetherchan.ScheduledTurnRegistration, error) {
-	declarations, err := loadScheduledTurnDeclarations(path)
+	registrations, _, err := prepareScheduledTurnRegistrationsSnapshot(ctx, path, workspaceRoot, host)
+	return registrations, err
+}
+
+func prepareScheduledTurnRegistrationsSnapshot(
+	ctx context.Context,
+	path string,
+	workspaceRoot string,
+	host *aetherchan.WorkerToolHost,
+) ([]aetherchan.ScheduledTurnRegistration, [sha256.Size]byte, error) {
+	declarations, digest, err := loadScheduledTurnDeclarations(path)
 	if err != nil {
-		return nil, err
+		return nil, digest, err
 	}
+	registrations, err := prepareScheduledTurnDeclarations(ctx, declarations, workspaceRoot, host)
+	return registrations, digest, err
+}
+
+func prepareScheduledTurnDeclarations(
+	ctx context.Context,
+	declarations []scheduledTurnDeclaration,
+	workspaceRoot string,
+	host *aetherchan.WorkerToolHost,
+) ([]aetherchan.ScheduledTurnRegistration, error) {
 	seen := map[string]struct{}{}
 	registrations := make([]aetherchan.ScheduledTurnRegistration, 0, len(declarations))
 	for _, declaration := range declarations {
@@ -131,6 +152,10 @@ func prepareScheduledTurnRegistrations(
 		if missPolicy == "" {
 			missPolicy = "fire_once"
 		}
+		offlinePolicy := strings.ToLower(strings.TrimSpace(declaration.OfflinePolicy))
+		if offlinePolicy == "" {
+			offlinePolicy = "queue"
+		}
 		writeAccess := workspacepkg.ViewWriteAccessReadOnly
 		if declaration.AllowDirtyView {
 			writeAccess = workspacepkg.ViewWriteAccessReadWrite
@@ -140,7 +165,8 @@ func prepareScheduledTurnRegistrations(
 			ScheduleType:       strings.ToLower(strings.TrimSpace(declaration.Schedule.Type)),
 			ScheduleExpression: strings.TrimSpace(declaration.Schedule.Expression),
 			MissPolicy:         missPolicy, ThreadID: threadID,
-			Prompt: strings.TrimSpace(declaration.Prompt), Binding: binding,
+			TargetOfflinePolicy: offlinePolicy,
+			Prompt:              strings.TrimSpace(declaration.Prompt), Binding: binding,
 			ViewPolicy: aetherchan.ScheduledViewPolicy{
 				WriteAccess:      writeAccess,
 				AllowMutableView: declaration.AllowMutableView,
@@ -208,12 +234,62 @@ func enableAetherScheduledTurns(
 	if host == nil {
 		return errors.New("scheduled turns require MemoryLayer-backed worker workspace views")
 	}
-	registrations, err := prepareScheduledTurnRegistrations(ctx, cfg.scheduleConfig, cfg.workspaceRoot, host)
+	registrations, digest, err := prepareScheduledTurnRegistrationsSnapshot(ctx, cfg.scheduleConfig, cfg.workspaceRoot, host)
 	if err != nil {
 		return err
 	}
 	if err := ch.EnableScheduledTurns(ctx, registrations, handoff, 0); err != nil {
 		return fmt.Errorf("enable scheduled turns: %w", err)
 	}
+	go watchScheduledTurnDeclarations(ctx, ch, host, cfg, digest)
 	return nil
+}
+
+type scheduledTurnUpdater interface {
+	UpdateScheduledTurns(context.Context, []aetherchan.ScheduledTurnRegistration) error
+}
+
+func watchScheduledTurnDeclarations(
+	ctx context.Context,
+	updater scheduledTurnUpdater,
+	host *aetherchan.WorkerToolHost,
+	cfg appConfig,
+	appliedDigest [sha256.Size]byte,
+) {
+	interval := cfg.scheduleReloadInterval
+	if interval <= 0 {
+		interval = 2 * time.Second
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	lastErrorKey := ""
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		declarations, digest, err := loadScheduledTurnDeclarations(cfg.scheduleConfig)
+		if err == nil && digest == appliedDigest {
+			continue
+		}
+		if err == nil {
+			var registrations []aetherchan.ScheduledTurnRegistration
+			registrations, err = prepareScheduledTurnDeclarations(ctx, declarations, cfg.workspaceRoot, host)
+			if err == nil {
+				err = updater.UpdateScheduledTurns(ctx, registrations)
+			}
+		}
+		if err != nil {
+			key := hex.EncodeToString(digest[:]) + ":" + err.Error()
+			if key != lastErrorKey && ctx.Err() == nil {
+				slog.WarnContext(ctx, "scheduled turn reload failed; reconciliation will retry", slog.Any("err", err))
+			}
+			lastErrorKey = key
+			continue
+		}
+		appliedDigest = digest
+		lastErrorKey = ""
+		slog.InfoContext(ctx, "reloaded scheduled turn declarations", slog.Int("schedules", len(declarations)))
+	}
 }

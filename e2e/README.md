@@ -158,19 +158,28 @@ path. Clean Git views pin the current commit by default. Mutable directories
 and dirty worktrees are rejected unless the declaration opts in with
 `allow_mutable_view` or `allow_dirty_view` respectively. `miss_policy` defaults
 to `fire_once`; supported schedule types are `cron`, `interval`, and `once`.
+`offline_policy` defaults to `queue`, which persists a due exact-target task
+until this static worker reconnects without asking an orchestrator to launch
+it. Use `reject` to fail creation while absent or `orchestrate` only when the
+worker implementation is registered with Aether orchestration.
 
 That workspace policy is rechecked when the task is admitted and before every
 tool call. `allow_dirty_view: false` also makes the execution scope read-only,
 so `write_file`, `edit_file`, `shell`, and `python` are denied before their first
 mutation. A schedule that intentionally modifies its checkout must explicitly
 set `allow_dirty_view: true`. The registration remains pinned to the revision
-selected at worker startup. If the checkout moves to another revision, later
-fires fail closed until the worker is restarted or the declaration is
-reconciled against a newly published view.
+selected when the declaration is reconciled. If the checkout moves to another
+revision, later fires fail closed until the worker is restarted or the schedule
+file content changes and publishes a new view.
 
 Editing a declaration changes its digest. Already queued work with an older
 digest fails closed instead of running the new prompt or a replacement view.
-Set `enabled: false` to remove that declaration's deterministic Aether schedule.
+The worker polls the file every two seconds by default; set
+`SAHARA_SCHEDULE_RELOAD_INTERVAL` to another positive duration. Valid edits are
+hot-reconciled, invalid edits leave the last valid declaration set in place,
+and removed entries delete only schedules demonstrably owned by this exact
+worker. `schedules: []` removes every owned schedule. `enabled: false` removes
+one declaration's deterministic Aether schedule.
 
 ## 4. Attach the host TUI
 

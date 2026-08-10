@@ -18,6 +18,9 @@ schedules:
     # omit both opt-ins.
     allow_mutable_view: true
     allow_dirty_view: false
+    # queue (default) persists exact-target work while this static worker is
+    # offline. Other explicit choices are reject and orchestrate.
+    offline_policy: queue
     prompt: >-
       Review the current workspace, summarize material changes, and record any
       concrete follow-up tasks.

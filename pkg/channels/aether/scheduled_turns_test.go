@@ -22,6 +22,37 @@ type recordingBoundTurnEnqueuer struct {
 	err     error
 }
 
+type fakeScheduleOperations struct {
+	schedules map[string]scheduledWorkflowDefinition
+	upserts   []string
+	deletes   []string
+}
+
+func (f *fakeScheduleOperations) ListSchedules(context.Context, string) (*sdk.WorkflowResponse, error) {
+	definitions := make([]scheduledWorkflowDefinition, 0, len(f.schedules))
+	for _, definition := range f.schedules {
+		definitions = append(definitions, definition)
+	}
+	data, _ := json.Marshal(definitions)
+	return &sdk.WorkflowResponse{Success: true, Data: data}, nil
+}
+
+func (f *fakeScheduleOperations) UpsertSchedule(_ context.Context, data []byte) (*sdk.WorkflowResponse, error) {
+	var definition scheduledWorkflowDefinition
+	if err := json.Unmarshal(data, &definition); err != nil {
+		return nil, err
+	}
+	f.schedules[definition.ID] = definition
+	f.upserts = append(f.upserts, definition.ID)
+	return &sdk.WorkflowResponse{Success: true}, nil
+}
+
+func (f *fakeScheduleOperations) DeleteSchedule(_ context.Context, id string) (*sdk.WorkflowResponse, error) {
+	delete(f.schedules, id)
+	f.deletes = append(f.deletes, id)
+	return &sdk.WorkflowResponse{Success: true}, nil
+}
+
 func (e *recordingBoundTurnEnqueuer) EnqueueBoundTurn(
 	_ context.Context,
 	inbound channel.Inbound,
@@ -44,7 +75,8 @@ func scheduledRegistration() ScheduledTurnRegistration {
 		ID: "daily-review", Name: "Daily review", ScheduleType: "cron",
 		ScheduleExpression: "0 9 * * *", ThreadID: "scheduled-daily-review",
 		Prompt: "Review this workspace", MissPolicy: "fire_once", Enabled: true,
-		Binding: binding, ViewPolicy: ScheduledViewPolicy{
+		TargetOfflinePolicy: "queue",
+		Binding:             binding, ViewPolicy: ScheduledViewPolicy{
 			WriteAccess: workspacepkg.ViewWriteAccessReadWrite, AllowDirtyView: true,
 		},
 	}
@@ -76,6 +108,7 @@ func TestScheduledWorkflowDataTargetsExactWorkerWithJSONEnvelope(t *testing.T) {
 		t.Fatalf("schedule definition = %+v", definition)
 	}
 	if definition.Action.TargetAgentID != registration.Binding.ToolHostID ||
+		definition.Action.TargetOfflinePolicy != "queue" ||
 		definition.Action.PayloadEncoding != "json" ||
 		definition.Action.TaskType != ScheduledTurnTaskType ||
 		!reflect.DeepEqual(definition.Action.Payload.Binding, registration.Binding) {
@@ -84,6 +117,52 @@ func TestScheduledWorkflowDataTargetsExactWorkerWithJSONEnvelope(t *testing.T) {
 	if definition.Action.Metadata["scitrera.schedule_digest"] == "" ||
 		definition.Action.Metadata["scitrera.view_revision"] != registration.Binding.Revision {
 		t.Fatalf("schedule metadata = %#v", definition.Action.Metadata)
+	}
+}
+
+func TestScheduledTurnReconciliationDeletesOnlyOwnedStaleDefinitions(t *testing.T) {
+	worker, _ := newTestChannel(t)
+	registration := scheduledRegistration()
+	registration.Binding.ToolHostID = worker.Topic()
+	old := registration
+	old.ID = "removed"
+	old.Name = "Removed"
+	oldData, err := scheduledWorkflowData(worker.workspace, worker.Topic(), old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var oldDefinition scheduledWorkflowDefinition
+	if err := json.Unmarshal(oldData, &oldDefinition); err != nil {
+		t.Fatal(err)
+	}
+	foreign := oldDefinition
+	foreign.ID = "foreign-schedule"
+	fake := &fakeScheduleOperations{schedules: map[string]scheduledWorkflowDefinition{
+		oldDefinition.ID: oldDefinition,
+		foreign.ID:       foreign,
+	}}
+	worker.scheduleOps = fake
+	if err := worker.EnableScheduledTurns(context.Background(), []ScheduledTurnRegistration{registration}, nil, time.Second); err != nil {
+		t.Fatal(err)
+	}
+	desiredID := scheduledWorkflowID(worker.workspace, worker.Topic(), registration.ID)
+	if _, ok := fake.schedules[desiredID]; !ok {
+		t.Fatalf("desired schedule %q was not upserted", desiredID)
+	}
+	if _, ok := fake.schedules[oldDefinition.ID]; ok {
+		t.Fatalf("owned stale schedule %q was not deleted", oldDefinition.ID)
+	}
+	if _, ok := fake.schedules[foreign.ID]; !ok {
+		t.Fatal("foreign schedule was deleted")
+	}
+	if err := worker.UpdateScheduledTurns(context.Background(), nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := fake.schedules[desiredID]; ok {
+		t.Fatal("schedule removed from desired state was not deleted")
+	}
+	if _, ok := fake.schedules[foreign.ID]; !ok {
+		t.Fatal("foreign schedule was deleted during empty reconciliation")
 	}
 }
 

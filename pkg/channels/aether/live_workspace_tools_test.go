@@ -275,15 +275,21 @@ func TestLiveAetherScheduledWorkerView(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fireAt := time.Now().Add(3 * time.Second).UTC().Format(time.RFC3339)
-	if err := worker.EnableScheduledTurns(ctx, []aetherchan.ScheduledTurnRegistration{{
+	registration := aetherchan.ScheduledTurnRegistration{
 		ID: "once-" + suffix, Name: "E2E scheduled view", Enabled: true,
-		ScheduleType: "once", ScheduleExpression: fireAt, MissPolicy: "fire_once",
-		ThreadID: "scheduled-e2e", Prompt: "Inspect the exact worker view", Binding: binding,
+		ScheduleType: "once", ScheduleExpression: time.Now().Add(30 * time.Second).UTC().Format(time.RFC3339), MissPolicy: "fire_once",
+		TargetOfflinePolicy: "queue", ThreadID: "scheduled-e2e",
+		Prompt: "This initial declaration must be replaced", Binding: binding,
 		ViewPolicy: aetherchan.ScheduledViewPolicy{
 			WriteAccess: workspacepkg.ViewWriteAccessReadOnly, AllowMutableView: true,
 		},
-	}}, nil, 0); err != nil {
+	}
+	if err := worker.EnableScheduledTurns(ctx, []aetherchan.ScheduledTurnRegistration{registration}, nil, 0); err != nil {
+		t.Fatal(err)
+	}
+	registration.ScheduleExpression = time.Now().Add(3 * time.Second).UTC().Format(time.RFC3339)
+	registration.Prompt = "Inspect the exact worker view"
+	if err := worker.UpdateScheduledTurns(ctx, []aetherchan.ScheduledTurnRegistration{registration}); err != nil {
 		t.Fatal(err)
 	}
 	inbound, err := worker.FetchTask(ctx)

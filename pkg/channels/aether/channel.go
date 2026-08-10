@@ -135,6 +135,9 @@ type Channel struct {
 	assignmentRouter              *TaskAssignmentRouter
 	goalContinuations             *AssignedContinuationExecutor
 	scheduledTurns                *ScheduledTurnExecutor
+	scheduledTurnsMu              sync.RWMutex
+	scheduleReconcileMu           sync.Mutex
+	scheduleOps                   scheduleOperations
 	workerToolHost                *WorkerToolHost
 
 	tasks  chan channel.Inbound
@@ -234,6 +237,7 @@ func New(cfg Config) (*Channel, error) {
 		pendingToolCalls:       map[string]*pendingToolCall{},
 		sessionSubscribers:     map[string]map[string]*sessionSubscriber{},
 		assignmentRouter:       NewTaskAssignmentRouter(),
+		scheduleOps:            client.Workflow(),
 	}
 	if c.sessionWorkspace == "" {
 		c.sessionWorkspace = c.workspace
@@ -696,8 +700,11 @@ func (c *Channel) PublishEvent(_ context.Context, event channel.Event) error {
 			delete(c.executionPolicies, event.Addr.TaskID)
 			delete(c.executionAccess, event.Addr.TaskID)
 			c.mu.Unlock()
-			if c.scheduledTurns != nil {
-				c.scheduledTurns.forget(event.Addr.TaskID)
+			c.scheduledTurnsMu.RLock()
+			executor := c.scheduledTurns
+			c.scheduledTurnsMu.RUnlock()
+			if executor != nil {
+				executor.forget(event.Addr.TaskID)
 			}
 		}()
 	}

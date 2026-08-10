@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -38,16 +39,17 @@ const (
 // declaration. A concrete worker binding is part of the declaration digest so
 // delayed tasks cannot drift to a replacement checkout or a new Git revision.
 type ScheduledTurnRegistration struct {
-	ID                 string                `json:"id"`
-	Name               string                `json:"name"`
-	ScheduleType       string                `json:"schedule_type"`
-	ScheduleExpression string                `json:"schedule_expression"`
-	ThreadID           string                `json:"thread_id"`
-	Prompt             string                `json:"prompt"`
-	MissPolicy         string                `json:"miss_policy"`
-	Enabled            bool                  `json:"enabled"`
-	Binding            spec.ExecutionBinding `json:"execution_binding"`
-	ViewPolicy         ScheduledViewPolicy   `json:"view_policy"`
+	ID                  string                `json:"id"`
+	Name                string                `json:"name"`
+	ScheduleType        string                `json:"schedule_type"`
+	ScheduleExpression  string                `json:"schedule_expression"`
+	ThreadID            string                `json:"thread_id"`
+	Prompt              string                `json:"prompt"`
+	MissPolicy          string                `json:"miss_policy"`
+	TargetOfflinePolicy string                `json:"target_offline_policy"`
+	Enabled             bool                  `json:"enabled"`
+	Binding             spec.ExecutionBinding `json:"execution_binding"`
+	ViewPolicy          ScheduledViewPolicy   `json:"view_policy"`
 }
 
 func (r ScheduledTurnRegistration) Validate() error {
@@ -67,6 +69,9 @@ func (r ScheduledTurnRegistration) Validate() error {
 	}
 	if r.MissPolicy != "fire_once" && r.MissPolicy != "fire_all" {
 		return fmt.Errorf("aether: scheduled turn %q has unsupported miss policy %q", r.ID, r.MissPolicy)
+	}
+	if r.TargetOfflinePolicy != "queue" && r.TargetOfflinePolicy != "reject" && r.TargetOfflinePolicy != "orchestrate" {
+		return fmt.Errorf("aether: scheduled turn %q has unsupported target offline policy %q", r.ID, r.TargetOfflinePolicy)
 	}
 	if err := r.Binding.Validate(); err != nil {
 		return fmt.Errorf("aether: scheduled turn %q binding: %w", r.ID, err)
@@ -174,14 +179,15 @@ func validateScheduledTurnMetadata(metadata map[string]string, envelope schedule
 }
 
 type scheduledWorkflowAction struct {
-	Type            string                `json:"type"`
-	TaskType        string                `json:"task_type"`
-	TargetAgentID   string                `json:"target_agent_id"`
-	PayloadEncoding string                `json:"payload_encoding"`
-	Payload         scheduledTurnEnvelope `json:"payload"`
-	Workspace       string                `json:"workspace"`
-	Metadata        map[string]string     `json:"metadata"`
-	Retry           map[string]any        `json:"retry"`
+	Type                string                `json:"type"`
+	TaskType            string                `json:"task_type"`
+	TargetAgentID       string                `json:"target_agent_id"`
+	TargetOfflinePolicy string                `json:"target_offline_policy"`
+	PayloadEncoding     string                `json:"payload_encoding"`
+	Payload             scheduledTurnEnvelope `json:"payload"`
+	Workspace           string                `json:"workspace"`
+	Metadata            map[string]string     `json:"metadata"`
+	Retry               map[string]any        `json:"retry"`
 }
 
 type scheduledWorkflowDefinition struct {
@@ -222,7 +228,8 @@ func scheduledWorkflowData(routingWorkspace, assignedTo string, registration Sch
 		MaxConcurrent: 0,
 		Action: scheduledWorkflowAction{
 			Type: "create_task", TaskType: ScheduledTurnTaskType,
-			TargetAgentID: assignedTo, PayloadEncoding: "json", Payload: envelope,
+			TargetAgentID: assignedTo, TargetOfflinePolicy: registration.TargetOfflinePolicy,
+			PayloadEncoding: "json", Payload: envelope,
 			Workspace: routingWorkspace, Metadata: scheduledTurnMetadata(envelope),
 			Retry: map[string]any{"max_attempts": 1},
 		},
@@ -248,6 +255,7 @@ type ScheduledTurnExecutor struct {
 	assignedTo       string
 	enqueuer         boundTurnEnqueuer
 	handoff          *authhandoff.Store
+	registrationsMu  sync.RWMutex
 	registrations    map[string]ScheduledTurnRegistration
 	timeout          time.Duration
 
@@ -273,6 +281,18 @@ func NewScheduledTurnExecutor(
 	if timeout <= 0 {
 		timeout = defaultTaskTimeout
 	}
+	indexed, err := indexScheduledTurnRegistrations(registrations, assignedTo)
+	if err != nil {
+		return nil, err
+	}
+	return &ScheduledTurnExecutor{
+		tasks: tasks, routingWorkspace: routingWorkspace, assignedTo: assignedTo,
+		enqueuer: enqueuer, handoff: handoff, registrations: indexed,
+		timeout: timeout, seen: map[string]struct{}{},
+	}, nil
+}
+
+func indexScheduledTurnRegistrations(registrations []ScheduledTurnRegistration, assignedTo string) (map[string]ScheduledTurnRegistration, error) {
 	indexed := make(map[string]ScheduledTurnRegistration, len(registrations))
 	for _, registration := range registrations {
 		if err := registration.Validate(); err != nil {
@@ -286,11 +306,28 @@ func NewScheduledTurnExecutor(
 		}
 		indexed[registration.ID] = registration
 	}
-	return &ScheduledTurnExecutor{
-		tasks: tasks, routingWorkspace: routingWorkspace, assignedTo: assignedTo,
-		enqueuer: enqueuer, handoff: handoff, registrations: indexed,
-		timeout: timeout, seen: map[string]struct{}{},
-	}, nil
+	return indexed, nil
+}
+
+// ReplaceRegistrations atomically installs a fully validated desired set. A
+// task created from a removed or changed declaration is rejected immediately,
+// even while the corresponding remote schedule reconciliation is in flight.
+func (e *ScheduledTurnExecutor) ReplaceRegistrations(registrations []ScheduledTurnRegistration) error {
+	indexed, err := indexScheduledTurnRegistrations(registrations, e.assignedTo)
+	if err != nil {
+		return err
+	}
+	e.registrationsMu.Lock()
+	e.registrations = indexed
+	e.registrationsMu.Unlock()
+	return nil
+}
+
+func (e *ScheduledTurnExecutor) registration(id string) (ScheduledTurnRegistration, bool) {
+	e.registrationsMu.RLock()
+	registration, ok := e.registrations[id]
+	e.registrationsMu.RUnlock()
+	return registration, ok
 }
 
 func (e *ScheduledTurnExecutor) HandleAssignment(ctx context.Context, assignment *sdk.TaskAssignment) error {
@@ -334,7 +371,7 @@ func (e *ScheduledTurnExecutor) HandleAssignment(ctx context.Context, assignment
 	if err := validateScheduledTurnMetadata(assignment.Metadata, envelope); err != nil {
 		return e.reject(ctx, taskID, err)
 	}
-	registration, ok := e.registrations[envelope.ScheduleID]
+	registration, ok := e.registration(envelope.ScheduleID)
 	if !ok {
 		return e.reject(ctx, taskID, fmt.Errorf("aether: scheduled turn declaration %q is not configured", envelope.ScheduleID))
 	}
@@ -478,7 +515,7 @@ func (e *ScheduledTurnExecutor) RecoverQueued(ctx context.Context) error {
 }
 
 func (e *ScheduledTurnExecutor) recoveryAssignment(info *sdk.TaskInfo) (*sdk.TaskAssignment, error) {
-	registration, ok := e.registrations[info.Metadata["scitrera.schedule_id"]]
+	registration, ok := e.registration(info.Metadata["scitrera.schedule_id"])
 	if !ok {
 		return nil, fmt.Errorf("aether: scheduled turn declaration %q is not configured", info.Metadata["scitrera.schedule_id"])
 	}
@@ -514,57 +551,147 @@ func IsScheduledTurnMessage(message protocol.ChatMessage) bool {
 	return bytes.Equal(bytes.TrimSpace(message.Meta[scheduledTurnMessageMetaKey]), []byte("true"))
 }
 
-// EnableScheduledTurns registers assignment handling before declaring the
-// schedules. Explicitly disabled declarations delete their deterministic
-// Aether schedule ID; enabled declarations are idempotently upserted.
+type scheduleOperations interface {
+	ListSchedules(context.Context, string) (*sdk.WorkflowResponse, error)
+	UpsertSchedule(context.Context, []byte) (*sdk.WorkflowResponse, error)
+	DeleteSchedule(context.Context, string) (*sdk.WorkflowResponse, error)
+}
+
+// EnableScheduledTurns registers one mutable assignment handler, then applies
+// the initial desired schedule set.
 func (c *Channel) EnableScheduledTurns(
 	ctx context.Context,
 	registrations []ScheduledTurnRegistration,
 	handoff *authhandoff.Store,
 	timeout time.Duration,
 ) error {
+	c.scheduleReconcileMu.Lock()
+	defer c.scheduleReconcileMu.Unlock()
 	executor, err := NewScheduledTurnExecutor(
 		c.client, c.workspace, c.Topic(), registrations, c, handoff, timeout,
 	)
 	if err != nil {
 		return err
 	}
-	c.assignmentRouter.Register(executor.HandleAssignment)
+	c.scheduledTurnsMu.Lock()
+	if c.scheduledTurns != nil {
+		c.scheduledTurnsMu.Unlock()
+		return errors.New("aether: scheduled turns are already enabled")
+	}
 	c.scheduledTurns = executor
-	for _, registration := range registrations {
+	c.scheduledTurnsMu.Unlock()
+	c.assignmentRouter.Register(executor.HandleAssignment)
+	return c.reconcileScheduledTurnDefinitions(ctx, registrations)
+}
+
+// UpdateScheduledTurns atomically changes the executor's accepted declaration
+// set and reconciles Aether to that same desired state. Removed declarations
+// are discovered from Aether and deleted, so restart-time edits converge too.
+func (c *Channel) UpdateScheduledTurns(ctx context.Context, registrations []ScheduledTurnRegistration) error {
+	c.scheduleReconcileMu.Lock()
+	defer c.scheduleReconcileMu.Unlock()
+	c.scheduledTurnsMu.RLock()
+	executor := c.scheduledTurns
+	c.scheduledTurnsMu.RUnlock()
+	if executor == nil {
+		return errors.New("aether: scheduled turns are not enabled")
+	}
+	if err := executor.ReplaceRegistrations(registrations); err != nil {
+		return err
+	}
+	return c.reconcileScheduledTurnDefinitions(ctx, registrations)
+}
+
+func (c *Channel) reconcileScheduledTurnDefinitions(ctx context.Context, registrations []ScheduledTurnRegistration) error {
+	if c.scheduleOps == nil {
+		return errors.New("aether: scheduled workflow operations are not configured")
+	}
+	response, err := c.scheduleOps.ListSchedules(ctx, c.workspace)
+	if err != nil {
+		return fmt.Errorf("aether: list schedules for reconciliation: %w", err)
+	}
+	if response == nil || !response.Success {
+		return fmt.Errorf("aether: list schedules for reconciliation was rejected: %s", workflowResponseError(response))
+	}
+	var current []scheduledWorkflowDefinition
+	if len(bytes.TrimSpace(response.Data)) > 0 {
+		if err := json.Unmarshal(response.Data, &current); err != nil {
+			return fmt.Errorf("aether: decode schedules for reconciliation: %w", err)
+		}
+	}
+	stale := map[string]struct{}{}
+	for _, definition := range current {
+		if ownedScheduledWorkflow(definition, c.workspace, c.Topic()) {
+			stale[definition.ID] = struct{}{}
+		}
+	}
+	ordered := append([]ScheduledTurnRegistration(nil), registrations...)
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i].ID < ordered[j].ID })
+	for _, registration := range ordered {
 		scheduleID := scheduledWorkflowID(c.workspace, c.Topic(), registration.ID)
 		if !registration.Enabled {
-			response, err := c.client.Workflow().DeleteSchedule(ctx, scheduleID)
-			if err != nil {
-				return fmt.Errorf("aether: delete disabled schedule %q: %w", registration.ID, err)
-			}
-			if response == nil || !response.Success {
-				return fmt.Errorf("aether: delete disabled schedule %q was rejected", registration.ID)
-			}
+			stale[scheduleID] = struct{}{}
 			continue
 		}
 		data, err := scheduledWorkflowData(c.workspace, c.Topic(), registration)
 		if err != nil {
 			return err
 		}
-		response, err := c.client.Workflow().UpsertSchedule(ctx, data)
+		response, err := c.scheduleOps.UpsertSchedule(ctx, data)
 		if err != nil {
 			return fmt.Errorf("aether: upsert schedule %q: %w", registration.ID, err)
 		}
 		if response == nil || !response.Success {
-			message := "no response"
-			if response != nil {
-				message = strings.TrimSpace(response.Error)
-			}
-			return fmt.Errorf("aether: upsert schedule %q was rejected: %s", registration.ID, message)
+			return fmt.Errorf("aether: upsert schedule %q was rejected: %s", registration.ID, workflowResponseError(response))
+		}
+		delete(stale, scheduleID)
+	}
+	deleteIDs := make([]string, 0, len(stale))
+	for id := range stale {
+		deleteIDs = append(deleteIDs, id)
+	}
+	sort.Strings(deleteIDs)
+	for _, id := range deleteIDs {
+		response, err := c.scheduleOps.DeleteSchedule(ctx, id)
+		if err != nil {
+			return fmt.Errorf("aether: delete stale schedule %q: %w", id, err)
+		}
+		if response == nil || !response.Success {
+			return fmt.Errorf("aether: delete stale schedule %q was rejected: %s", id, workflowResponseError(response))
 		}
 	}
 	return nil
 }
 
+func workflowResponseError(response *sdk.WorkflowResponse) string {
+	if response == nil {
+		return "no response"
+	}
+	if message := strings.TrimSpace(response.Error); message != "" {
+		return message
+	}
+	return "no error detail"
+}
+
+func ownedScheduledWorkflow(definition scheduledWorkflowDefinition, routingWorkspace, assignedTo string) bool {
+	declarationID := strings.TrimSpace(definition.Action.Metadata["scitrera.schedule_id"])
+	return declarationID != "" &&
+		definition.Workspace == routingWorkspace &&
+		definition.Action.Type == "create_task" &&
+		definition.Action.TaskType == ScheduledTurnTaskType &&
+		definition.Action.TargetAgentID == assignedTo &&
+		definition.Action.Metadata["scitrera.component"] == taskMetadataComponent &&
+		definition.Action.Metadata["scitrera.kind"] == scheduledTurnMetadataKind &&
+		definition.Action.Metadata["scitrera.execution_tool_host"] == assignedTo &&
+		definition.ID == scheduledWorkflowID(routingWorkspace, assignedTo, declarationID)
+}
+
 func (c *Channel) ReconcileScheduledTurns(ctx context.Context) error {
-	if c.scheduledTurns == nil {
+	c.scheduledTurnsMu.RLock()
+	executor := c.scheduledTurns
+	c.scheduledTurnsMu.RUnlock()
+	if executor == nil {
 		return nil
 	}
-	return c.scheduledTurns.RecoverQueued(ctx)
+	return executor.RecoverQueued(ctx)
 }

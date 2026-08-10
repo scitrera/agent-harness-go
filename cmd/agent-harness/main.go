@@ -56,6 +56,7 @@ func main() {
 	memoryRecallLimit := flag.Int("memory-recall-limit", 5, "how many recalled memories to inject")
 	goalMaxContinuations := flag.Uint("goal-max-continuations", 3, "maximum automatic follow-up turns per durable goal; 0 disables automatic continuation")
 	scheduleConfig := flag.String("schedule-config", os.Getenv("SAHARA_SCHEDULE_CONFIG"), "YAML declarations for Aether-backed scheduled worker turns (serve modes; requires MemoryLayer)")
+	scheduleReloadInterval := flag.String("schedule-reload-interval", env("SAHARA_SCHEDULE_RELOAD_INTERVAL", "2s"), "poll interval for hot-reloading scheduled turn declarations")
 	addr := flag.String("addr", env("SAHARA_WEB_ADDR", "127.0.0.1:8787"), "web UI listen address (NO auth - localhost only)")
 	noBrowser := flag.Bool("no-browser", false, "do not open a browser (web mode)")
 	exportThread := flag.String("export", "", "export thread history as JSONL to stdout and exit (a thread id, or 'all')")
@@ -79,6 +80,15 @@ func main() {
 	if *showVersion {
 		fmt.Printf("agent-harness %s\n", version.String())
 		return
+	}
+	parsedScheduleReloadInterval := 2 * time.Second
+	if strings.TrimSpace(*scheduleConfig) != "" {
+		var err error
+		parsedScheduleReloadInterval, err = time.ParseDuration(strings.TrimSpace(*scheduleReloadInterval))
+		if err != nil || parsedScheduleReloadInterval <= 0 {
+			fmt.Fprintln(os.Stderr, "error: --schedule-reload-interval must be a positive duration")
+			os.Exit(2)
+		}
 	}
 	stateDir := env("SAHARA_STATE_DIR", filepath.Join(*workspace, ".agent-harness"))
 	workspaceResolution, err := resolveAppWorkspace(context.Background(), *workspaceMode, *workspaceID, *workspaceIndexDir, *workspace)
@@ -223,6 +233,7 @@ func main() {
 		memoryRecallLimit:            *memoryRecallLimit,
 		goalMaxContinuations:         uint32(*goalMaxContinuations),
 		scheduleConfig:               strings.TrimSpace(*scheduleConfig),
+		scheduleReloadInterval:       parsedScheduleReloadInterval,
 	}
 	if selectedMode == appModeServe || selectedMode == appModeStandalone {
 		cfg.streamFlush = aetherStreamFlush
