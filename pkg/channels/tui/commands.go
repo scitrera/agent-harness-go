@@ -36,12 +36,12 @@ func (m model) handleSlash(input string) (tea.Model, tea.Cmd) {
 	case "/model", "/models":
 		return m.enqueueMetaCommand(input)
 	case "/pwd", "/cd":
-		updated, err := m.handleWorkingDirectory(fields)
+		updated, cmd, err := m.handleWorkingDirectory(fields)
 		if err != nil {
 			m.addSystem(fields[0] + ": " + err.Error())
 			return m, nil
 		}
-		return updated, nil
+		return updated, cmd
 	case "/clear":
 		return m.clearThread(append([]string{"/thread", "clear"}, fields[1:]...))
 	case "/thread", "/threads":
@@ -91,12 +91,16 @@ func (m model) enqueueMetaCommand(text string) (tea.Model, tea.Cmd) {
 		m.addSystem("could not create command message: " + err.Error())
 		return m, nil
 	}
-	addr := protocol.MessageAddress{ThreadID: m.threadID, TaskID: taskID}
+	addr := protocol.MessageAddress{WorkspaceID: m.workspaceID, ThreadID: m.threadID, TaskID: taskID}
 	message := protocol.ChatMessage{ID: "user-" + taskID, Role: protocol.RoleUser, Addr: addr, Content: []protocol.ContentPart{part}}
+	if err := m.scopeMessage(&addr, &message); err != nil {
+		m.addSystem("could not scope command: " + err.Error())
+		return m, nil
+	}
 	m.lastTaskID = taskID
 	m.markTurn(taskID, m.threadID, "queued")
 	m.refreshViewport()
-	return m, sendMetaCommandCmd(m.ctx, m.channel, addr, message)
+	return m, sendMetaCommandCmd(m.ctx, m.channel, m.workspaceID, addr, message)
 }
 
 func (m model) enqueueCommand(text string) (tea.Model, tea.Cmd) {
@@ -110,14 +114,18 @@ func (m model) enqueueCommand(text string) (tea.Model, tea.Cmd) {
 		m.addSystem("could not create command message: " + err.Error())
 		return m, nil
 	}
-	addr := protocol.MessageAddress{ThreadID: m.threadID, TaskID: taskID}
+	addr := protocol.MessageAddress{WorkspaceID: m.workspaceID, ThreadID: m.threadID, TaskID: taskID}
 	message := protocol.ChatMessage{ID: "user-" + taskID, Role: protocol.RoleUser, Addr: addr, Content: content}
+	if err := m.scopeMessage(&addr, &message); err != nil {
+		m.addSystem("could not scope command: " + err.Error())
+		return m, nil
+	}
 	m.lastTaskID = taskID
 	m.markTurn(taskID, m.threadID, "queued")
 	m.rows = append(m.rows, chatRow{Kind: rowUser, ID: message.ID, TaskID: taskID, Text: messageText(message)})
 	m.addThinking(taskID)
 	m.refreshViewportToBottom()
-	return m, sendMessageCmd(m.ctx, m.channel, m.index, addr, message, text, nil)
+	return m, sendMessageCmd(m.ctx, m.channel, m.index, m.initialWorkspaceID, m.workspaceID, addr, message, text, nil)
 }
 
 func (m *model) cancelActive() {
@@ -196,6 +204,8 @@ func sendMessageCmd(
 	ctx context.Context,
 	ch ChannelSurface,
 	index threadindex.Store,
+	initialWorkspaceID string,
+	storageWorkspaceID string,
 	addr protocol.MessageAddress,
 	message protocol.ChatMessage,
 	text string,
@@ -205,23 +215,23 @@ func sendMessageCmd(
 		var err error
 		message, err = appendReferencedImages(ctx, message, referencedImages)
 		if err != nil {
-			return sendResultMsg{TaskID: addr.TaskID, Err: fmt.Errorf("load image reference: %w", err)}
+			return sendResultMsg{WorkspaceID: storageWorkspaceID, TaskID: addr.TaskID, Err: fmt.Errorf("load image reference: %w", err)}
 		}
-		if err := index.Touch(addr.ThreadID, text); err != nil {
-			return sendResultMsg{TaskID: addr.TaskID, Err: fmt.Errorf("touch thread: %w", err)}
+		if err := touchWorkspaceThread(index, initialWorkspaceID, storageWorkspaceID, addr.ThreadID, text); err != nil {
+			return sendResultMsg{WorkspaceID: storageWorkspaceID, TaskID: addr.TaskID, Err: fmt.Errorf("touch thread: %w", err)}
 		}
 		if err := ch.Enqueue(ctx, channel.Inbound{Addr: addr, Message: message}); err != nil {
-			return sendResultMsg{TaskID: addr.TaskID, Err: fmt.Errorf("enqueue: %w", err)}
+			return sendResultMsg{WorkspaceID: storageWorkspaceID, TaskID: addr.TaskID, Err: fmt.Errorf("enqueue: %w", err)}
 		}
-		return sendResultMsg{Session: threadindex.Session{ID: addr.ThreadID}, TaskID: addr.TaskID}
+		return sendResultMsg{WorkspaceID: storageWorkspaceID, Session: threadindex.Session{ID: addr.ThreadID}, TaskID: addr.TaskID}
 	}
 }
 
-func sendMetaCommandCmd(ctx context.Context, ch ChannelSurface, addr protocol.MessageAddress, message protocol.ChatMessage) tea.Cmd {
+func sendMetaCommandCmd(ctx context.Context, ch ChannelSurface, storageWorkspaceID string, addr protocol.MessageAddress, message protocol.ChatMessage) tea.Cmd {
 	return func() tea.Msg {
 		if err := ch.Enqueue(ctx, channel.Inbound{Addr: addr, Message: message}); err != nil {
-			return sendResultMsg{TaskID: addr.TaskID, Err: fmt.Errorf("enqueue: %w", err)}
+			return sendResultMsg{WorkspaceID: storageWorkspaceID, TaskID: addr.TaskID, Err: fmt.Errorf("enqueue: %w", err)}
 		}
-		return sendResultMsg{TaskID: addr.TaskID}
+		return sendResultMsg{WorkspaceID: storageWorkspaceID, TaskID: addr.TaskID}
 	}
 }

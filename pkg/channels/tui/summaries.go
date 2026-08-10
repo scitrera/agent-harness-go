@@ -7,16 +7,22 @@ import (
 )
 
 func (m model) statusSummary() string {
-	return strings.Join([]string{
+	lines := []string{
 		"model: " + m.activeModel(),
-		"thread: " + m.threadID,
-		"title: " + m.activeThreadTitle(),
+	}
+	if m.workspaceID != "" {
+		lines = append(lines, "workspace: "+m.workspaceID)
+	}
+	lines = append(lines,
+		"thread: "+m.threadID,
+		"title: "+m.activeThreadTitle(),
 		fmt.Sprintf("threads: %d", len(m.threads)),
 		fmt.Sprintf("pending approvals: %d", len(m.pendingApprovals)),
 		fmt.Sprintf("tracked tools: %d", len(m.tools)),
 		fmt.Sprintf("scroll: %.0f%%", m.viewport.ScrollPercent()*100),
 		fmt.Sprintf("dropped events: %d", m.droppedEvents()),
-	}, "\n")
+	)
+	return strings.Join(lines, "\n")
 }
 
 func (m model) droppedEvents() int64 {
@@ -60,12 +66,18 @@ func (m model) toolsSummary() string {
 }
 
 func (m model) currentThreadSummary() string {
-	return strings.Join([]string{
+	lines := []string{
 		"current thread",
-		"id: " + m.threadID,
-		"title: " + m.activeThreadTitle(),
+	}
+	if m.workspaceID != "" {
+		lines = append(lines, "workspace: "+m.workspaceID)
+	}
+	lines = append(lines,
+		"id: "+m.threadID,
+		"title: "+m.activeThreadTitle(),
 		fmt.Sprintf("messages shown: %d", len(m.rows)),
-	}, "\n")
+	)
+	return strings.Join(lines, "\n")
 }
 
 func (m model) threadSummary() string {

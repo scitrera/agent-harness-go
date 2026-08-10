@@ -84,8 +84,18 @@ func (h *ClientToolHost) GrantWorkingDirectory(dir string) error {
 	return h.local.GrantWorkingDirectory(dir)
 }
 
+func (h *ClientToolHost) GrantWorkspaceDirectory(dir string) error {
+	return h.local.GrantWorkingDirectory(dir)
+}
+
 func (h *ClientToolHost) ExecutionBindingForDirectory(ctx context.Context, dir string) (spec.ExecutionBinding, error) {
 	return h.local.ExecutionBindingForDirectory(ctx, dir)
+}
+
+// ResolveWorkspaceForDirectory exposes only the logical project identity the
+// TUI needs to select its thread/history partition.
+func (h *ClientToolHost) ResolveWorkspaceForDirectory(ctx context.Context, dir string) (string, error) {
+	return h.local.views.ResolveWorkspaceForDirectory(ctx, dir)
 }
 
 func (h *ClientToolHost) invoke(ctx context.Context, access ClientToolAccessRequest, envelope spec.ToolInvokeEnvelope) (tools.Result, error) {

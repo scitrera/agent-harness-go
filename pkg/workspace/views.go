@@ -208,6 +208,16 @@ func (r *ViewRegistry) ExecutionBindingForDirectory(ctx context.Context, dir str
 	return binding, binding.Validate()
 }
 
+// ResolveWorkspaceForDirectory returns the logical project identity while
+// retaining distinct registered views for separate worktrees of that project.
+func (r *ViewRegistry) ResolveWorkspaceForDirectory(ctx context.Context, dir string) (string, error) {
+	view, err := r.register(ctx, dir)
+	if err != nil {
+		return "", err
+	}
+	return view.Descriptor.WorkspaceID, nil
+}
+
 // ScheduledExecutionBindingForDirectory pins a background turn to the latest
 // observed revision. Mutable directories and dirty worktrees require explicit
 // opt-in because they cannot otherwise be reproduced after a delayed fire.

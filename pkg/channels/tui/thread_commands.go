@@ -22,7 +22,7 @@ func (m model) handleThread(fields []string) (tea.Model, tea.Cmd) {
 	case "new", "create":
 		title := strings.Join(fields[2:], " ")
 		m.status = "creating thread"
-		return m, createThreadCmd(m.index, title)
+		return m, createThreadCmd(m.index, m.initialWorkspaceID, m.workspaceID, title)
 	case "switch", "use", "open":
 		return m.switchThread(fields)
 	case "delete", "rm":
@@ -48,7 +48,7 @@ func shouldOpenThreadSelector(fields []string) bool {
 
 func (m *model) openThreadSelector() {
 	if len(m.threads) == 0 && m.index != nil {
-		m.threads = m.index.List()
+		m.threads = m.listThreads()
 	}
 	items := threadSelectionItems(m.threads, m.threadID)
 	if len(items) == 0 {
@@ -91,7 +91,7 @@ func (m model) selectThread(id string) (tea.Model, tea.Cmd) {
 	m.status = "loading " + id
 	m.tailing = true
 	m.refreshViewport()
-	return m, loadHistoryCmd(m.ctx, m.store, id)
+	return m, loadHistoryCmd(m.ctx, m.store, m.initialWorkspaceID, m.workspaceID, id)
 }
 
 func (m model) switchThread(fields []string) (tea.Model, tea.Cmd) {
@@ -107,7 +107,7 @@ func (m model) switchThread(fields []string) (tea.Model, tea.Cmd) {
 	m.threadID = id
 	m.status = "loading " + id
 	m.tailing = true
-	return m, loadHistoryCmd(m.ctx, m.store, id)
+	return m, loadHistoryCmd(m.ctx, m.store, m.initialWorkspaceID, m.workspaceID, id)
 }
 
 func (m model) deleteThread(fields []string) (tea.Model, tea.Cmd) {
@@ -160,59 +160,59 @@ func (m model) renameThread(fields []string) (tea.Model, tea.Cmd) {
 		m.addSystem("usage: /thread rename [id-or-prefix] <title>")
 		return m, nil
 	}
-	return m, renameThreadCmd(m.index, id, title)
+	return m, renameThreadCmd(m.index, m.initialWorkspaceID, m.workspaceID, id, title)
 }
 
-func loadHistoryCmd(ctx context.Context, store HistoryStore, threadID string) tea.Cmd {
+func loadHistoryCmd(ctx context.Context, store HistoryStore, initialWorkspaceID, workspaceID, threadID string) tea.Cmd {
 	return func() tea.Msg {
-		messages, err := store.LoadHistory(ctx, threadID)
-		return historyLoadedMsg{ThreadID: threadID, Messages: messages, Err: err}
+		messages, err := loadWorkspaceHistory(ctx, store, initialWorkspaceID, workspaceID, threadID)
+		return historyLoadedMsg{WorkspaceID: workspaceID, ThreadID: threadID, Messages: messages, Err: err}
 	}
 }
 
-func createThreadCmd(index threadindex.Store, title string) tea.Cmd {
+func createThreadCmd(index threadindex.Store, initialWorkspaceID, workspaceID, title string) tea.Cmd {
 	return func() tea.Msg {
-		session, err := index.Create()
+		session, err := createWorkspaceThread(index, initialWorkspaceID, workspaceID)
 		if err != nil {
-			return threadCreatedMsg{Session: session, Err: err}
+			return threadCreatedMsg{WorkspaceID: workspaceID, Session: session, Err: err}
 		}
 		if strings.TrimSpace(title) != "" {
-			if err := index.Rename(session.ID, title); err != nil {
-				return threadCreatedMsg{Session: session, Err: fmt.Errorf("rename thread: %w", err)}
+			if err := renameWorkspaceThread(index, initialWorkspaceID, workspaceID, session.ID, title); err != nil {
+				return threadCreatedMsg{WorkspaceID: workspaceID, Session: session, Err: fmt.Errorf("rename thread: %w", err)}
 			}
-			for _, current := range index.List() {
+			for _, current := range listWorkspaceThreads(index, initialWorkspaceID, workspaceID) {
 				if current.ID == session.ID {
 					session = current
 					break
 				}
 			}
 		}
-		return threadCreatedMsg{Session: session}
+		return threadCreatedMsg{WorkspaceID: workspaceID, Session: session}
 	}
 }
 
-func deleteThreadCmd(ctx context.Context, index threadindex.Store, store HistoryStore, id string, nextID string) tea.Cmd {
+func deleteThreadCmd(ctx context.Context, index threadindex.Store, store HistoryStore, initialWorkspaceID, workspaceID, id string, nextID string) tea.Cmd {
 	return func() tea.Msg {
-		if err := index.Delete(id); err != nil {
-			return threadDeletedMsg{DeletedID: id, NextID: nextID, Err: fmt.Errorf("delete index: %w", err)}
+		if err := deleteWorkspaceThread(index, initialWorkspaceID, workspaceID, id); err != nil {
+			return threadDeletedMsg{WorkspaceID: workspaceID, DeletedID: id, NextID: nextID, Err: fmt.Errorf("delete index: %w", err)}
 		}
-		if err := store.DeleteHistory(ctx, id); err != nil {
-			return threadDeletedMsg{DeletedID: id, NextID: nextID, Err: fmt.Errorf("delete history: %w", err)}
+		if err := deleteWorkspaceHistory(ctx, store, initialWorkspaceID, workspaceID, id); err != nil {
+			return threadDeletedMsg{WorkspaceID: workspaceID, DeletedID: id, NextID: nextID, Err: fmt.Errorf("delete history: %w", err)}
 		}
-		return threadDeletedMsg{DeletedID: id, NextID: nextID}
+		return threadDeletedMsg{WorkspaceID: workspaceID, DeletedID: id, NextID: nextID}
 	}
 }
 
-func clearThreadCmd(ctx context.Context, store HistoryStore, id string) tea.Cmd {
+func clearThreadCmd(ctx context.Context, store HistoryStore, initialWorkspaceID, workspaceID, id string) tea.Cmd {
 	return func() tea.Msg {
-		err := store.DeleteHistory(ctx, id)
-		return clearThreadMsg{ThreadID: id, Err: err}
+		err := deleteWorkspaceHistory(ctx, store, initialWorkspaceID, workspaceID, id)
+		return clearThreadMsg{WorkspaceID: workspaceID, ThreadID: id, Err: err}
 	}
 }
 
-func renameThreadCmd(index threadindex.Store, id string, title string) tea.Cmd {
+func renameThreadCmd(index threadindex.Store, initialWorkspaceID, workspaceID, id string, title string) tea.Cmd {
 	return func() tea.Msg {
-		err := index.Rename(id, title)
-		return threadRenamedMsg{ThreadID: id, Err: err}
+		err := renameWorkspaceThread(index, initialWorkspaceID, workspaceID, id, title)
+		return threadRenamedMsg{WorkspaceID: workspaceID, ThreadID: id, Err: err}
 	}
 }

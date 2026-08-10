@@ -79,7 +79,8 @@ type Client struct {
 	// can still be attributed to the right thread and turn. Without it the UI
 	// treats every delta as background activity for another thread.
 	mu            sync.Mutex
-	threadTask    map[string]string
+	threadTask    map[workspaceThreadKey]string
+	taskAddr      map[string]protocol.MessageAddress
 	pendingAttach map[string]chan sessionAttachResponse
 
 	closeOnce sync.Once
@@ -88,9 +89,10 @@ type Client struct {
 	// render a thread it did not just watch happen (a restart, a thread switch).
 	// The agent holds the authoritative transcript; this is only what this client
 	// witnessed, which is why it is a projection and not a store.
-	projectionMu sync.Mutex
-	projection   HistoryProjection
-	toolHost     *ClientToolHost
+	projectionMu        sync.Mutex
+	projection          HistoryProjection
+	workspaceProjection WorkspaceHistoryProjection
+	toolHost            *ClientToolHost
 
 	// sendToAgent is the egress seam, so ingress/egress are testable without a
 	// live gateway.
@@ -101,6 +103,11 @@ type Client struct {
 type sessionAttachResponse struct {
 	result *spec.SessionAttachResult
 	err    *SessionRemoteError
+}
+
+type workspaceThreadKey struct {
+	workspaceID string
+	threadID    string
 }
 
 // SessionRemoteError is a structured error returned by the remote session
@@ -121,6 +128,14 @@ func (e SessionRemoteError) Error() string {
 type HistoryProjection interface {
 	LoadHistory(ctx context.Context, threadID string) ([]protocol.ChatMessage, error)
 	SaveHistory(ctx context.Context, threadID string, messages []protocol.ChatMessage) error
+}
+
+// WorkspaceHistoryProjection is the explicit multi-workspace projection
+// contract. Dynamic clients use it instead of adapting unscoped methods.
+type WorkspaceHistoryProjection interface {
+	HistoryProjection
+	LoadWorkspaceHistory(ctx context.Context, workspaceID, threadID string) ([]protocol.ChatMessage, error)
+	SaveWorkspaceHistory(ctx context.Context, workspaceID, threadID string, messages []protocol.ChatMessage) error
 }
 
 // NewClient constructs (but does not connect) the frontend transport.
@@ -172,7 +187,8 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		events:           make(chan channel.Event, eventBuffer),
 		sessionEvents:    make(chan spec.SessionEvent, eventBuffer),
 		sessionErrors:    make(chan SessionRemoteError, eventBuffer),
-		threadTask:       map[string]string{},
+		threadTask:       map[workspaceThreadKey]string{},
+		taskAddr:         map[string]protocol.MessageAddress{},
 		pendingAttach:    map[string]chan sessionAttachResponse{},
 	}
 	if c.sessionWorkspace == "" {
@@ -207,14 +223,24 @@ func clientCredentials(cfg ClientConfig) map[string]string {
 func (c *Client) SetHistoryProjection(p HistoryProjection) {
 	c.projectionMu.Lock()
 	c.projection = p
+	c.workspaceProjection = nil
+	c.projectionMu.Unlock()
+}
+
+// SetWorkspaceHistoryProjection wires a projection that preserves composite
+// workspace/thread identity for a client that can change logical projects.
+func (c *Client) SetWorkspaceHistoryProjection(p WorkspaceHistoryProjection) {
+	c.projectionMu.Lock()
+	c.projection = p
+	c.workspaceProjection = p
 	c.projectionMu.Unlock()
 }
 
 // recordProjection appends one message to the local transcript. Best-effort: a
 // projection failure must never fail the turn, since the agent's copy is the
 // authoritative one.
-func (c *Client) recordProjection(ctx context.Context, threadID string, msg protocol.ChatMessage) {
-	if threadID == "" {
+func (c *Client) recordProjection(ctx context.Context, msg protocol.ChatMessage) {
+	if msg.Addr.ThreadID == "" {
 		return
 	}
 	c.projectionMu.Lock()
@@ -222,7 +248,13 @@ func (c *Client) recordProjection(ctx context.Context, threadID string, msg prot
 	if c.projection == nil {
 		return
 	}
-	history, err := c.projection.LoadHistory(ctx, threadID)
+	var history []protocol.ChatMessage
+	var err error
+	if c.workspaceProjection != nil {
+		history, err = c.workspaceProjection.LoadWorkspaceHistory(ctx, msg.Addr.WorkspaceID, msg.Addr.ThreadID)
+	} else {
+		history, err = c.projection.LoadHistory(ctx, msg.Addr.ThreadID)
+	}
 	if err != nil {
 		return
 	}
@@ -231,7 +263,11 @@ func (c *Client) recordProjection(ctx context.Context, threadID string, msg prot
 			return // already recorded (a re-delivered final)
 		}
 	}
-	_ = c.projection.SaveHistory(ctx, threadID, append(history, msg))
+	if c.workspaceProjection != nil {
+		_ = c.workspaceProjection.SaveWorkspaceHistory(ctx, msg.Addr.WorkspaceID, msg.Addr.ThreadID, append(history, msg))
+		return
+	}
+	_ = c.projection.SaveHistory(ctx, msg.Addr.ThreadID, append(history, msg))
 }
 
 // Start connects and runs the receive loop in the background.
@@ -351,7 +387,8 @@ func (c *Client) Enqueue(ctx context.Context, in channel.Inbound) error {
 	}
 	if msg.Addr.ThreadID != "" && msg.Addr.TaskID != "" {
 		c.mu.Lock()
-		c.threadTask[msg.Addr.ThreadID] = msg.Addr.TaskID
+		c.threadTask[workspaceThreadKey{workspaceID: msg.Addr.WorkspaceID, threadID: msg.Addr.ThreadID}] = msg.Addr.TaskID
+		c.taskAddr[msg.Addr.TaskID] = msg.Addr
 		c.mu.Unlock()
 	}
 	payload, err := json.Marshal(msg)
@@ -361,7 +398,7 @@ func (c *Client) Enqueue(ctx context.Context, in channel.Inbound) error {
 	if err := c.sendToAgent(payload); err != nil {
 		return fmt.Errorf("aether: send turn: %w", err)
 	}
-	c.recordProjection(ctx, msg.Addr.ThreadID, msg)
+	c.recordProjection(ctx, msg)
 	return nil
 }
 
@@ -422,16 +459,10 @@ func (c *Client) ClearThread(threadID string) bool {
 }
 
 func (c *Client) sendControl(taskID string, body map[string]any) bool {
-	threadID := ""
 	c.mu.Lock()
-	for thread, task := range c.threadTask {
-		if task == taskID {
-			threadID = thread
-			break
-		}
-	}
+	addr := c.taskAddr[taskID]
 	c.mu.Unlock()
-	return c.sendControlForThread(threadID, taskID, body)
+	return c.sendControlForAddress(addr, taskID, body)
 }
 
 func (c *Client) sendControlForThread(threadID, taskID string, body map[string]any) bool {
@@ -441,6 +472,16 @@ func (c *Client) sendControlForThread(threadID, taskID string, body map[string]a
 		UserID:      c.userID,
 		RequestID:   c.windowID,
 		WorkspaceID: c.sessionWorkspace,
+	}
+	return c.sendControlForAddress(addr, taskID, body)
+}
+
+func (c *Client) sendControlForAddress(addr protocol.MessageAddress, taskID string, body map[string]any) bool {
+	addr.TaskID = taskID
+	addr.UserID = c.userID
+	addr.RequestID = c.windowID
+	if addr.WorkspaceID == "" {
+		addr.WorkspaceID = c.sessionWorkspace
 	}
 	payload, err := json.Marshal(map[string]any{
 		"id":      "control-" + c.windowID,
@@ -476,7 +517,8 @@ func (c *Client) onMessage(_ context.Context, msg *sdk.Message) error {
 		return nil
 	}
 	if event.Type == channel.EventMessageFinal && event.Message != nil {
-		c.recordProjection(context.Background(), event.Addr.ThreadID, *event.Message)
+		c.recordProjection(context.Background(), *event.Message)
+		c.forgetTurn(event.Addr)
 	}
 	// Structural events must not be dropped — losing a message_finalized or a
 	// part_appended corrupts the transcript — so only token deltas are shed
@@ -491,6 +533,19 @@ func (c *Client) onMessage(_ context.Context, msg *sdk.Message) error {
 	}
 	c.events <- event
 	return nil
+}
+
+func (c *Client) forgetTurn(addr protocol.MessageAddress) {
+	if addr.TaskID == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	key := workspaceThreadKey{workspaceID: addr.WorkspaceID, threadID: addr.ThreadID}
+	if c.threadTask[key] == addr.TaskID {
+		delete(c.threadTask, key)
+	}
+	delete(c.taskAddr, addr.TaskID)
 }
 
 func (c *Client) handleSessionFrame(frame spec.SessionFrame) {
@@ -600,7 +655,7 @@ func (c *Client) addrFor(meta aetherwire.TurnMeta, streamEvent spec.StreamEvent)
 		RequestID:   meta.WindowID,
 	}
 	c.mu.Lock()
-	addr.TaskID = c.threadTask[meta.ThreadID]
+	addr.TaskID = c.threadTask[workspaceThreadKey{workspaceID: meta.AppWorkspace, threadID: meta.ThreadID}]
 	c.mu.Unlock()
 	return addr
 }

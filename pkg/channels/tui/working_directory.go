@@ -1,10 +1,15 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+
+	tea "charm.land/bubbletea/v2"
+
+	"github.com/scitrera/agent-harness-go/pkg/threadindex"
 )
 
 func canonicalWorkspaceRoot(workspaceRoot string) (string, error) {
@@ -152,17 +157,17 @@ func (m model) grantExternalDirectory(target string) error {
 	return nil
 }
 
-func (m model) handleWorkingDirectory(fields []string) (model, error) {
+func (m model) handleWorkingDirectory(fields []string) (model, tea.Cmd, error) {
 	if len(fields) == 0 {
-		return m, nil
+		return m, nil, nil
 	}
 	switch fields[0] {
 	case "/pwd":
 		if m.cwd == "" {
-			return m, fmt.Errorf("workspace root is not configured")
+			return m, nil, fmt.Errorf("workspace root is not configured")
 		}
 		m.addSystem(m.cwd)
-		return m, nil
+		return m, nil, nil
 	case "/cd":
 		var requested string
 		if len(fields) > 1 {
@@ -172,22 +177,128 @@ func (m model) handleWorkingDirectory(fields []string) (model, error) {
 		}
 		target, err := resolveWorkingPath(m.cwd, requested)
 		if err != nil {
-			return m, err
+			return m, nil, err
 		}
 		info, err := os.Stat(target)
 		if err != nil {
-			return m, err
+			return m, nil, err
 		}
 		if !info.IsDir() {
-			return m, fmt.Errorf("%s is not a directory", requested)
+			return m, nil, fmt.Errorf("%s is not a directory", requested)
+		}
+		if m.workspaceResolver != nil {
+			m.workspaceSwitching = true
+			m.status = "resolving workspace"
+			return m, switchWorkspaceCmd(
+				m.ctx, m.workspaceResolver, m.index, m.store, m.initialWorkspaceID,
+				m.workspaceID, m.threadID, target, m.directoryAccess,
+				!pathWithinWorkspace(m.workspaceRoot, target), m.hasActiveWorkspaceTurns(),
+			), nil
 		}
 		if err := m.grantExternalDirectory(target); err != nil {
-			return m, err
+			return m, nil, err
 		}
 		m.cwd = target
 		m.addSystem("cwd " + m.cwd)
-		return m, nil
+		return m, nil, nil
 	default:
-		return m, nil
+		return m, nil, nil
 	}
+}
+
+func switchWorkspaceCmd(
+	ctx context.Context,
+	resolver DirectoryWorkspaceResolver,
+	index threadindex.Store,
+	store HistoryStore,
+	initialWorkspaceID, currentWorkspaceID, currentThreadID, target string,
+	directoryAccess DirectoryAccess,
+	grantWorkspace, activeWorkspaceTurns bool,
+) tea.Cmd {
+	return func() tea.Msg {
+		workspaceID, err := resolver.ResolveWorkspaceForDirectory(ctx, target)
+		if err != nil {
+			return workspaceLoadedMsg{CWD: target, Err: fmt.Errorf("resolve logical workspace: %w", err)}
+		}
+		workspaceID = strings.TrimSpace(workspaceID)
+		if workspaceID == "" {
+			return workspaceLoadedMsg{CWD: target, Err: fmt.Errorf("workspace resolver returned an empty workspace")}
+		}
+		if grantWorkspace {
+			if activeWorkspaceTurns {
+				return workspaceLoadedMsg{WorkspaceID: workspaceID, CWD: target, Err: fmt.Errorf("wait for active workspace turns to finish or cancel them before switching projects")}
+			}
+			workspaceAccess, ok := directoryAccess.(WorkspaceDirectoryAccess)
+			if !ok {
+				return workspaceLoadedMsg{WorkspaceID: workspaceID, CWD: target, Err: fmt.Errorf("dynamic workspace access is not configured")}
+			}
+			if err := workspaceAccess.GrantWorkspaceDirectory(target); err != nil {
+				return workspaceLoadedMsg{WorkspaceID: workspaceID, CWD: target, Err: fmt.Errorf("grant workspace directory: %w", err)}
+			}
+		}
+		if err := refreshWorkspaceThreads(ctx, index, initialWorkspaceID, workspaceID); err != nil {
+			return workspaceLoadedMsg{WorkspaceID: workspaceID, CWD: target, Err: err}
+		}
+		threads := listWorkspaceThreads(index, initialWorkspaceID, workspaceID)
+		var session threadindex.Session
+		if workspaceID == currentWorkspaceID {
+			for _, candidate := range threads {
+				if candidate.ID == currentThreadID {
+					session = candidate
+					break
+				}
+			}
+		}
+		if session.ID == "" && len(threads) > 0 {
+			session = threads[0]
+		}
+		if session.ID == "" {
+			session, err = createWorkspaceThread(index, initialWorkspaceID, workspaceID)
+			if err != nil {
+				return workspaceLoadedMsg{WorkspaceID: workspaceID, CWD: target, Err: fmt.Errorf("create workspace thread: %w", err)}
+			}
+			threads = listWorkspaceThreads(index, initialWorkspaceID, workspaceID)
+		}
+		messages, err := loadWorkspaceHistory(ctx, store, initialWorkspaceID, workspaceID, session.ID)
+		if err != nil {
+			return workspaceLoadedMsg{WorkspaceID: workspaceID, CWD: target, Err: fmt.Errorf("load workspace history: %w", err)}
+		}
+		return workspaceLoadedMsg{
+			WorkspaceID: workspaceID, CWD: target, Session: session, Threads: threads, Messages: messages,
+		}
+	}
+}
+
+func (m model) hasActiveWorkspaceTurns() bool {
+	for _, activity := range m.turns {
+		if m.workspaceID == "" || activity.WorkspaceID == "" || activity.WorkspaceID == m.workspaceID {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *model) applyWorkspaceLoaded(msg workspaceLoadedMsg) {
+	m.workspaceSwitching = false
+	if msg.Err != nil {
+		m.addSystem("workspace switch failed: " + msg.Err.Error())
+		return
+	}
+	m.workspaceID = msg.WorkspaceID
+	m.cwd = msg.CWD
+	m.threadID = msg.Session.ID
+	m.threads = msg.Threads
+	m.rows = rowsFromHistory(msg.Messages)
+	m.renderedRows = map[string]renderedRowCache{}
+	m.pendingApprovals = map[string]approvalRequest{}
+	m.tools = map[string]toolEntry{}
+	m.subagents = map[string]subagentActivity{}
+	m.lastTaskID = ""
+	m.selector.clear()
+	m.drawer = drawerNone
+	m.drawerContent = ""
+	m.status = "workspace " + msg.WorkspaceID
+	m.tailing = true
+	m.addSystem("workspace " + msg.WorkspaceID + "\ncwd " + msg.CWD)
+	m.refreshViewportToBottom()
 }

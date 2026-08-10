@@ -211,6 +211,9 @@ func (m model) renderStatus() string {
 	if dropped := m.droppedEvents(); dropped > 0 {
 		segments = append(segments, fmt.Sprintf("dropped %d", dropped))
 	}
+	if m.workspaceID != "" {
+		segments = append(segments, "workspace "+fitCells(m.workspaceID, 16))
+	}
 	segments = append(segments, "model "+compactModelName(m.activeModel()))
 	thread := m.activeThreadTitle()
 	if thread == "" {

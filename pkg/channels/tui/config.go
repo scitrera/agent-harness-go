@@ -22,6 +22,16 @@ type HistoryStore interface {
 	DeleteHistory(ctx context.Context, threadID string) error
 }
 
+// WorkspaceHistoryStore addresses transcripts by their full logical identity.
+// A TUI may switch workspaces only when its history backend implements this
+// surface; it never falls back to an unscoped thread ID.
+type WorkspaceHistoryStore interface {
+	HistoryStore
+	LoadWorkspaceHistory(ctx context.Context, workspaceID, threadID string) ([]protocol.ChatMessage, error)
+	SaveWorkspaceHistory(ctx context.Context, workspaceID, threadID string, messages []protocol.ChatMessage) error
+	DeleteWorkspaceHistory(ctx context.Context, workspaceID, threadID string) error
+}
+
 // ChannelSurface is what the UI needs from its transport: submit a turn, read
 // the resulting stream events, and report what was shed under load. The
 // in-process Channel satisfies it, and so does a remote transport whose other
@@ -77,27 +87,42 @@ type DirectoryAccess interface {
 	GrantWorkingDirectory(dir string) error
 }
 
+// WorkspaceDirectoryAccess grants an explicitly selected project as a full
+// local tool workspace. It is required for dynamic workspace switching; the
+// narrower DirectoryAccess contract remains read-only outside the launch root.
+type WorkspaceDirectoryAccess interface {
+	GrantWorkspaceDirectory(dir string) error
+}
+
 // ExecutionBindingProvider maps a host-local working directory to a portable,
 // exact-host workspace view binding for a remote turn.
 type ExecutionBindingProvider interface {
 	ExecutionBindingForDirectory(ctx context.Context, dir string) (protocol.ExecutionBinding, error)
 }
 
+// DirectoryWorkspaceResolver maps a user-selected local directory to its
+// logical workspace without exposing the path outside this process.
+type DirectoryWorkspaceResolver interface {
+	ResolveWorkspaceForDirectory(ctx context.Context, dir string) (string, error)
+}
+
 type Config struct {
-	Channel           ChannelSurface
-	Store             HistoryStore
-	Index             threadindex.Store
-	Approvals         ApprovalResolver
-	Canceller         Canceller
-	ModelStatus       ModelStatus
-	Commands          CommandProvider
-	TaskStore         TaskStore
-	TeamStore         TeamStore
-	AgentCatalog      AgentCatalog
-	DirectoryAccess   DirectoryAccess
-	ExecutionBindings ExecutionBindingProvider
-	InitialThreadID   string
-	WorkspaceRoot     string
+	Channel            ChannelSurface
+	Store              HistoryStore
+	Index              threadindex.Store
+	Approvals          ApprovalResolver
+	Canceller          Canceller
+	ModelStatus        ModelStatus
+	Commands           CommandProvider
+	TaskStore          TaskStore
+	TeamStore          TeamStore
+	AgentCatalog       AgentCatalog
+	DirectoryAccess    DirectoryAccess
+	ExecutionBindings  ExecutionBindingProvider
+	WorkspaceResolver  DirectoryWorkspaceResolver
+	InitialThreadID    string
+	InitialWorkspaceID string
+	WorkspaceRoot      string
 }
 
 func Run(ctx context.Context, cfg Config) error {

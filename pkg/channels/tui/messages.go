@@ -11,36 +11,51 @@ type streamEventMsg struct {
 }
 
 type sendResultMsg struct {
-	Session threadindex.Session
-	TaskID  string
-	Err     error
+	Session     threadindex.Session
+	WorkspaceID string
+	TaskID      string
+	Err         error
 }
 
 type historyLoadedMsg struct {
-	ThreadID string
-	Messages []protocol.ChatMessage
-	Err      error
+	WorkspaceID string
+	ThreadID    string
+	Messages    []protocol.ChatMessage
+	Err         error
 }
 
 type threadCreatedMsg struct {
-	Session threadindex.Session
-	Err     error
+	WorkspaceID string
+	Session     threadindex.Session
+	Err         error
 }
 
 type threadDeletedMsg struct {
-	DeletedID string
-	NextID    string
-	Err       error
+	WorkspaceID string
+	DeletedID   string
+	NextID      string
+	Err         error
 }
 
 type threadRenamedMsg struct {
-	ThreadID string
-	Err      error
+	WorkspaceID string
+	ThreadID    string
+	Err         error
 }
 
 type clearThreadMsg struct {
-	ThreadID string
-	Err      error
+	WorkspaceID string
+	ThreadID    string
+	Err         error
+}
+
+type workspaceLoadedMsg struct {
+	WorkspaceID string
+	CWD         string
+	Session     threadindex.Session
+	Threads     []threadindex.Session
+	Messages    []protocol.ChatMessage
+	Err         error
 }
 
 type quitMsg struct{}

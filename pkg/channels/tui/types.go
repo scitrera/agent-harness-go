@@ -48,8 +48,9 @@ type subagentActivity struct {
 }
 
 type turnActivity struct {
-	ThreadID string
-	Phase    string
+	WorkspaceID string
+	ThreadID    string
+	Phase       string
 }
 
 type renderedRowCache struct {
@@ -93,8 +94,9 @@ const (
 )
 
 type pendingConfirmation struct {
-	Kind     confirmationKind
-	ThreadID string
+	Kind        confirmationKind
+	WorkspaceID string
+	ThreadID    string
 }
 
 func (c pendingConfirmation) active() bool {

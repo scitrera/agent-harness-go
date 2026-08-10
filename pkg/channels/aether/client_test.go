@@ -51,6 +51,24 @@ func (m *memProjection) SaveHistory(_ context.Context, threadID string, msgs []p
 	return nil
 }
 
+type scopedMemProjection struct {
+	*memProjection
+	threadsByWorkspace map[workspaceThreadKey][]protocol.ChatMessage
+}
+
+func newScopedMemProjection() *scopedMemProjection {
+	return &scopedMemProjection{memProjection: newMemProjection(), threadsByWorkspace: map[workspaceThreadKey][]protocol.ChatMessage{}}
+}
+
+func (m *scopedMemProjection) LoadWorkspaceHistory(_ context.Context, workspaceID, threadID string) ([]protocol.ChatMessage, error) {
+	return m.threadsByWorkspace[workspaceThreadKey{workspaceID: workspaceID, threadID: threadID}], nil
+}
+
+func (m *scopedMemProjection) SaveWorkspaceHistory(_ context.Context, workspaceID, threadID string, msgs []protocol.ChatMessage) error {
+	m.threadsByWorkspace[workspaceThreadKey{workspaceID: workspaceID, threadID: threadID}] = append([]protocol.ChatMessage(nil), msgs...)
+	return nil
+}
+
 // The agent needs to know who to answer, so the client stamps its own session
 // identity onto a turn that does not carry one.
 func TestEnqueueStampsSessionIdentity(t *testing.T) {
@@ -250,6 +268,29 @@ func TestProjectionRecordsTurnAndDedupes(t *testing.T) {
 	}
 }
 
+func TestWorkspaceProjectionIsolatesMatchingThreadIDs(t *testing.T) {
+	c, _ := newTestClient(t)
+	projection := newScopedMemProjection()
+	c.SetWorkspaceHistoryProjection(projection)
+	for _, workspaceID := range []string{"project-a", "project-b"} {
+		if err := c.Enqueue(context.Background(), channel.Inbound{
+			Addr:    protocol.MessageAddress{WorkspaceID: workspaceID, ThreadID: "shared", TaskID: "task-" + workspaceID},
+			Message: protocol.ChatMessage{ID: "user-" + workspaceID, Role: protocol.RoleUser},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, workspaceID := range []string{"project-a", "project-b"} {
+		history := projection.threadsByWorkspace[workspaceThreadKey{workspaceID: workspaceID, threadID: "shared"}]
+		if len(history) != 1 || history[0].ID != "user-"+workspaceID {
+			t.Fatalf("workspace %s history = %+v", workspaceID, history)
+		}
+	}
+	if len(projection.threads) != 0 {
+		t.Fatalf("workspace projection wrote unscoped history: %+v", projection.threads)
+	}
+}
+
 // Cancel and approval decisions travel to the agent as control messages, since
 // the turn they act on is running in another process.
 func TestCancelAndResolveSendControls(t *testing.T) {
@@ -296,6 +337,30 @@ func TestCancelAndResolveSendControls(t *testing.T) {
 	}
 	if envelope.Addr.ThreadID != "thread-1" {
 		t.Fatalf("control thread = %q, want thread-1", envelope.Addr.ThreadID)
+	}
+}
+
+func TestCancelUsesOriginalWorkspaceWhenThreadIDsMatch(t *testing.T) {
+	c, sent := newTestClient(t)
+	for _, turn := range []struct{ workspaceID, taskID string }{{"project-a", "task-a"}, {"project-b", "task-b"}} {
+		if err := c.Enqueue(context.Background(), channel.Inbound{
+			Addr:    protocol.MessageAddress{WorkspaceID: turn.workspaceID, ThreadID: "shared", TaskID: turn.taskID},
+			Message: protocol.ChatMessage{ID: "user-" + turn.taskID, Role: protocol.RoleUser},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !c.Cancel("task-a") {
+		t.Fatal("cancel was not sent")
+	}
+	var envelope struct {
+		Addr protocol.MessageAddress `json:"addr"`
+	}
+	if err := json.Unmarshal((*sent)[2], &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.Addr.WorkspaceID != "project-a" || envelope.Addr.ThreadID != "shared" || envelope.Addr.TaskID != "task-a" {
+		t.Fatalf("cancel address = %+v", envelope.Addr)
 	}
 }
 

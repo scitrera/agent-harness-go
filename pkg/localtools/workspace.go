@@ -19,6 +19,10 @@ type Workspace struct {
 	// at /opt/agent-skills. Writes never consult them (resolveForWrite stays
 	// root-only), and relative paths still resolve under root only.
 	readRoots []string
+	// writeRoots are projects the user explicitly selected as logical
+	// workspaces. Ordinary external working-directory grants never enter this
+	// list, preserving their read-only behavior.
+	writeRoots []string
 }
 
 func NewWorkspace(root string) (*Workspace, error) {
@@ -95,10 +99,49 @@ func (w *Workspace) GrantWorkingDirectory(dir string) error {
 	return w.AddReadRoots(dir)
 }
 
+// GrantWorkspaceDirectory grants a user-selected project to both read and
+// write tools. Callers must expose this only through an explicit workspace
+// selection action such as project-mode /cd.
+func (w *Workspace) GrantWorkspaceDirectory(dir string) error {
+	if err := w.AddReadRoots(dir); err != nil {
+		return err
+	}
+	abs, err := filepath.Abs(strings.TrimSpace(dir))
+	if err != nil {
+		return fmt.Errorf("%w: workspace root %s: %w", ErrInvalidRoot, dir, err)
+	}
+	evaluated, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return fmt.Errorf("%w: eval workspace root %s: %w", ErrInvalidRoot, dir, err)
+	}
+	info, err := os.Stat(evaluated)
+	if err != nil {
+		return fmt.Errorf("%w: stat workspace root %s: %w", ErrInvalidRoot, dir, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%w: workspace root %s is not a directory", ErrInvalidRoot, dir)
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for _, existing := range w.writeRoots {
+		if existing == evaluated {
+			return nil
+		}
+	}
+	w.writeRoots = append(w.writeRoots, evaluated)
+	return nil
+}
+
 func (w *Workspace) readRootsSnapshot() []string {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
 	return append([]string(nil), w.readRoots...)
+}
+
+func (w *Workspace) writeRootsSnapshot() []string {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return append([]string(nil), w.writeRoots...)
 }
 
 // defaultReadFileMaxBytes bounds an uncapped read_file so a huge file can't OOM
@@ -228,7 +271,7 @@ func (w *Workspace) resolveForWrite(relPath string) (string, error) {
 			return "", fmt.Errorf("resolve parent %s: %w", relPath, err)
 		}
 	}
-	if !w.contains(evaluatedParent) {
+	if !w.containedInWritable(evaluatedParent) {
 		return "", fmt.Errorf("%w: %s", ErrPathOutsideRoot, relPath)
 	}
 	return candidate, nil
@@ -246,6 +289,12 @@ func (w *Workspace) join(relPath string, allowReadRoots bool) (string, error) {
 		}
 		if allowReadRoots {
 			for _, r := range w.readRootsSnapshot() {
+				if within(r, clean) {
+					return clean, nil
+				}
+			}
+		} else {
+			for _, r := range w.writeRootsSnapshot() {
 				if within(r, clean) {
 					return clean, nil
 				}
@@ -293,4 +342,16 @@ func (w *Workspace) contains(absPath string) bool {
 		return false
 	}
 	return rel == "." || (!strings.HasPrefix(rel, "..") && !filepath.IsAbs(rel))
+}
+
+func (w *Workspace) containedInWritable(absPath string) bool {
+	if w.contains(absPath) {
+		return true
+	}
+	for _, root := range w.writeRootsSnapshot() {
+		if within(root, absPath) {
+			return true
+		}
+	}
+	return false
 }

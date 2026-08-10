@@ -6,6 +6,10 @@ import (
 )
 
 func (m *model) markTurn(taskID, threadID, phase string) {
+	m.markTurnAt(taskID, m.workspaceID, threadID, phase)
+}
+
+func (m *model) markTurnAt(taskID, workspaceID, threadID, phase string) {
 	if taskID == "" {
 		m.status = phase
 		return
@@ -13,7 +17,12 @@ func (m *model) markTurn(taskID, threadID, phase string) {
 	if m.turns == nil {
 		m.turns = map[string]turnActivity{}
 	}
-	m.turns[taskID] = turnActivity{ThreadID: threadID, Phase: phase}
+	if workspaceID == "" {
+		if current, ok := m.turns[taskID]; ok {
+			workspaceID = current.WorkspaceID
+		}
+	}
+	m.turns[taskID] = turnActivity{WorkspaceID: workspaceID, ThreadID: threadID, Phase: phase}
 	m.status = m.activeTurnStatus()
 }
 
@@ -63,5 +72,6 @@ func (m model) activeTurnStatus() string {
 }
 
 func (m model) activityOnCurrentThread(activity turnActivity) bool {
-	return activity.ThreadID == "" || activity.ThreadID == m.threadID
+	workspaceMatches := m.workspaceID == "" || activity.WorkspaceID == "" || activity.WorkspaceID == m.workspaceID
+	return workspaceMatches && (activity.ThreadID == "" || activity.ThreadID == m.threadID)
 }

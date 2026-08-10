@@ -223,6 +223,26 @@ func Test_Workspace_WriteFile_never_uses_read_root(t *testing.T) {
 	}
 }
 
+func Test_Workspace_GrantWorkspaceDirectory_allowsOnlySelectedProjectWrites(t *testing.T) {
+	ctx := context.Background()
+	ws := newTestWorkspace(t)
+	selected := t.TempDir()
+	unselected := t.TempDir()
+	if err := ws.GrantWorkspaceDirectory(selected); err != nil {
+		t.Fatal(err)
+	}
+	selectedFile := filepath.Join(selected, "created.txt")
+	if err := ws.WriteFile(ctx, selectedFile, "workspace data"); err != nil {
+		t.Fatalf("write selected workspace: %v", err)
+	}
+	if data, err := os.ReadFile(selectedFile); err != nil || string(data) != "workspace data" {
+		t.Fatalf("selected workspace file = %q, %v", data, err)
+	}
+	if err := ws.WriteFile(ctx, filepath.Join(unselected, "blocked.txt"), "no"); !errors.Is(err, ErrPathOutsideRoot) {
+		t.Fatalf("unselected project write was not rejected: %v", err)
+	}
+}
+
 func Test_Workspace_AddReadRoots_skips_missing(t *testing.T) {
 	ws := newTestWorkspace(t)
 	if err := ws.AddReadRoots(filepath.Join(t.TempDir(), "does-not-exist")); err != nil {

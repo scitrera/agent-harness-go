@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	spec "github.com/scitrera/ecosystem-messaging-spec/go"
+
 	workspacepkg "github.com/scitrera/agent-harness-go/pkg/workspace"
 )
 
@@ -67,4 +69,26 @@ func effectiveWorkspace(configured, resolved string) string {
 		return resolved
 	}
 	return "default"
+}
+
+type directoryWorkspaceResolver struct {
+	views *workspacepkg.ViewRegistry
+}
+
+func newDirectoryWorkspaceResolver(ctx context.Context, stateDir, initialWorkspaceID, initialRoot string) (*directoryWorkspaceResolver, error) {
+	views, err := workspacepkg.NewViewRegistry(ctx, workspacepkg.ViewRegistryConfig{
+		InitialWorkspaceID: initialWorkspaceID,
+		InitialRoot:        initialRoot,
+		StateDir:           stateDir,
+		ToolHostID:         "local::tui",
+		ExecutionSite:      spec.ExecutionSiteClient,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &directoryWorkspaceResolver{views: views}, nil
+}
+
+func (r *directoryWorkspaceResolver) ResolveWorkspaceForDirectory(ctx context.Context, dir string) (string, error) {
+	return r.views.ResolveWorkspaceForDirectory(ctx, dir)
 }

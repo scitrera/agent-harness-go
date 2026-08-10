@@ -12,6 +12,14 @@ import (
 )
 
 func (m *model) applyEvent(event channel.Event) {
+	eventWorkspaceID := event.Addr.WorkspaceID
+	if eventWorkspaceID == "" {
+		eventWorkspaceID = m.workspaceID
+	}
+	if !m.workspaceMatchesCurrent(eventWorkspaceID) {
+		m.applyForeignWorkspaceEvent(event, eventWorkspaceID)
+		return
+	}
 	if event.Addr.ThreadID != "" && event.Addr.ThreadID != m.threadID {
 		m.applyBackgroundEvent(event)
 		return
@@ -27,9 +35,9 @@ func (m *model) applyEvent(event channel.Event) {
 	}
 	switch event.Type {
 	case channel.EventMessageStarted:
-		m.markTurn(event.Addr.TaskID, event.Addr.ThreadID, "thinking")
+		m.markTurnAt(event.Addr.TaskID, eventWorkspaceID, event.Addr.ThreadID, "thinking")
 	case channel.EventTokenDelta:
-		m.markTurn(event.Addr.TaskID, event.Addr.ThreadID, "responding")
+		m.markTurnAt(event.Addr.TaskID, eventWorkspaceID, event.Addr.ThreadID, "responding")
 		m.appendAssistantDelta(event.MessageID, event.Index, event.Delta)
 	case channel.EventPartAppended:
 		m.applyPartAppended(event)
@@ -48,6 +56,17 @@ func (m *model) applyEvent(event channel.Event) {
 		m.addSystem("turn error")
 	}
 	m.refreshViewport()
+}
+
+func (m *model) applyForeignWorkspaceEvent(event channel.Event, workspaceID string) {
+	switch event.Type {
+	case channel.EventMessageStarted:
+		m.markTurnAt(event.Addr.TaskID, workspaceID, event.Addr.ThreadID, "thinking")
+	case channel.EventTokenDelta:
+		m.markTurnAt(event.Addr.TaskID, workspaceID, event.Addr.ThreadID, "responding")
+	case channel.EventMessageFinal, channel.EventError:
+		m.finishTurn(event.Addr.TaskID)
+	}
 }
 
 func (m *model) applyBackgroundEvent(event channel.Event) {
@@ -71,7 +90,7 @@ func (m *model) applyPartAppended(event channel.Event) {
 		m.refreshApprovalSelector()
 		m.upsertToolishRow(approval.ID, "approval "+approval.Tool+": "+string(approval.Status))
 		if approval.Status == "" || approval.Status == "pending" {
-			m.markTurn(event.Addr.TaskID, event.Addr.ThreadID, "approval needed")
+			m.markTurnAt(event.Addr.TaskID, event.Addr.WorkspaceID, event.Addr.ThreadID, "approval needed")
 		}
 		return
 	}
@@ -117,7 +136,7 @@ func (m *model) applyPartUpdated(event channel.Event) {
 	}
 	delete(m.pendingApprovals, id)
 	m.refreshApprovalSelector()
-	m.markTurn(event.Addr.TaskID, event.Addr.ThreadID, "thinking")
+	m.markTurnAt(event.Addr.TaskID, event.Addr.WorkspaceID, event.Addr.ThreadID, "thinking")
 	m.upsertToolishRow(id, "approval "+req.Tool+": "+status)
 }
 
@@ -144,11 +163,11 @@ func (m *model) applyToolLifecycle(event channel.Event) {
 		if entry.Event.ToolName == tools.SubagentToolName {
 			phase = "subagent working"
 		}
-		m.markTurn(event.Addr.TaskID, event.Addr.ThreadID, phase)
+		m.markTurnAt(event.Addr.TaskID, event.Addr.WorkspaceID, event.Addr.ThreadID, phase)
 	case tools.ToolEventFinished:
-		m.markTurn(event.Addr.TaskID, event.Addr.ThreadID, "thinking")
+		m.markTurnAt(event.Addr.TaskID, event.Addr.WorkspaceID, event.Addr.ThreadID, "thinking")
 	case tools.ToolEventAborted:
-		m.markTurn(event.Addr.TaskID, event.Addr.ThreadID, "tool failed")
+		m.markTurnAt(event.Addr.TaskID, event.Addr.WorkspaceID, event.Addr.ThreadID, "tool failed")
 	}
 	line := renderToolEvent(entry.Event)
 	if entry.Event.ToolName == tools.SubagentToolName {

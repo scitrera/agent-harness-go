@@ -108,6 +108,74 @@ type workspaceHistoryDeleter interface {
 	DeleteWorkspaceHistory(ctx context.Context, workspaceID, threadID string) error
 }
 
+// boundThreadStore maps only the process-selected logical workspace to an
+// explicitly configured backend workspace. Other logical workspaces remain
+// independently addressed, which is required when /cd registers another
+// project in the same client process.
+type boundThreadStore struct {
+	base               threadindex.WorkspaceStore
+	workspaceID        string
+	backendWorkspaceID string
+}
+
+func bindThreads(base threadindex.WorkspaceStore, workspaceID, backendWorkspaceID string) threadindex.WorkspaceStore {
+	if base == nil || workspaceID == "" || workspaceID == backendWorkspaceID {
+		return base
+	}
+	return &boundThreadStore{base: base, workspaceID: workspaceID, backendWorkspaceID: backendWorkspaceID}
+}
+
+func (s *boundThreadStore) backendWorkspace(workspaceID string) string {
+	if workspaceID == "" || workspaceID == s.workspaceID {
+		return s.backendWorkspaceID
+	}
+	return workspaceID
+}
+
+func (s *boundThreadStore) List() []threadindex.Session {
+	return s.ListWorkspace(s.workspaceID)
+}
+
+func (s *boundThreadStore) Create() (threadindex.Session, error) {
+	return s.CreateWorkspaceThread(s.workspaceID)
+}
+
+func (s *boundThreadStore) Touch(id, firstUserText string) error {
+	return s.TouchWorkspaceThread(s.workspaceID, id, firstUserText)
+}
+
+func (s *boundThreadStore) Rename(id, titleText string) error {
+	return s.RenameWorkspaceThread(s.workspaceID, id, titleText)
+}
+
+func (s *boundThreadStore) Delete(id string) error {
+	return s.DeleteWorkspaceThread(s.workspaceID, id)
+}
+
+func (s *boundThreadStore) RefreshWorkspace(ctx context.Context, workspaceID string) error {
+	return s.base.RefreshWorkspace(ctx, s.backendWorkspace(workspaceID))
+}
+
+func (s *boundThreadStore) ListWorkspace(workspaceID string) []threadindex.Session {
+	return s.base.ListWorkspace(s.backendWorkspace(workspaceID))
+}
+
+func (s *boundThreadStore) CreateWorkspaceThread(workspaceID string) (threadindex.Session, error) {
+	return s.base.CreateWorkspaceThread(s.backendWorkspace(workspaceID))
+}
+
+func (s *boundThreadStore) TouchWorkspaceThread(workspaceID, id, firstUserText string) error {
+	return s.base.TouchWorkspaceThread(s.backendWorkspace(workspaceID), id, firstUserText)
+}
+
+func (s *boundThreadStore) RenameWorkspaceThread(workspaceID, id, titleText string) error {
+	return s.base.RenameWorkspaceThread(s.backendWorkspace(workspaceID), id, titleText)
+}
+
+func (s *boundThreadStore) DeleteWorkspaceThread(workspaceID, id string) error {
+	return s.base.DeleteWorkspaceThread(s.backendWorkspace(workspaceID), id)
+}
+
 // boundHistoryStore lets legacy UI surfaces address the process-selected
 // workspace while still allowing the turn runner to pass an explicit workspace
 // through the additive harness.WorkspaceHistoryStore capability.
@@ -301,7 +369,13 @@ func openStores(ctx context.Context, cfg appConfig) (stores, error) {
 		return stores{}, err
 	}
 	if ml == nil {
-		index, err := threadindex.NewIndex(workspaceStateDir(cfg), time.Now)
+		var index threadindex.Store
+		var err error
+		if cfg.dynamicWorkspaces {
+			index, err = threadindex.NewWorkspaceIndex(cfg.stateDir, cfg.workspaceID, time.Now)
+		} else {
+			index, err = threadindex.NewIndex(workspaceStateDir(cfg), time.Now)
+		}
 		if err != nil {
 			return stores{}, fmt.Errorf("threads: %w", err)
 		}
@@ -334,7 +408,7 @@ func openStores(ctx context.Context, cfg appConfig) (stores, error) {
 	}
 	return stores{
 		history:        bindHistoryBackend(ml, cfg.workspaceID, cfg.memorylayerWorkspace),
-		threads:        ml,
+		threads:        bindThreads(ml, cfg.workspaceID, cfg.memorylayerWorkspace),
 		files:          files,
 		memory:         bindMemory(recaller, cfg.workspaceID, cfg.memorylayerWorkspace),
 		catalogs:       catalog.BindWorkspaceProvider(catalogProvider, cfg.workspaceID, cfg.memorylayerWorkspace),

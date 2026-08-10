@@ -7,6 +7,7 @@ import (
 	"github.com/scitrera/agent-harness-go/pkg/harness"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 	"github.com/scitrera/agent-harness-go/pkg/store"
+	"github.com/scitrera/agent-harness-go/pkg/threadindex"
 	"github.com/scitrera/agent-harness-go/pkg/tools"
 	"github.com/scitrera/agent-harness-go/pkg/turn"
 )
@@ -99,6 +100,59 @@ func TestBoundScopedBackendMapsLogicalWorkspaceToOverride(t *testing.T) {
 		t.Fatalf("backend workspace = %q", base.workspaceID)
 	}
 	if err := scoped.SaveWorkspaceHistory(context.Background(), "project-b", "shared", nil); err != nil {
+		t.Fatal(err)
+	}
+	if base.workspaceID != "project-b" {
+		t.Fatalf("dynamic backend workspace = %q", base.workspaceID)
+	}
+}
+
+type recordingWorkspaceThreads struct {
+	workspaceID string
+}
+
+func (s *recordingWorkspaceThreads) List() []threadindex.Session { return nil }
+func (s *recordingWorkspaceThreads) Create() (threadindex.Session, error) {
+	return threadindex.Session{}, nil
+}
+func (s *recordingWorkspaceThreads) Touch(string, string) error  { return nil }
+func (s *recordingWorkspaceThreads) Rename(string, string) error { return nil }
+func (s *recordingWorkspaceThreads) Delete(string) error         { return nil }
+func (s *recordingWorkspaceThreads) RefreshWorkspace(_ context.Context, workspaceID string) error {
+	s.workspaceID = workspaceID
+	return nil
+}
+func (s *recordingWorkspaceThreads) ListWorkspace(workspaceID string) []threadindex.Session {
+	s.workspaceID = workspaceID
+	return nil
+}
+func (s *recordingWorkspaceThreads) CreateWorkspaceThread(workspaceID string) (threadindex.Session, error) {
+	s.workspaceID = workspaceID
+	return threadindex.Session{}, nil
+}
+func (s *recordingWorkspaceThreads) TouchWorkspaceThread(workspaceID, _, _ string) error {
+	s.workspaceID = workspaceID
+	return nil
+}
+func (s *recordingWorkspaceThreads) RenameWorkspaceThread(workspaceID, _, _ string) error {
+	s.workspaceID = workspaceID
+	return nil
+}
+func (s *recordingWorkspaceThreads) DeleteWorkspaceThread(workspaceID, _ string) error {
+	s.workspaceID = workspaceID
+	return nil
+}
+
+func TestBoundThreadsMapsOnlySelectedLogicalWorkspace(t *testing.T) {
+	base := &recordingWorkspaceThreads{}
+	bound := bindThreads(base, "project-a", "memorylayer-a")
+	if err := bound.TouchWorkspaceThread("project-a", "thread", "hello"); err != nil {
+		t.Fatal(err)
+	}
+	if base.workspaceID != "memorylayer-a" {
+		t.Fatalf("selected backend workspace = %q", base.workspaceID)
+	}
+	if err := bound.TouchWorkspaceThread("project-b", "thread", "hello"); err != nil {
 		t.Fatal(err)
 	}
 	if base.workspaceID != "project-b" {

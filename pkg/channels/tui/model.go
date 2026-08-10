@@ -26,22 +26,26 @@ const (
 )
 
 type model struct {
-	ctx               context.Context
-	channel           ChannelSurface
-	events            <-chan channel.Event
-	store             HistoryStore
-	index             threadindex.Store
-	approvals         ApprovalResolver
-	canceller         Canceller
-	modelStatus       ModelStatus
-	commandSource     CommandProvider
-	taskStore         TaskStore
-	teamStore         TeamStore
-	agentCatalog      AgentCatalog
-	directoryAccess   DirectoryAccess
-	executionBindings ExecutionBindingProvider
-	workspaceRoot     string
-	cwd               string
+	ctx                context.Context
+	channel            ChannelSurface
+	events             <-chan channel.Event
+	store              HistoryStore
+	index              threadindex.Store
+	approvals          ApprovalResolver
+	canceller          Canceller
+	modelStatus        ModelStatus
+	commandSource      CommandProvider
+	taskStore          TaskStore
+	teamStore          TeamStore
+	agentCatalog       AgentCatalog
+	directoryAccess    DirectoryAccess
+	executionBindings  ExecutionBindingProvider
+	workspaceResolver  DirectoryWorkspaceResolver
+	initialWorkspaceID string
+	workspaceID        string
+	workspaceSwitching bool
+	workspaceRoot      string
+	cwd                string
 
 	threadID string
 	threads  []threadindex.Session
@@ -85,11 +89,12 @@ func newModel(ctx context.Context, cfg Config) (model, error) {
 	if cfg.Index == nil {
 		return model{}, fmt.Errorf("thread index is required")
 	}
-	threadID, threads, err := selectInitialThread(cfg.Index, cfg.InitialThreadID)
+	workspaceID := strings.TrimSpace(cfg.InitialWorkspaceID)
+	threadID, threads, err := selectInitialThread(cfg.Index, workspaceID, cfg.InitialThreadID)
 	if err != nil {
 		return model{}, err
 	}
-	messages, err := cfg.Store.LoadHistory(ctx, threadID)
+	messages, err := loadWorkspaceHistory(ctx, cfg.Store, workspaceID, workspaceID, threadID)
 	if err != nil {
 		return model{}, fmt.Errorf("load history: %w", err)
 	}
@@ -98,57 +103,60 @@ func newModel(ctx context.Context, cfg Config) (model, error) {
 		return model{}, fmt.Errorf("resolve workspace root: %w", err)
 	}
 	m := model{
-		ctx:               ctx,
-		channel:           cfg.Channel,
-		events:            cfg.Channel.Events(),
-		store:             cfg.Store,
-		index:             cfg.Index,
-		approvals:         cfg.Approvals,
-		canceller:         cfg.Canceller,
-		modelStatus:       cfg.ModelStatus,
-		commandSource:     cfg.Commands,
-		taskStore:         cfg.TaskStore,
-		teamStore:         cfg.TeamStore,
-		agentCatalog:      cfg.AgentCatalog,
-		directoryAccess:   cfg.DirectoryAccess,
-		executionBindings: cfg.ExecutionBindings,
-		workspaceRoot:     workspaceRoot,
-		cwd:               workspaceRoot,
-		threadID:          threadID,
-		threads:           threads,
-		rows:              rowsFromHistory(messages),
-		pendingApprovals:  map[string]approvalRequest{},
-		tools:             map[string]toolEntry{},
-		subagents:         map[string]subagentActivity{},
-		turns:             map[string]turnActivity{},
-		renderedRows:      map[string]renderedRowCache{},
-		clearingThreads:   map[string]struct{}{},
-		tailing:           true,
-		viewport:          viewport.New(),
-		composer:          newComposer(),
+		ctx:                ctx,
+		channel:            cfg.Channel,
+		events:             cfg.Channel.Events(),
+		store:              cfg.Store,
+		index:              cfg.Index,
+		approvals:          cfg.Approvals,
+		canceller:          cfg.Canceller,
+		modelStatus:        cfg.ModelStatus,
+		commandSource:      cfg.Commands,
+		taskStore:          cfg.TaskStore,
+		teamStore:          cfg.TeamStore,
+		agentCatalog:       cfg.AgentCatalog,
+		directoryAccess:    cfg.DirectoryAccess,
+		executionBindings:  cfg.ExecutionBindings,
+		workspaceResolver:  cfg.WorkspaceResolver,
+		initialWorkspaceID: workspaceID,
+		workspaceID:        workspaceID,
+		workspaceRoot:      workspaceRoot,
+		cwd:                workspaceRoot,
+		threadID:           threadID,
+		threads:            threads,
+		rows:               rowsFromHistory(messages),
+		pendingApprovals:   map[string]approvalRequest{},
+		tools:              map[string]toolEntry{},
+		subagents:          map[string]subagentActivity{},
+		turns:              map[string]turnActivity{},
+		renderedRows:       map[string]renderedRowCache{},
+		clearingThreads:    map[string]struct{}{},
+		tailing:            true,
+		viewport:           viewport.New(),
+		composer:           newComposer(),
 	}
 	m.status = "ready"
 	m.refreshViewport()
 	return m, nil
 }
 
-func selectInitialThread(index threadindex.Store, requested string) (string, []threadindex.Session, error) {
+func selectInitialThread(index threadindex.Store, workspaceID, requested string) (string, []threadindex.Session, error) {
 	requested = strings.TrimSpace(requested)
 	if requested != "" {
-		if err := index.Touch(requested, ""); err != nil {
+		if err := touchWorkspaceThread(index, workspaceID, workspaceID, requested, ""); err != nil {
 			return "", nil, fmt.Errorf("touch thread: %w", err)
 		}
-		return requested, index.List(), nil
+		return requested, listWorkspaceThreads(index, workspaceID, workspaceID), nil
 	}
-	threads := index.List()
+	threads := listWorkspaceThreads(index, workspaceID, workspaceID)
 	if len(threads) > 0 {
 		return threads[0].ID, threads, nil
 	}
-	session, err := index.Create()
+	session, err := createWorkspaceThread(index, workspaceID, workspaceID)
 	if err != nil {
 		return "", nil, fmt.Errorf("create thread: %w", err)
 	}
-	return session.ID, index.List(), nil
+	return session.ID, listWorkspaceThreads(index, workspaceID, workspaceID), nil
 }
 
 func newComposer() textarea.Model {
@@ -217,13 +225,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.applyThreadCreated(msg)
 		return m, repaint(setTerminalTitleCmd(m.terminalTitle()))
 	case threadDeletedMsg:
+		if !m.workspaceMatchesCurrent(msg.WorkspaceID) {
+			m.applyThreadDeleted(msg)
+			return m, nil
+		}
 		wasCurrent := msg.DeletedID == m.threadID
 		m.applyThreadDeleted(msg)
 		if msg.Err == nil && wasCurrent {
 			if msg.NextID != "" {
-				return m, repaint(loadHistoryCmd(m.ctx, m.store, msg.NextID))
+				return m, repaint(loadHistoryCmd(m.ctx, m.store, m.initialWorkspaceID, m.workspaceID, msg.NextID))
 			}
-			return m, repaint(createThreadCmd(m.index, ""))
+			return m, repaint(createThreadCmd(m.index, m.initialWorkspaceID, m.workspaceID, ""))
 		}
 		return m, repaint(nil)
 	case threadRenamedMsg:
@@ -231,9 +243,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, setTerminalTitleCmd(m.terminalTitle())
 	case clearThreadMsg:
 		sendAfterClear := msg.Err == nil &&
-			m.deferredSendFor == msg.ThreadID &&
+			m.deferredSendFor == workspaceKey(msg.WorkspaceID, msg.ThreadID) &&
+			m.workspaceID == msg.WorkspaceID &&
 			m.threadID == msg.ThreadID
-		if m.deferredSendFor == msg.ThreadID {
+		if m.deferredSendFor == workspaceKey(msg.WorkspaceID, msg.ThreadID) {
 			m.deferredSendFor = ""
 		}
 		m.applyClearThread(msg)
@@ -250,6 +263,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case quitMsg:
 		return m, tea.Quit
+	case workspaceLoadedMsg:
+		m.applyWorkspaceLoaded(msg)
+		return m, repaint(setTerminalTitleCmd(m.terminalTitle()))
 	}
 
 	var cmd tea.Cmd

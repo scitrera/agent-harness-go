@@ -48,6 +48,9 @@ type appConfig struct {
 	// workspaceIndexDir is the shared canonical project-to-workspace index used
 	// when a client registers another local coding project with /cd.
 	workspaceIndexDir string
+	// dynamicWorkspaces is true only for an automatically resolved project-mode
+	// client. A pinned workspace intentionally remains a single logical scope.
+	dynamicWorkspaces bool
 	// visibleWorkspaces are additional logical workspaces this host permits an
 	// explicit client to address. The selected/default workspace is implicit.
 	visibleWorkspaces []string

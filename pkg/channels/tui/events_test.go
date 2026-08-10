@@ -281,3 +281,23 @@ func TestRowsFromHistory_deduplicatesPersistedToolRowsAcrossMessages(t *testing.
 		t.Fatalf("third row = %+v, want trailing assistant text", rows[2])
 	}
 }
+
+func TestApplyEventDoesNotRenderAnotherWorkspacesMatchingThreadID(t *testing.T) {
+	m := model{
+		workspaceID: "project-b", threadID: "shared",
+		rows:  []chatRow{{Kind: rowSystem, Text: "project B"}},
+		turns: map[string]turnActivity{}, tools: map[string]toolEntry{},
+		pendingApprovals: map[string]approvalRequest{}, viewport: viewport.New(),
+	}
+	m.applyEvent(channel.Event{
+		Type:      channel.EventTokenDelta,
+		Addr:      protocol.MessageAddress{WorkspaceID: "project-a", ThreadID: "shared", TaskID: "task-a"},
+		MessageID: "assistant-a", Delta: "project A response",
+	})
+	if len(m.rows) != 1 || m.rows[0].Text != "project B" {
+		t.Fatalf("foreign workspace event changed rows: %+v", m.rows)
+	}
+	if activity := m.turns["task-a"]; activity.WorkspaceID != "project-a" || activity.Phase != "responding" {
+		t.Fatalf("foreign workspace activity = %+v", activity)
+	}
+}

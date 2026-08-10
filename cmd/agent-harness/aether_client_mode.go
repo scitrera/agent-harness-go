@@ -71,7 +71,15 @@ func runTUIClient(cfg appConfig) error {
 	// agent owns the authoritative copy, and without this a restart or a thread
 	// switch renders a blank conversation.
 	if !st.remote {
-		client.SetHistoryProjection(st.history)
+		if cfg.dynamicWorkspaces {
+			projection, ok := st.history.(aetherchan.WorkspaceHistoryProjection)
+			if !ok {
+				return fmt.Errorf("dynamic workspace history projection is not workspace-aware")
+			}
+			client.SetWorkspaceHistoryProjection(projection)
+		} else {
+			client.SetHistoryProjection(st.history)
+		}
 	}
 	toolHost, err := aetherchan.NewClientToolHost(ctx, aetherchan.ClientToolHostConfig{
 		WorkspaceID:   effectiveWorkspace("", cfg.workspaceID),
@@ -107,7 +115,14 @@ func runTUIClient(cfg appConfig) error {
 		AgentCatalog:      st.agentCatalog,
 		DirectoryAccess:   toolHost,
 		ExecutionBindings: toolHost,
-		InitialThreadID:   cfg.thread,
-		WorkspaceRoot:     cfg.workspaceRoot,
+		WorkspaceResolver: func() tui.DirectoryWorkspaceResolver {
+			if cfg.dynamicWorkspaces {
+				return toolHost
+			}
+			return nil
+		}(),
+		InitialThreadID:    cfg.thread,
+		InitialWorkspaceID: cfg.workspaceID,
+		WorkspaceRoot:      cfg.workspaceRoot,
 	})
 }

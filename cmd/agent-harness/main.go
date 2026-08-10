@@ -13,11 +13,12 @@ import (
 	modelpkg "github.com/scitrera/agent-harness-go/pkg/model"
 	"github.com/scitrera/agent-harness-go/pkg/telemetry/otlpexport"
 	"github.com/scitrera/agent-harness-go/pkg/version"
+	workspacepkg "github.com/scitrera/agent-harness-go/pkg/workspace"
 )
 
 func main() {
 	workspace := flag.String("workspace", env("SAHARA_WORKING_DIRECTORY", "./workspace"), "workspace root")
-	workspaceMode := flag.String("workspace-mode", env("SAHARA_WORKSPACE_MODE", workspaceModeSingle), "workspace selection: single (legacy) or project (derive from cwd/Git)")
+	workspaceMode := flag.String("workspace-mode", env("SAHARA_WORKSPACE_MODE", workspaceModeSingle), "workspace selection: single (legacy) or project (derive from workspace root/Git)")
 	workspaceID := flag.String("workspace-id", os.Getenv("SAHARA_WORKSPACE_ID"), "pin the logical workspace ID (enables composite history keys)")
 	visibleWorkspaces := flag.String("visible-workspaces", os.Getenv("SAHARA_VISIBLE_WORKSPACES"), "comma-separated additional logical workspaces clients may address")
 	workspaceIndexDir := flag.String("workspace-index-dir", env("SAHARA_WORKSPACE_INDEX_DIR", defaultWorkspaceIndexDir()), "shared project path-to-workspace index directory")
@@ -80,7 +81,7 @@ func main() {
 		return
 	}
 	stateDir := env("SAHARA_STATE_DIR", filepath.Join(*workspace, ".agent-harness"))
-	workspaceResolution, err := resolveAppWorkspace(context.Background(), *workspaceMode, *workspaceID, *workspaceIndexDir, "")
+	workspaceResolution, err := resolveAppWorkspace(context.Background(), *workspaceMode, *workspaceID, *workspaceIndexDir, *workspace)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error: resolve workspace:", err)
 		os.Exit(2)
@@ -184,6 +185,8 @@ func main() {
 		workspaceRoot:     *workspace,
 		workspaceID:       workspaceResolution.WorkspaceID,
 		workspaceIndexDir: *workspaceIndexDir,
+		dynamicWorkspaces: workspaceResolution.Source == workspacepkg.SourceGitRoot ||
+			workspaceResolution.Source == workspacepkg.SourceDirectory,
 		visibleWorkspaces: parseVisibleWorkspaces(*visibleWorkspaces),
 		stateDir:          stateDir,
 		thread:            *thread,

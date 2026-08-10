@@ -41,6 +41,13 @@ func runTUI(cfg appConfig) error {
 		return fmt.Errorf("runtime: %w", err)
 	}
 	rt.SetCanceller(canceller)
+	var workspaceResolver tui.DirectoryWorkspaceResolver
+	if cfg.dynamicWorkspaces {
+		workspaceResolver, err = newDirectoryWorkspaceResolver(ctx, cfg.workspaceIndexDir, cfg.workspaceID, cfg.workspaceRoot)
+		if err != nil {
+			return fmt.Errorf("workspace resolver: %w", err)
+		}
+	}
 
 	done := make(chan struct{})
 	go func() {
@@ -56,19 +63,21 @@ func runTUI(cfg appConfig) error {
 		slog.String("thread", cfg.thread),
 	)
 	runErr := tui.Run(ctx, tui.Config{
-		Channel:         tc,
-		Store:           st.history,
-		Index:           st.threads,
-		Approvals:       broker,
-		Canceller:       canceller,
-		ModelStatus:     runner,
-		Commands:        runner,
-		TaskStore:       taskStore,
-		TeamStore:       teamStore,
-		AgentCatalog:    st.agentCatalog,
-		DirectoryAccess: workspace,
-		InitialThreadID: cfg.thread,
-		WorkspaceRoot:   cfg.workspaceRoot,
+		Channel:            tc,
+		Store:              st.history,
+		Index:              st.threads,
+		Approvals:          broker,
+		Canceller:          canceller,
+		ModelStatus:        runner,
+		Commands:           runner,
+		TaskStore:          taskStore,
+		TeamStore:          teamStore,
+		AgentCatalog:       st.agentCatalog,
+		DirectoryAccess:    workspace,
+		WorkspaceResolver:  workspaceResolver,
+		InitialThreadID:    cfg.thread,
+		InitialWorkspaceID: cfg.workspaceID,
+		WorkspaceRoot:      cfg.workspaceRoot,
 	})
 	stop()
 	select {

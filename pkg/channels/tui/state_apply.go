@@ -1,18 +1,27 @@
 package tui
 
 func (m *model) applySendResult(msg sendResultMsg) {
+	if !m.workspaceMatchesCurrent(msg.WorkspaceID) {
+		if msg.Err != nil {
+			delete(m.turns, msg.TaskID)
+		}
+		return
+	}
 	if msg.Err != nil {
 		delete(m.turns, msg.TaskID)
 		m.removeThinking(msg.TaskID)
 		m.addSystem("send failed: " + msg.Err.Error())
 		return
 	}
-	m.threads = m.index.List()
+	m.threads = m.listThreads()
 	m.status = m.activeTurnStatus()
 	m.refreshViewport()
 }
 
 func (m *model) applyHistoryLoaded(msg historyLoadedMsg) {
+	if !m.workspaceMatchesCurrent(msg.WorkspaceID) {
+		return
+	}
 	if msg.Err != nil {
 		m.addSystem("load history failed: " + msg.Err.Error())
 		return
@@ -20,13 +29,16 @@ func (m *model) applyHistoryLoaded(msg historyLoadedMsg) {
 	m.threadID = msg.ThreadID
 	m.rows = rowsFromHistory(msg.Messages)
 	m.renderedRows = map[string]renderedRowCache{}
-	m.threads = m.index.List()
+	m.threads = m.listThreads()
 	m.status = "thread " + msg.ThreadID
 	m.tailing = true
 	m.refreshViewportToBottom()
 }
 
 func (m *model) applyThreadCreated(msg threadCreatedMsg) {
+	if !m.workspaceMatchesCurrent(msg.WorkspaceID) {
+		return
+	}
 	if msg.Err != nil {
 		m.addSystem("create thread failed: " + msg.Err.Error())
 		return
@@ -34,18 +46,21 @@ func (m *model) applyThreadCreated(msg threadCreatedMsg) {
 	m.threadID = msg.Session.ID
 	m.rows = nil
 	m.renderedRows = map[string]renderedRowCache{}
-	m.threads = m.index.List()
+	m.threads = m.listThreads()
 	m.status = "thread " + msg.Session.ID
 	m.tailing = true
 	m.refreshViewportToBottom()
 }
 
 func (m *model) applyThreadDeleted(msg threadDeletedMsg) {
+	if !m.workspaceMatchesCurrent(msg.WorkspaceID) {
+		return
+	}
 	if msg.Err != nil {
 		m.addSystem("delete thread failed: " + msg.Err.Error())
 		return
 	}
-	m.threads = m.index.List()
+	m.threads = m.listThreads()
 	if m.threadID != msg.DeletedID {
 		m.addSystem("deleted " + msg.DeletedID)
 		return
@@ -66,16 +81,22 @@ func (m *model) applyThreadDeleted(msg threadDeletedMsg) {
 }
 
 func (m *model) applyThreadRenamed(msg threadRenamedMsg) {
+	if !m.workspaceMatchesCurrent(msg.WorkspaceID) {
+		return
+	}
 	if msg.Err != nil {
 		m.addSystem("rename thread failed: " + msg.Err.Error())
 		return
 	}
-	m.threads = m.index.List()
+	m.threads = m.listThreads()
 	m.addSystem("renamed " + msg.ThreadID)
 }
 
 func (m *model) applyClearThread(msg clearThreadMsg) {
-	delete(m.clearingThreads, msg.ThreadID)
+	delete(m.clearingThreads, workspaceKey(msg.WorkspaceID, msg.ThreadID))
+	if !m.workspaceMatchesCurrent(msg.WorkspaceID) {
+		return
+	}
 	if msg.Err != nil {
 		m.addSystem("clear failed: " + msg.Err.Error())
 		return

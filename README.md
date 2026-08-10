@@ -58,7 +58,7 @@ containerized agent worker, a host TUI, and a capability-aware multi-model
 | `--acp` | — | `false` | run as an ACP agent over stdio |
 | `--web` | — | `false` | run the localhost web UI |
 | `--no-browser` | — | `false` | don't auto-open a browser (web mode) |
-| `--workspace-mode` | `SAHARA_WORKSPACE_MODE` | `single` | `single` preserves the legacy layout; `project` derives a stable logical workspace from cwd/Git |
+| `--workspace-mode` | `SAHARA_WORKSPACE_MODE` | `single` | `single` preserves the legacy layout; `project` derives a stable logical workspace from the configured workspace root/Git and enables TUI project switching |
 | `--workspace-id` | `SAHARA_WORKSPACE_ID` | — | pin a logical workspace ID and enable composite workspace/thread state |
 | `--visible-workspaces` | `SAHARA_VISIBLE_WORKSPACES` | — | comma-separated additional logical workspaces clients may explicitly address |
 | `--workspace-index-dir` | `SAHARA_WORKSPACE_INDEX_DIR` | user config dir | shared canonical project-path to workspace-ID index used by project mode |
@@ -88,9 +88,14 @@ cd /path/to/project
 agent-harness --workspace-mode project --workspace .
 ```
 
-Project mode canonicalizes the current directory, prefers its Git worktree
+Project mode canonicalizes the configured workspace directory, prefers its Git worktree
 root, and persists a stable path-to-workspace assignment in the shared workspace
 index. Repositories with the same directory name receive distinct stable IDs.
+In the TUI, `/cd` into another project resolves that ID before changing state,
+refreshes only that workspace's thread registry, and loads only its composite
+workspace/thread history. Separate worktrees of one repository share the
+logical workspace and retain distinct execution views. A pinned
+`--workspace-id` intentionally disables automatic project switching.
 The logical workspace ID scopes transcripts, thread indexes, task/team state,
 model pins, and local runtime lanes. `--workspace` still selects the filesystem
 sandbox; it is deliberately separate from logical identity. Use
@@ -112,6 +117,10 @@ available it stores the durable view plus the client's current Git observation
 and authorizes dynamically discovered project workspaces. Without MemoryLayer,
 the configured default and `--visible-workspaces` policy remains authoritative.
 The ordinary in-process TUI/CLI/web/ACP modes do not require either service.
+The filesystem reference store provides the same workspace-isolated TUI thread
+discovery when MemoryLayer is absent. In project mode, an in-process TUI grants
+structured writes only after the user explicitly selects the external project;
+single mode retains the narrower read/inspect/shell external-directory grant.
 
 The OSS remote-tool policy is deliberately single-user and exact-window: the
 turn must originate from the `tool_host_id` named by its binding, and that host
@@ -333,7 +342,7 @@ TUI/CLI/web/ACP standalone paths therefore open neither dependency.
 
 The workspace (`--memorylayer-workspace`, defaulting to the resolved logical
 workspace or `default`) is created on first use if MemoryLayer does not have it.
-The OSS MemoryLayer adapter also implements the additive workspace-aware history
+The OSS MemoryLayer adapter also implements the workspace-aware history
 and thread-index interfaces: one process can address another visible workspace
 per operation, and identical thread IDs remain isolated by the composite
 workspace/thread key. The configured workspace remains the default for existing
@@ -456,10 +465,14 @@ conversation, and MemoryLayer extracts from it.
 In the TUI, type `@` followed by a path and use Tab/arrow keys to complete files
 or directories. Paths resolve from `/pwd`; use `/cd <path>` to change that
 virtual working directory without changing the process directory. An explicit
-`/cd` may leave the original workspace. In the in-process TUI, the selected
-directory remains an additional read/inspect/shell root while structured writes
-remain rooted in the original workspace. In an Aether-connected TUI, the client
-registers the containing project/worktree as a separate logical view; all
+`/cd` may leave the original workspace. In default single mode, an in-process
+TUI treats that directory as an additional read/inspect/shell root while
+structured writes remain rooted in the launch workspace. In project mode,
+`/cd` atomically selects the containing logical workspace, its thread/history
+partition, and an explicitly writable local project root; switching to an
+external project waits until active turns finish or are cancelled. In an
+Aether-connected TUI, the client registers the containing project/worktree as a
+separate logical view; all
 built-in workspace tools execute against that client-owned view, and no client
 absolute path is sent to or dereferenced by the worker. If the bound client
 disconnects, the tool call fails rather than silently falling back to the

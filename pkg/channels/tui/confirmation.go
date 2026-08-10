@@ -11,7 +11,7 @@ func (m *model) requestConfirmation(kind confirmationKind, threadID string) {
 	if kind == confirmationDeleteThread {
 		action = "delete"
 	}
-	m.confirmation = pendingConfirmation{Kind: kind, ThreadID: threadID}
+	m.confirmation = pendingConfirmation{Kind: kind, WorkspaceID: m.workspaceID, ThreadID: threadID}
 	m.selector.clear()
 	m.showDrawer(
 		drawerConfirmation,
@@ -41,11 +41,11 @@ func (m model) confirmPending() (tea.Model, tea.Cmd) {
 		if m.clearingThreads == nil {
 			m.clearingThreads = map[string]struct{}{}
 		}
-		m.clearingThreads[pending.ThreadID] = struct{}{}
+		m.clearingThreads[workspaceKey(pending.WorkspaceID, pending.ThreadID)] = struct{}{}
 		m.status = "clearing " + shortID(pending.ThreadID)
-		return m, clearThreadCmd(m.ctx, m.store, pending.ThreadID)
+		return m, clearThreadCmd(m.ctx, m.store, m.initialWorkspaceID, pending.WorkspaceID, pending.ThreadID)
 	case confirmationDeleteThread:
-		return m, deleteThreadCmd(m.ctx, m.index, m.store, pending.ThreadID, m.nextThreadAfterDelete(pending.ThreadID))
+		return m, deleteThreadCmd(m.ctx, m.index, m.store, m.initialWorkspaceID, pending.WorkspaceID, pending.ThreadID, m.nextThreadAfterDelete(pending.ThreadID))
 	default:
 		return m, nil
 	}

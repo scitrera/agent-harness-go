@@ -5,11 +5,8 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-	spec "github.com/scitrera/ecosystem-messaging-spec/go"
-
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 	"github.com/scitrera/agent-harness-go/pkg/threadindex"
-	"github.com/scitrera/agent-harness-go/pkg/tools"
 )
 
 const historyScrollLines = 3
@@ -206,12 +203,17 @@ func (m *model) refreshSelectionSurface() {
 }
 
 func (m model) sendCurrent() (tea.Model, tea.Cmd) {
+	if m.workspaceSwitching {
+		m.addSystem("workspace switch in progress")
+		return m, nil
+	}
 	text := strings.TrimSpace(m.composer.Value())
 	if text == "" && len(m.attachments) == 0 {
 		return m, nil
 	}
-	if _, clearing := m.clearingThreads[m.threadID]; clearing {
-		m.deferredSendFor = m.threadID
+	threadKey := workspaceKey(m.workspaceID, m.threadID)
+	if _, clearing := m.clearingThreads[threadKey]; clearing {
+		m.deferredSendFor = threadKey
 		m.status = "waiting for clear"
 		m.refreshViewport()
 		return m, nil
@@ -243,29 +245,18 @@ func (m model) sendCurrent() (tea.Model, tea.Cmd) {
 		m.addSystem("could not create message: " + err.Error())
 		return m, nil
 	}
-	addr := protocol.MessageAddress{ThreadID: m.threadID, TaskID: taskID}
+	addr := protocol.MessageAddress{WorkspaceID: m.workspaceID, ThreadID: m.threadID, TaskID: taskID}
 	message := protocol.ChatMessage{ID: "user-" + taskID, Role: protocol.RoleUser, Addr: addr, Content: content}
-	if m.executionBindings != nil {
-		binding, bindingErr := m.executionBindings.ExecutionBindingForDirectory(m.ctx, m.currentWorkingDirectory())
-		if bindingErr != nil {
-			m.addSystem("could not bind working directory: " + bindingErr.Error())
-			return m, nil
-		}
-		addr.WorkspaceID = binding.WorkspaceID
-		message.Addr.WorkspaceID = binding.WorkspaceID
-		if bindingErr := spec.PutExecutionBinding(&message, binding); bindingErr != nil {
-			m.addSystem("could not encode working directory binding: " + bindingErr.Error())
-			return m, nil
-		}
-	} else if cwd := m.currentWorkingDirectory(); cwd != "" && cwd != m.workspaceRoot {
-		tools.StampWorkingDirectory(&message, cwd)
+	if err := m.scopeMessage(&addr, &message); err != nil {
+		m.addSystem("could not scope message: " + err.Error())
+		return m, nil
 	}
 	m.lastTaskID = taskID
 	m.markTurn(taskID, m.threadID, "queued")
 	m.rows = append(m.rows, chatRow{Kind: rowUser, ID: message.ID, TaskID: taskID, Text: messageText(message)})
 	m.addThinking(taskID)
 	m.refreshViewportToBottom()
-	return m, sendMessageCmd(m.ctx, m.channel, m.index, addr, message, displayText, referencedImages)
+	return m, sendMessageCmd(m.ctx, m.channel, m.index, m.initialWorkspaceID, m.workspaceID, addr, message, displayText, referencedImages)
 }
 
 func (m *model) takeMessageContent(text string) ([]protocol.ContentPart, error) {
