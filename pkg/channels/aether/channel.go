@@ -16,6 +16,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"sync"
 
 	sdk "github.com/scitrera/aether/sdk/go/aether"
@@ -246,6 +247,13 @@ func (c *Channel) SetSessionService(service SessionService) {
 
 // Topic reports the agent topic this channel receives turns on.
 func (c *Channel) Topic() string { return c.client.Topic() }
+
+// ProxyHTTP routes a request over this channel's existing Aether connection.
+// It intentionally exposes only the narrow SDK surface required by service
+// transports such as MemoryLayer; the channel still owns the connection.
+func (c *Channel) ProxyHTTP(ctx context.Context, target string, req *http.Request, opts ...sdk.ProxyOpt) (*http.Response, error) {
+	return c.client.ProxyHTTP(ctx, target, req, opts...)
+}
 
 // Start connects and runs the SDK receive loop in the background. The loop exits
 // when ctx is cancelled or the connection drops.

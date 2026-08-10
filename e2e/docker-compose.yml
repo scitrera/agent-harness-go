@@ -4,7 +4,7 @@
 #   ./build.sh          # build the images (see IMAGES below)
 #   cp .env.example .env && $EDITOR .env   # point at your LLM endpoint
 #   docker compose up -d
-#   agent-harness --tui --aether 127.0.0.1:50051 --aether-specifier e2e --memorylayer http://127.0.0.1:61001
+#   agent-harness --tui --aether 127.0.0.1:50051 --aether-specifier e2e
 #
 # The terminal UI runs on the HOST and attaches over Aether — that is the point
 # of the split, and it means the UI needs no container of its own. Several can
@@ -91,11 +91,21 @@ services:
       MEMORYLAYER_RATE_LIMIT_SERVICE: noop
       MEMORYLAYER_METRICS_SERVICE: noop
       MEMORYLAYER_OTEL_ENABLED: "false"
+      # Register the canonical REST API as an Aether service. Clients that are
+      # already connected to this gateway discover the bare load-balanced topic
+      # sv::memorylayer and need no separate HTTP address.
+      MEMORYLAYER_AETHER_SERVICE_CONNECTION: aether-service
+      AETHER_GATEWAY_ADDR: aether:50051
+      AETHER_WORKSPACE: ${AETHER_WORKSPACE:-default}
+      AETHER_SERVICE_SPECIFIER: e2e
+      AETHER_AUTH: none
     volumes:
       - memorylayer-data:/data
     depends_on:
       init-perms:
         condition: service_completed_successfully
+      aether:
+        condition: service_healthy
     ports:
       - "127.0.0.1:61001:61001"   # the host UI reads history from here too
     healthcheck:
@@ -114,7 +124,6 @@ services:
       - --aether=aether:50051
       - --aether-specifier=${AETHER_SPECIFIER:-e2e}
       - --aether-task-message-lanes=${AETHER_TASK_MESSAGE_LANES:-false}
-      - --memorylayer=http://memorylayer:61001
       - --memorylayer-workspace=${MEMORYLAYER_WORKSPACE:-default}
       - --workspace=/workspace
     environment:

@@ -14,7 +14,7 @@ func aetherSubagentTaskBackend(ch *aetherchan.Channel, cfg appConfig) (subagent.
 	if target == "" {
 		return ch.SubagentTaskBackend(0)
 	}
-	if strings.TrimSpace(cfg.memorylayerURL) == "" {
+	if !memoryLayerConfigured(cfg.memorylayerMode) {
 		return nil, fmt.Errorf("external subagents require MemoryLayer shared history")
 	}
 	if target == ch.Topic() {
@@ -27,7 +27,7 @@ func enableAetherSubagentExecutor(ch *aetherchan.Channel, runner *turn.Runner, c
 	if !cfg.subagentExecutor {
 		return nil
 	}
-	if strings.TrimSpace(cfg.memorylayerURL) == "" {
+	if !memoryLayerConfigured(cfg.memorylayerMode) {
 		return fmt.Errorf("external subagents require MemoryLayer shared history")
 	}
 	_, err := ch.EnableSubagentExecutor(aetherchan.SubagentExecutorConfig{

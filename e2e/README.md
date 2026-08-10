@@ -147,11 +147,15 @@ In a second terminal, from the OSS repository root (`oss/`):
   --tui \
   --workspace ./e2e/workspace \
   --aether 127.0.0.1:50051 \
-  --aether-specifier e2e \
-  --memorylayer http://127.0.0.1:61001
+  --aether-specifier e2e
 ```
 
 The host process is only the client; the containerized worker performs turns.
+MemoryLayer registers its REST API at the canonical Aether service topic
+`sv::memorylayer`; the worker and host client auto-detect it over their existing
+Aether connections. No separate MemoryLayer address is required. An explicit
+`--memorylayer http://...` remains the direct-HTTP override, and
+`--memorylayer-mode off` keeps history local even when Aether is present.
 The specifier must match `AETHER_SPECIFIER` in `.env` (Compose defaults it to
 `e2e`); otherwise the client targets a different Aether agent and waits for a
 worker that is not running. The TUI's startup target should end in `::e2e`.
@@ -189,6 +193,8 @@ when testing provider separation.
 - the OSS worker and host client communicate through Aether rather than an
   in-process channel;
 - transcripts and recall use MemoryLayer, surviving an agent restart;
+- both clients discover MemoryLayer through `sv::memorylayer` over Aether rather
+  than requiring a separately configured HTTP endpoint;
 - session state is shared across attached clients;
 - the OSS executable loads `config/models.yaml`, supports `/model` pins, routes
   images by declared capability, and can resolve a provider per model;
@@ -254,10 +260,11 @@ both providers precisely so this switch stays possible.
 
 ## Security
 
-Dev mode: the gateway accepts unauthenticated connections and MemoryLayer runs
-with auth disabled. That is what makes the stack zero-setup — no token minting
-before the first turn — and exactly why every port is bound to `127.0.0.1`. This
-is a development stack, not a deployment template.
+Dev mode: the gateway accepts unauthenticated connections, MemoryLayer runs with
+REST auth disabled, and its Aether service connection uses `AETHER_AUTH=none`.
+That is what makes the stack zero-setup — no token minting before the first turn
+— and exactly why every port is bound to `127.0.0.1`. This is a development
+stack, not a deployment template.
 
 ## Reset and troubleshooting
 

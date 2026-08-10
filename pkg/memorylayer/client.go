@@ -2,11 +2,10 @@
 // instead of on local disk, so every process that shares a MemoryLayer sees the
 // same conversation — the agent worker and any number of attached frontends.
 //
-// It speaks MemoryLayer's REST API directly rather than through the Go SDK:
-// that SDK is not published as a Go module, and depending on it would mean an
-// absolute-path replace directive in this repo. The messaging spec anticipates
-// exactly this — its MemoryLayer codec produces and consumes generic maps and
-// carries no SDK dependency — so the conversion stays lossless either way.
+// Its chat/catalog codec stays local because the ecosystem messaging spec
+// already owns the lossless generic-map conversion. Request delivery is
+// pluggable: direct HTTP for standalone deployments, or a MemoryLayer SDK
+// Transport for front doors such as Aether proxy_http.
 package memorylayer
 
 import (
@@ -21,6 +20,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	memorylayersdk "github.com/scitrera/memorylayer/memorylayer-sdk-go"
 )
 
 const (
@@ -40,7 +41,11 @@ const (
 // Config configures the MemoryLayer-backed store.
 type Config struct {
 	// BaseURL is the MemoryLayer server root, e.g. http://127.0.0.1:61001.
+	// It is optional when Transport is set.
 	BaseURL string
+	// Transport routes requests through a non-HTTP front door such as Aether's
+	// proxy_http service transport. It takes precedence over BaseURL.
+	Transport memorylayersdk.Transport
 	// APIKey is sent as a bearer token when set. A local OSS MemoryLayer needs
 	// none.
 	APIKey string
@@ -56,6 +61,7 @@ type Config struct {
 
 type client struct {
 	baseURL   *url.URL
+	transport memorylayersdk.Transport
 	apiKey    string
 	workspace string
 	ownership string
@@ -64,12 +70,16 @@ type client struct {
 }
 
 func newClient(cfg Config) (*client, error) {
-	if strings.TrimSpace(cfg.BaseURL) == "" {
-		return nil, fmt.Errorf("memorylayer: base url required")
-	}
-	parsed, err := url.ParseRequestURI(cfg.BaseURL)
-	if err != nil {
-		return nil, fmt.Errorf("memorylayer: base url: %w", err)
+	var parsed *url.URL
+	if cfg.Transport == nil {
+		if strings.TrimSpace(cfg.BaseURL) == "" {
+			return nil, fmt.Errorf("memorylayer: base url or transport required")
+		}
+		var err error
+		parsed, err = url.ParseRequestURI(cfg.BaseURL)
+		if err != nil {
+			return nil, fmt.Errorf("memorylayer: base url: %w", err)
+		}
 	}
 	httpClient := cfg.HTTPClient
 	if httpClient == nil {
@@ -85,6 +95,7 @@ func newClient(cfg Config) (*client, error) {
 	}
 	return &client{
 		baseURL:   parsed,
+		transport: cfg.Transport,
 		apiKey:    cfg.APIKey,
 		workspace: cfg.Workspace,
 		ownership: ownership,
@@ -95,6 +106,35 @@ func newClient(cfg Config) (*client, error) {
 
 // do issues a request and decodes a JSON response into out (nil to discard).
 func (c *client) do(ctx context.Context, method, path string, query url.Values, body any, out any) error {
+	var encoded []byte
+	if body != nil {
+		var err error
+		encoded, err = json.Marshal(body)
+		if err != nil {
+			return fmt.Errorf("memorylayer: encode %s: %w", path, err)
+		}
+	}
+	if c.transport != nil {
+		headers := make(http.Header)
+		if body != nil {
+			headers.Set("content-type", "application/json")
+		}
+		if c.apiKey != "" {
+			headers.Set("authorization", "Bearer "+c.apiKey)
+		}
+		response, err := c.transport.RoundTrip(ctx, &memorylayersdk.Request{
+			Method: method,
+			Path:   strings.TrimPrefix(path, "/v1"),
+			Query:  query,
+			Header: headers,
+			Body:   encoded,
+		})
+		if err != nil {
+			return fmt.Errorf("memorylayer: %s %s: %w", method, path, err)
+		}
+		return decodeResponse(method, path, response.StatusCode, response.Body, out)
+	}
+
 	endpoint := *c.baseURL
 	endpoint.Path = strings.TrimRight(endpoint.Path, "/") + path
 	if query != nil {
@@ -102,10 +142,6 @@ func (c *client) do(ctx context.Context, method, path string, query url.Values, 
 	}
 	var reader io.Reader
 	if body != nil {
-		encoded, err := json.Marshal(body)
-		if err != nil {
-			return fmt.Errorf("memorylayer: encode %s: %w", path, err)
-		}
 		reader = bytes.NewReader(encoded)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, endpoint.String(), reader)
@@ -123,18 +159,28 @@ func (c *client) do(ctx context.Context, method, path string, query url.Values, 
 		return fmt.Errorf("memorylayer: %s %s: %w", method, path, err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusNotFound {
+	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
+	if err != nil {
+		return fmt.Errorf("memorylayer: read %s: %w", path, err)
+	}
+	return decodeResponse(method, path, resp.StatusCode, responseBody, out)
+}
+
+func decodeResponse(method, path string, statusCode int, body []byte, out any) error {
+	if statusCode == http.StatusNotFound {
 		return errNotFound
 	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		detail, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("memorylayer: %s %s: status %d: %s", method, path, resp.StatusCode, strings.TrimSpace(string(detail)))
+	if statusCode < 200 || statusCode >= 300 {
+		detail := body
+		if len(detail) > 4096 {
+			detail = detail[:4096]
+		}
+		return fmt.Errorf("memorylayer: %s %s: status %d: %s", method, path, statusCode, strings.TrimSpace(string(detail)))
 	}
-	if out == nil {
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
+	if out == nil || len(body) == 0 {
 		return nil
 	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<20)).Decode(out); err != nil {
+	if err := json.Unmarshal(body, out); err != nil {
 		return fmt.Errorf("memorylayer: decode %s: %w", path, err)
 	}
 	return nil

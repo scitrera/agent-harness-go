@@ -63,6 +63,11 @@ func runAetherStandalone(cfg appConfig) error {
 	if err != nil {
 		return err
 	}
+	if err := worker.Start(ctx); err != nil {
+		return err
+	}
+	defer func() { _ = worker.Close() }()
+	cfg = withMemoryLayerAetherTransport(cfg, worker)
 	st, err := openStores(ctx, cfg)
 	if err != nil {
 		return err
@@ -117,10 +122,6 @@ func runAetherStandalone(cfg appConfig) error {
 		return fmt.Errorf("runtime: %w", err)
 	}
 	rt.SetCanceller(canceller)
-	if err := worker.Start(ctx); err != nil {
-		return err
-	}
-	defer func() { _ = worker.Close() }()
 	if err := worker.ReconcileGoalContinuations(ctx); err != nil {
 		return fmt.Errorf("goal continuation recovery: %w", err)
 	}

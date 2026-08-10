@@ -40,19 +40,23 @@ func NewRefinementResourceEditor(cfg Config, editorOptions ...RefinementResource
 			option(&editorConfig)
 		}
 	}
+	transport := editorConfig.transport
+	if transport == nil {
+		transport = cfg.Transport
+	}
 	opts := []memorylayersdk.Option{
 		memorylayersdk.WithAPIKey(cfg.APIKey),
 		memorylayersdk.WithWorkspaceID(cfg.Workspace),
 	}
-	if editorConfig.transport != nil {
-		opts = append(opts, memorylayersdk.WithTransport(editorConfig.transport))
+	if transport != nil {
+		opts = append(opts, memorylayersdk.WithTransport(transport))
 	} else {
 		if cfg.BaseURL == "" {
 			return nil, fmt.Errorf("memorylayer: refinement resource base url or transport required")
 		}
 		opts = append(opts, memorylayersdk.WithBaseURL(cfg.BaseURL))
 	}
-	if cfg.HTTPClient != nil && editorConfig.transport == nil {
+	if cfg.HTTPClient != nil && transport == nil {
 		opts = append(opts, memorylayersdk.WithHTTPClient(cfg.HTTPClient))
 	}
 	client, err := memorylayersdk.NewClient(opts...)

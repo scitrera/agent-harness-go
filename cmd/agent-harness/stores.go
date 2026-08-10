@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/scitrera/agent-harness-go/pkg/casblob"
@@ -60,7 +61,8 @@ type stores struct {
 	turns         turnjournal.Store
 	// remote reports whether transcripts live outside this process, which is
 	// what makes them visible to other clients.
-	remote bool
+	remote         bool
+	historyBackend string
 }
 
 // withCASLifecycle replaces the local single-writer lifecycle projections with
@@ -233,9 +235,9 @@ func deleteAddressHistory(ctx context.Context, history historyStore, addr protoc
 }
 
 // historyLabel describes where transcripts live, for the startup banner.
-func historyLabel(cfg appConfig) string {
-	if cfg.memorylayerURL != "" {
-		return "memorylayer " + cfg.memorylayerURL
+func historyLabel(st stores) string {
+	if st.historyBackend != "" {
+		return st.historyBackend
 	}
 	return "local files"
 }
@@ -244,6 +246,28 @@ func historyLabel(cfg appConfig) string {
 // when configured, otherwise local files.
 func openStores(ctx context.Context, cfg appConfig) (stores, error) {
 	files := store.NewFileStore(cfg.workspaceRoot, cfg.stateDir)
+	var ml *memorylayer.Store
+	if memoryLayerConfigured(cfg.memorylayerMode) {
+		var err error
+		ml, err = memorylayer.New(memoryLayerClientConfig(cfg))
+		if err != nil {
+			return stores{}, err
+		}
+		// Refresh doubles as the auto-discovery probe and populates the thread
+		// list the UI renders from cache. Only proven service absence may fall
+		// back; every other transport/protocol/server error remains fatal.
+		if err := ml.Refresh(ctx); err != nil {
+			if cfg.memorylayerMode == memoryLayerModeAuto && !cfg.memorylayerRequired && isAbsentMemoryLayerService(err) {
+				slog.InfoContext(ctx, "MemoryLayer service not present on Aether; using local history",
+					slog.String("target", cfg.memorylayerTarget))
+				ml = nil
+				cfg.memorylayerMode = memoryLayerModeOff
+				cfg.memorylayerTransport = nil
+			} else {
+				return stores{}, fmt.Errorf("memorylayer: load threads: %w", err)
+			}
+		}
+	}
 	promptNoteProvider, err := openPromptNoteProvider(cfg)
 	if err != nil {
 		return stores{}, err
@@ -272,84 +296,66 @@ func openStores(ctx context.Context, cfg appConfig) (stores, error) {
 	if err != nil {
 		return stores{}, err
 	}
-	if cfg.memorylayerURL == "" {
+	if ml == nil {
 		index, err := threadindex.NewIndex(workspaceStateDir(cfg), time.Now)
 		if err != nil {
 			return stores{}, fmt.Errorf("threads: %w", err)
 		}
 		return stores{
-			history:       bindHistory(files, cfg.workspaceID),
-			threads:       index,
-			files:         files,
-			promptNotes:   promptNoteProvider,
-			agentCatalog:  agentCatalog,
-			refinements:   refinements,
-			subagents:     subagents,
-			goals:         goals,
-			continuations: continuations,
-			turns:         turns,
+			history:        bindHistory(files, cfg.workspaceID),
+			threads:        index,
+			files:          files,
+			promptNotes:    promptNoteProvider,
+			agentCatalog:   agentCatalog,
+			refinements:    refinements,
+			subagents:      subagents,
+			goals:          goals,
+			continuations:  continuations,
+			turns:          turns,
+			historyBackend: "local files",
 		}, nil
 	}
 
-	ml, err := memorylayer.New(memorylayer.Config{
-		BaseURL:   cfg.memorylayerURL,
-		APIKey:    cfg.memorylayerKey,
-		Workspace: cfg.memorylayerWorkspace,
-	})
+	recaller, err := memorylayer.NewRecaller(memoryLayerClientConfig(cfg))
 	if err != nil {
 		return stores{}, err
 	}
-	// Populate the thread list once up front: List() is served from cache
-	// because the UI calls it while rendering.
-	if err := ml.Refresh(ctx); err != nil {
-		return stores{}, fmt.Errorf("memorylayer: load threads: %w", err)
-	}
-	recaller, err := memorylayer.NewRecaller(memorylayer.Config{
-		BaseURL:   cfg.memorylayerURL,
-		APIKey:    cfg.memorylayerKey,
-		Workspace: cfg.memorylayerWorkspace,
-	})
-	if err != nil {
-		return stores{}, err
-	}
-	catalogProvider, err := memorylayer.NewCatalogProvider(memorylayer.Config{
-		BaseURL:   cfg.memorylayerURL,
-		APIKey:    cfg.memorylayerKey,
-		Workspace: cfg.memorylayerWorkspace,
-	})
+	catalogProvider, err := memorylayer.NewCatalogProvider(memoryLayerClientConfig(cfg))
 	if err != nil {
 		return stores{}, err
 	}
 	return stores{
-		history:       bindHistoryBackend(ml, cfg.workspaceID, cfg.memorylayerWorkspace),
-		threads:       ml,
-		files:         files,
-		memory:        bindMemory(recaller, cfg.workspaceID, cfg.memorylayerWorkspace),
-		catalogs:      catalog.BindWorkspaceProvider(catalogProvider, cfg.workspaceID, cfg.memorylayerWorkspace),
-		promptNotes:   promptNoteProvider,
-		agentCatalog:  agentCatalog,
-		refinements:   refinements,
-		subagents:     subagents,
-		goals:         goals,
-		continuations: continuations,
-		turns:         turns,
-		remote:        true,
+		history:        bindHistoryBackend(ml, cfg.workspaceID, cfg.memorylayerWorkspace),
+		threads:        ml,
+		files:          files,
+		memory:         bindMemory(recaller, cfg.workspaceID, cfg.memorylayerWorkspace),
+		catalogs:       catalog.BindWorkspaceProvider(catalogProvider, cfg.workspaceID, cfg.memorylayerWorkspace),
+		promptNotes:    promptNoteProvider,
+		agentCatalog:   agentCatalog,
+		refinements:    refinements,
+		subagents:      subagents,
+		goals:          goals,
+		continuations:  continuations,
+		turns:          turns,
+		remote:         true,
+		historyBackend: "memorylayer " + memoryLayerLocation(cfg),
 	}, nil
 }
 
 func openRefinementService(cfg appConfig) (*refinement.Service, error) {
-	authority, err := normalizeRefinementAuthority(cfg.refinementAuthority, cfg.memorylayerURL)
+	hasMemoryLayer := memoryLayerConfigured(cfg.memorylayerMode)
+	authority, err := normalizeRefinementAuthority(cfg.refinementAuthority, hasMemoryLayer)
 	if err != nil {
 		return nil, err
 	}
 	if authority == refinementAuthorityOff {
 		return nil, nil
 	}
-	promptAuthority, err := normalizePromptNotesAuthority(cfg.promptNotesAuthority, cfg.memorylayerURL)
+	promptAuthority, err := normalizePromptNotesAuthority(cfg.promptNotesAuthority, hasMemoryLayer)
 	if err != nil {
 		return nil, err
 	}
-	agentAuthority, err := normalizeAgentSpecificationsAuthority(cfg.agentSpecificationsAuthority, cfg.memorylayerURL)
+	agentAuthority, err := normalizeAgentSpecificationsAuthority(cfg.agentSpecificationsAuthority, hasMemoryLayer)
 	if err != nil {
 		return nil, err
 	}
@@ -358,9 +364,7 @@ func openRefinementService(cfg appConfig) (*refinement.Service, error) {
 	case refinementAuthorityLocal:
 		audit, err = refinement.NewFileStore(cfg.stateDir, time.Now)
 	case refinementAuthorityMemoryLayer:
-		audit, err = memorylayer.NewRefinementRecordStore(memorylayer.Config{
-			BaseURL: cfg.memorylayerURL, APIKey: cfg.memorylayerKey, Workspace: cfg.memorylayerWorkspace,
-		})
+		audit, err = memorylayer.NewRefinementRecordStore(memoryLayerClientConfig(cfg))
 		if err == nil {
 			audit = refinement.BindStore(audit, cfg.workspaceID, cfg.memorylayerWorkspace)
 		}
@@ -377,9 +381,7 @@ func openRefinementService(cfg appConfig) (*refinement.Service, error) {
 		editors[refinement.ResourcePromptNote] = localEditor
 	}
 	if promptAuthority == promptNotesAuthorityMemoryLayer || agentAuthority == agentSpecificationsAuthorityMemoryLayer {
-		editor, editorErr := memorylayer.NewRefinementResourceEditor(memorylayer.Config{
-			BaseURL: cfg.memorylayerURL, APIKey: cfg.memorylayerKey, Workspace: cfg.memorylayerWorkspace,
-		})
+		editor, editorErr := memorylayer.NewRefinementResourceEditor(memoryLayerClientConfig(cfg))
 		if editorErr != nil {
 			return nil, editorErr
 		}
@@ -398,7 +400,7 @@ func openRefinementService(cfg appConfig) (*refinement.Service, error) {
 }
 
 func openAgentSpecificationCatalog(cfg appConfig) (subagent.Catalog, error) {
-	authority, err := normalizeAgentSpecificationsAuthority(cfg.agentSpecificationsAuthority, cfg.memorylayerURL)
+	authority, err := normalizeAgentSpecificationsAuthority(cfg.agentSpecificationsAuthority, memoryLayerConfigured(cfg.memorylayerMode))
 	if err != nil {
 		return nil, err
 	}
@@ -408,9 +410,7 @@ func openAgentSpecificationCatalog(cfg appConfig) (subagent.Catalog, error) {
 	case agentSpecificationsAuthorityLocal:
 		return agentCatalogForWorkspace(cfg.workspaceRoot)
 	case agentSpecificationsAuthorityMemoryLayer:
-		provider, err := memorylayer.NewAgentSpecificationProvider(memorylayer.Config{
-			BaseURL: cfg.memorylayerURL, APIKey: cfg.memorylayerKey, Workspace: cfg.memorylayerWorkspace,
-		})
+		provider, err := memorylayer.NewAgentSpecificationProvider(memoryLayerClientConfig(cfg))
 		if err != nil {
 			return nil, err
 		}
@@ -421,7 +421,7 @@ func openAgentSpecificationCatalog(cfg appConfig) (subagent.Catalog, error) {
 }
 
 func openPromptNoteProvider(cfg appConfig) (promptnotes.WorkspaceProvider, error) {
-	authority, err := normalizePromptNotesAuthority(cfg.promptNotesAuthority, cfg.memorylayerURL)
+	authority, err := normalizePromptNotesAuthority(cfg.promptNotesAuthority, memoryLayerConfigured(cfg.memorylayerMode))
 	if err != nil {
 		return nil, err
 	}
@@ -431,9 +431,7 @@ func openPromptNoteProvider(cfg appConfig) (promptnotes.WorkspaceProvider, error
 	case promptNotesAuthorityLocal:
 		return promptnotes.NewFileProvider(cfg.stateDir)
 	case promptNotesAuthorityMemoryLayer:
-		provider, err := memorylayer.NewPromptNoteProvider(memorylayer.Config{
-			BaseURL: cfg.memorylayerURL, APIKey: cfg.memorylayerKey, Workspace: cfg.memorylayerWorkspace,
-		})
+		provider, err := memorylayer.NewPromptNoteProvider(memoryLayerClientConfig(cfg))
 		if err != nil {
 			return nil, err
 		}

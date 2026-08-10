@@ -40,16 +40,18 @@ func main() {
 	aetherTLS := flag.Bool("aether-tls", false, "use TLS for the Aether connection")
 	aetherTLSInsecure := flag.Bool("aether-tls-insecure", false, "skip Aether TLS certificate verification (testing only)")
 	aetherTaskMessageLanes := flag.Bool("aether-task-message-lanes", false, "route real Aether task turns over their subscribed per-task message lanes")
-	subagentTarget := flag.String("subagent-target", os.Getenv("SAHARA_SUBAGENT_TARGET"), "execute spawned subagents on this full Aether agent topic (requires --memorylayer)")
-	subagentExecutor := flag.Bool("subagent-executor", false, "accept targeted agent-harness subagent tasks on this Aether worker (requires --memorylayer)")
+	subagentTarget := flag.String("subagent-target", os.Getenv("SAHARA_SUBAGENT_TARGET"), "execute spawned subagents on this full Aether agent topic (requires MemoryLayer)")
+	subagentExecutor := flag.Bool("subagent-executor", false, "accept targeted agent-harness subagent tasks on this Aether worker (requires MemoryLayer)")
 	subagentExecutorConcurrency := flag.Int("subagent-executor-concurrency", 4, "maximum concurrently assigned external subagents")
-	memorylayerURL := flag.String("memorylayer", os.Getenv("MEMORYLAYER_BASE_URL"), "MemoryLayer server URL; stores threads + transcripts there instead of on local disk")
+	memorylayerMode := flag.String("memorylayer-mode", env("MEMORYLAYER_MODE", memoryLayerModeAuto), "MemoryLayer routing: auto, off, http, or aether")
+	memorylayerURL := flag.String("memorylayer", os.Getenv("MEMORYLAYER_BASE_URL"), "explicit MemoryLayer HTTP URL (overrides auto Aether discovery)")
+	memorylayerTarget := flag.String("memorylayer-target", env("MEMORYLAYER_TARGET_TOPIC", defaultMemoryLayerTarget), "MemoryLayer Aether service topic")
 	memorylayerWorkspace := flag.String("memorylayer-workspace", os.Getenv("MEMORYLAYER_WORKSPACE"), "MemoryLayer workspace (defaults to the resolved logical workspace)")
 	promptNotesAuthority := flag.String("prompt-notes-authority", env("SAHARA_PROMPT_NOTES_AUTHORITY", promptNotesAuthorityLocal), "prompt-note authority: off, local, or memorylayer (no fallback or dual write)")
 	agentSpecificationsAuthority := flag.String("agent-specifications-authority", env("SAHARA_AGENT_SPECIFICATIONS_AUTHORITY", agentSpecificationsAuthorityLocal), "agent-specification authority: off, local, or memorylayer (no fallback or dual write)")
 	refinementAuthority := flag.String("refinement-authority", env("SAHARA_REFINEMENT_AUTHORITY", refinementAuthorityLocal), "refinement proposal/audit authority: off, local, or memorylayer (no fallback or dual write)")
 	refinementSessionAutoApply := flag.Bool("refinement-session-auto-apply", strings.EqualFold(strings.TrimSpace(os.Getenv("SAHARA_REFINEMENT_SESSION_AUTO_APPLY")), "true"), "allow low-risk session-only refinements to apply without interactive approval")
-	memoryRecall := flag.Bool("memory-recall", true, "inject MemoryLayer memories relevant to each message (requires --memorylayer)")
+	memoryRecall := flag.Bool("memory-recall", true, "inject MemoryLayer memories relevant to each message when available")
 	memoryRecallLimit := flag.Int("memory-recall-limit", 5, "how many recalled memories to inject")
 	goalMaxContinuations := flag.Uint("goal-max-continuations", 3, "maximum automatic follow-up turns per durable goal; 0 disables automatic continuation")
 	addr := flag.String("addr", env("SAHARA_WEB_ADDR", "127.0.0.1:8787"), "web UI listen address (NO auth - localhost only)")
@@ -102,21 +104,29 @@ func main() {
 		fmt.Fprintf(os.Stderr, "error: --%s needs an Aether gateway: set --aether or AETHER_ADDR\n", selectedMode)
 		os.Exit(2)
 	}
-	if err := validateExternalSubagentConfig(selectedMode, *subagentTarget, *subagentExecutor, *memorylayerURL); err != nil {
-		fmt.Fprintln(os.Stderr, "error:", err)
-		os.Exit(2)
-	}
-	normalizedPromptNotesAuthority, err := normalizePromptNotesAuthority(*promptNotesAuthority, *memorylayerURL)
+	normalizedMemoryLayerMode, err := normalizeMemoryLayerMode(
+		*memorylayerMode, *memorylayerURL, *memorylayerTarget, selectedMode.usesAether(*aetherAddr),
+	)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(2)
 	}
-	normalizedAgentSpecificationsAuthority, err := normalizeAgentSpecificationsAuthority(*agentSpecificationsAuthority, *memorylayerURL)
+	hasMemoryLayer := memoryLayerConfigured(normalizedMemoryLayerMode)
+	if err := validateExternalSubagentConfig(selectedMode, *subagentTarget, *subagentExecutor, hasMemoryLayer); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(2)
+	}
+	normalizedPromptNotesAuthority, err := normalizePromptNotesAuthority(*promptNotesAuthority, hasMemoryLayer)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(2)
 	}
-	normalizedRefinementAuthority, err := normalizeRefinementAuthority(*refinementAuthority, *memorylayerURL)
+	normalizedAgentSpecificationsAuthority, err := normalizeAgentSpecificationsAuthority(*agentSpecificationsAuthority, hasMemoryLayer)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(2)
+	}
+	normalizedRefinementAuthority, err := normalizeRefinementAuthority(*refinementAuthority, hasMemoryLayer)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(2)
@@ -129,6 +139,11 @@ func main() {
 		fmt.Fprintln(os.Stderr, "error: --goal-max-continuations is too large")
 		os.Exit(2)
 	}
+	requiresMemoryLayer := normalizedMemoryLayerMode == memoryLayerModeAether ||
+		strings.TrimSpace(*subagentTarget) != "" || *subagentExecutor ||
+		normalizedPromptNotesAuthority == promptNotesAuthorityMemoryLayer ||
+		normalizedAgentSpecificationsAuthority == agentSpecificationsAuthorityMemoryLayer ||
+		normalizedRefinementAuthority == refinementAuthorityMemoryLayer
 	// A pure client drives someone else's agent, so it needs no provider of its
 	// own; every other mode runs turns locally and does.
 	if *baseURL == "" && selectedMode.runsTurnsLocally(*aetherAddr) {
@@ -180,7 +195,10 @@ func main() {
 		aetherUser:                  *aetherUser,
 		aetherWindow:                resolveWindowID(*aetherWindow),
 
-		memorylayerURL:               *memorylayerURL,
+		memorylayerMode:              normalizedMemoryLayerMode,
+		memorylayerURL:               strings.TrimSpace(*memorylayerURL),
+		memorylayerTarget:            strings.TrimSpace(*memorylayerTarget),
+		memorylayerRequired:          requiresMemoryLayer,
 		memorylayerKey:               os.Getenv("MEMORYLAYER_API_KEY"),
 		memorylayerWorkspace:         effectiveWorkspace(*memorylayerWorkspace, workspaceResolution.WorkspaceID),
 		promptNotesAuthority:         normalizedPromptNotesAuthority,
@@ -249,6 +267,13 @@ func (m appMode) runsTurnsLocally(aetherAddr string) bool {
 		return false
 	}
 	return true
+}
+
+// usesAether reports whether this mode actually opens an Aether connection.
+// Merely passing --aether to an in-process CLI/web/ACP mode has never changed
+// its turn transport, so it must not accidentally activate service discovery.
+func (m appMode) usesAether(aetherAddr string) bool {
+	return m == appModeServe || m == appModeStandalone || (m == appModeTUI && aetherAddr != "")
 }
 
 func selectAppMode(cli, tui, acp, web, serve, standalone bool) (appMode, error) {

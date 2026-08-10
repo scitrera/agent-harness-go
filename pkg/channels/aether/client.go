@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"sync"
 	"sync/atomic"
 
@@ -248,6 +249,13 @@ func (c *Client) Close() error {
 // AgentTopic reports the agent this client submits turns to.
 func (c *Client) AgentTopic() string {
 	return sdk.AgentTopic(c.workspace, c.impl, c.specifier)
+}
+
+// ProxyHTTP routes a request over the frontend's existing Aether connection.
+// Service integrations can therefore share its authenticated user session
+// without opening a second identity or connection.
+func (c *Client) ProxyHTTP(ctx context.Context, target string, req *http.Request, opts ...sdk.ProxyOpt) (*http.Response, error) {
+	return c.client.ProxyHTTP(ctx, target, req, opts...)
 }
 
 // AttachSession requests a coherent snapshot and optional replay over the same

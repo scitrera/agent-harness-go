@@ -56,6 +56,11 @@ func runTUIClient(cfg appConfig) error {
 	if err != nil {
 		return err
 	}
+	if err := client.Start(ctx); err != nil {
+		return err
+	}
+	defer func() { _ = client.Close() }()
+	cfg = withMemoryLayerAetherTransport(cfg, client)
 
 	st, err := openStores(ctx, cfg)
 	if err != nil {
@@ -69,14 +74,10 @@ func runTUIClient(cfg appConfig) error {
 		client.SetHistoryProjection(st.history)
 	}
 
-	if err := client.Start(ctx); err != nil {
-		return err
-	}
-	defer func() { _ = client.Close() }()
 	modeStateDir := workspaceStateDir(cfg)
 
 	fmt.Fprintf(os.Stderr, "agent-harness | connected to %s via aether %s (history: %s)\n",
-		client.AgentTopic(), cfg.aetherAddr, historyLabel(cfg))
+		client.AgentTopic(), cfg.aetherAddr, historyLabel(st))
 
 	return tui.Run(ctx, tui.Config{
 		Channel:   client,

@@ -10,6 +10,7 @@ import (
 
 	"github.com/scitrera/agent-harness-go/pkg/ids"
 	modelpkg "github.com/scitrera/agent-harness-go/pkg/model"
+	memorylayersdk "github.com/scitrera/memorylayer/memorylayer-sdk-go"
 )
 
 const shutdownTimeout = 5 * time.Second
@@ -24,6 +25,11 @@ const (
 	refinementAuthorityOff                  = "off"
 	refinementAuthorityLocal                = "local"
 	refinementAuthorityMemoryLayer          = "memorylayer"
+	memoryLayerModeAuto                     = "auto"
+	memoryLayerModeOff                      = "off"
+	memoryLayerModeHTTP                     = "http"
+	memoryLayerModeAether                   = "aether"
+	defaultMemoryLayerTarget                = "sv::memorylayer"
 )
 
 // aetherStreamFlush coalesces streamed token deltas into at most one message per
@@ -72,8 +78,16 @@ type appConfig struct {
 	aetherUser   string
 	aetherWindow string
 
-	// MemoryLayer. Empty memorylayerURL keeps transcripts on local disk.
+	// MemoryLayer. mode=auto selects an explicit URL first, then probes the
+	// default Aether service target when this process already uses Aether.
+	memorylayerMode      string
 	memorylayerURL       string
+	memorylayerTarget    string
+	memorylayerTransport memorylayersdk.Transport
+	// memorylayerRequired disables auto-mode's service-absent fallback because
+	// another requested feature (for example external subagents) needs the
+	// shared authority rather than merely preferring it.
+	memorylayerRequired  bool
 	memorylayerKey       string
 	memorylayerWorkspace string
 	// promptNotesAuthority explicitly selects the sole prompt-note source. It is
@@ -102,7 +116,50 @@ type appConfig struct {
 	streamFlush time.Duration
 }
 
-func normalizePromptNotesAuthority(value, memorylayerURL string) (string, error) {
+func normalizeMemoryLayerMode(value, baseURL, target string, aetherAvailable bool) (string, error) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		value = memoryLayerModeAuto
+	}
+	baseURL = strings.TrimSpace(baseURL)
+	target = strings.TrimSpace(target)
+	switch value {
+	case memoryLayerModeOff:
+		return value, nil
+	case memoryLayerModeHTTP:
+		if baseURL == "" {
+			return "", errors.New("memorylayer mode http requires --memorylayer")
+		}
+		return value, nil
+	case memoryLayerModeAether:
+		if !aetherAvailable {
+			return "", errors.New("memorylayer mode aether requires an Aether-connected mode")
+		}
+		if target == "" {
+			return "", errors.New("memorylayer mode aether requires --memorylayer-target")
+		}
+		return value, nil
+	case memoryLayerModeAuto:
+		if baseURL != "" {
+			return memoryLayerModeHTTP, nil
+		}
+		if aetherAvailable {
+			if target == "" {
+				return "", errors.New("memorylayer auto mode requires --memorylayer-target when Aether is configured")
+			}
+			return value, nil
+		}
+		return memoryLayerModeOff, nil
+	default:
+		return "", fmt.Errorf("invalid memorylayer mode %q (want auto, off, http, or aether)", value)
+	}
+}
+
+func memoryLayerConfigured(mode string) bool {
+	return mode != "" && mode != memoryLayerModeOff
+}
+
+func normalizePromptNotesAuthority(value string, memorylayerConfigured bool) (string, error) {
 	value = strings.ToLower(strings.TrimSpace(value))
 	if value == "" {
 		value = promptNotesAuthorityLocal
@@ -111,8 +168,8 @@ func normalizePromptNotesAuthority(value, memorylayerURL string) (string, error)
 	case promptNotesAuthorityOff, promptNotesAuthorityLocal:
 		return value, nil
 	case promptNotesAuthorityMemoryLayer:
-		if strings.TrimSpace(memorylayerURL) == "" {
-			return "", errors.New("prompt-note authority memorylayer requires --memorylayer")
+		if !memorylayerConfigured {
+			return "", errors.New("prompt-note authority memorylayer requires MemoryLayer")
 		}
 		return value, nil
 	default:
@@ -120,7 +177,7 @@ func normalizePromptNotesAuthority(value, memorylayerURL string) (string, error)
 	}
 }
 
-func normalizeAgentSpecificationsAuthority(value, memorylayerURL string) (string, error) {
+func normalizeAgentSpecificationsAuthority(value string, memorylayerConfigured bool) (string, error) {
 	value = strings.ToLower(strings.TrimSpace(value))
 	if value == "" {
 		value = agentSpecificationsAuthorityLocal
@@ -129,8 +186,8 @@ func normalizeAgentSpecificationsAuthority(value, memorylayerURL string) (string
 	case agentSpecificationsAuthorityOff, agentSpecificationsAuthorityLocal:
 		return value, nil
 	case agentSpecificationsAuthorityMemoryLayer:
-		if strings.TrimSpace(memorylayerURL) == "" {
-			return "", errors.New("agent-specification authority memorylayer requires --memorylayer")
+		if !memorylayerConfigured {
+			return "", errors.New("agent-specification authority memorylayer requires MemoryLayer")
 		}
 		return value, nil
 	default:
@@ -138,7 +195,7 @@ func normalizeAgentSpecificationsAuthority(value, memorylayerURL string) (string
 	}
 }
 
-func normalizeRefinementAuthority(value, memorylayerURL string) (string, error) {
+func normalizeRefinementAuthority(value string, memorylayerConfigured bool) (string, error) {
 	value = strings.ToLower(strings.TrimSpace(value))
 	if value == "" {
 		value = refinementAuthorityLocal
@@ -147,8 +204,8 @@ func normalizeRefinementAuthority(value, memorylayerURL string) (string, error) 
 	case refinementAuthorityOff, refinementAuthorityLocal:
 		return value, nil
 	case refinementAuthorityMemoryLayer:
-		if strings.TrimSpace(memorylayerURL) == "" {
-			return "", errors.New("refinement authority memorylayer requires --memorylayer")
+		if !memorylayerConfigured {
+			return "", errors.New("refinement authority memorylayer requires MemoryLayer")
 		}
 		return value, nil
 	default:
@@ -156,7 +213,7 @@ func normalizeRefinementAuthority(value, memorylayerURL string) (string, error) 
 	}
 }
 
-func validateExternalSubagentConfig(mode appMode, target string, executor bool, memorylayerURL string) error {
+func validateExternalSubagentConfig(mode appMode, target string, executor bool, memorylayerConfigured bool) error {
 	target = strings.TrimSpace(target)
 	if target == "" && !executor {
 		return nil
@@ -164,8 +221,8 @@ func validateExternalSubagentConfig(mode appMode, target string, executor bool, 
 	if mode != appModeServe && mode != appModeStandalone {
 		return errors.New("external subagents require --serve or --aether-standalone")
 	}
-	if strings.TrimSpace(memorylayerURL) == "" {
-		return errors.New("external subagents require --memorylayer so parent and executor share history")
+	if !memorylayerConfigured {
+		return errors.New("external subagents require MemoryLayer so parent and executor share history")
 	}
 	if target != "" && !strings.HasPrefix(target, "ag::") {
 		return errors.New("--subagent-target must be a full Aether agent topic (ag::<workspace>::<implementation>::<specifier>)")

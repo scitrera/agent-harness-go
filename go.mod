@@ -9,7 +9,8 @@ require (
 	charm.land/lipgloss/v2 v2.0.4
 	github.com/charmbracelet/x/ansi v0.11.7
 	github.com/scitrera/ecosystem-messaging-spec/go v1.3.0
-	github.com/scitrera/memorylayer/memorylayer-sdk-go v0.0.0
+	github.com/scitrera/memorylayer/memorylayer-sdk-go v0.2.0
+	github.com/scitrera/memorylayer/memorylayer-sdk-go/aether v0.0.0
 	go.opentelemetry.io/otel v1.43.0
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp v1.43.0
 	go.opentelemetry.io/otel/sdk v1.43.0
@@ -23,6 +24,8 @@ replace github.com/scitrera/ecosystem-messaging-spec/go => ../../scitrera-ecosys
 
 // Local integration until the typed prompt-note SDK surface is published.
 replace github.com/scitrera/memorylayer/memorylayer-sdk-go => ../../../scitrera-memorylayer-ai-cc/oss/memorylayer-sdk-go
+
+replace github.com/scitrera/memorylayer/memorylayer-sdk-go/aether => ../../../scitrera-memorylayer-ai-cc/oss/memorylayer-sdk-go/aether
 
 require (
 	github.com/bradenaw/juniper v0.10.0 // indirect

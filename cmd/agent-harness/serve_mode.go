@@ -46,6 +46,14 @@ func runServe(cfg appConfig) error {
 	if err != nil {
 		return err
 	}
+	// Connect before opening stores so auto mode can probe MemoryLayer through
+	// this authenticated Aether session. The channel's bounded inbox safely
+	// retains any turn arriving during the short remainder of initialization.
+	if err := ch.Start(ctx); err != nil {
+		return err
+	}
+	defer func() { _ = ch.Close() }()
+	cfg = withMemoryLayerAetherTransport(cfg, ch)
 
 	st, err := openStores(ctx, cfg)
 	if err != nil {
@@ -105,10 +113,6 @@ func runServe(cfg appConfig) error {
 	}
 	rt.SetCanceller(canceller)
 
-	if err := ch.Start(ctx); err != nil {
-		return err
-	}
-	defer func() { _ = ch.Close() }()
 	if err := ch.ReconcileGoalContinuations(ctx); err != nil {
 		return fmt.Errorf("goal continuation recovery: %w", err)
 	}
@@ -117,7 +121,7 @@ func runServe(cfg appConfig) error {
 	}
 
 	fmt.Fprintf(os.Stderr, "agent-harness | model=%s endpoint=%s - serving on aether %s as %s (history: %s%s)\n",
-		cfg.model, cfg.baseURL, cfg.aetherAddr, ch.Topic(), historyLabel(cfg), externalSubagentLabel(cfg))
+		cfg.model, cfg.baseURL, cfg.aetherAddr, ch.Topic(), historyLabel(st), externalSubagentLabel(cfg))
 
 	if _, err := rt.RunLoop(ctx, runtime.LoopConfig{Concurrency: 8}); err != nil && ctx.Err() == nil {
 		return fmt.Errorf("run loop: %w", err)

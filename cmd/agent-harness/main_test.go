@@ -65,6 +65,57 @@ func TestSelectAppModeRejectsConflictingInterfaces(t *testing.T) {
 	}
 }
 
+func TestMemoryLayerAutoPreservesStandaloneOSSDefaults(t *testing.T) {
+	mode, err := normalizeMemoryLayerMode(memoryLayerModeAuto, "", defaultMemoryLayerTarget, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mode != memoryLayerModeOff {
+		t.Fatalf("standalone auto mode = %q, want %q", mode, memoryLayerModeOff)
+	}
+	if memoryLayerConfigured(mode) {
+		t.Fatal("standalone auto mode must keep local history and open no MemoryLayer transport")
+	}
+}
+
+func TestNormalizeMemoryLayerModePrefersExplicitHTTPThenAetherDiscovery(t *testing.T) {
+	tests := []struct {
+		name, mode, baseURL, target, want, wantErr string
+		aetherAvailable                            bool
+	}{
+		{name: "auto explicit http", mode: "auto", baseURL: "http://memorylayer", target: defaultMemoryLayerTarget, aetherAvailable: true, want: memoryLayerModeHTTP},
+		{name: "auto aether", mode: "auto", target: defaultMemoryLayerTarget, aetherAvailable: true, want: memoryLayerModeAuto},
+		{name: "explicit aether", mode: "aether", target: "sv::memorylayer::main", aetherAvailable: true, want: memoryLayerModeAether},
+		{name: "off overrides environment url", mode: "off", baseURL: "http://memorylayer", target: defaultMemoryLayerTarget, aetherAvailable: true, want: memoryLayerModeOff},
+		{name: "http needs url", mode: "http", wantErr: "requires --memorylayer"},
+		{name: "aether needs connected mode", mode: "aether", target: defaultMemoryLayerTarget, wantErr: "requires an Aether-connected mode"},
+		{name: "invalid", mode: "sometimes", wantErr: "invalid memorylayer mode"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := normalizeMemoryLayerMode(test.mode, test.baseURL, test.target, test.aetherAvailable)
+			if test.wantErr == "" && (err != nil || got != test.want) {
+				t.Fatalf("normalize = %q, %v; want %q", got, err, test.want)
+			}
+			if test.wantErr != "" && (err == nil || !strings.Contains(err.Error(), test.wantErr)) {
+				t.Fatalf("error = %v, want %q", err, test.wantErr)
+			}
+		})
+	}
+}
+
+func TestAppModeReportsOnlyRealAetherConnections(t *testing.T) {
+	if appModeCLI.usesAether("127.0.0.1:50051") {
+		t.Fatal("local CLI must not activate Aether service discovery")
+	}
+	if appModeTUI.usesAether("") {
+		t.Fatal("local TUI must not activate Aether service discovery")
+	}
+	if !appModeTUI.usesAether("127.0.0.1:50051") || !appModeServe.usesAether("127.0.0.1:50051") {
+		t.Fatal("Aether TUI and worker modes must activate service discovery")
+	}
+}
+
 func TestValidateExternalSubagentConfigRequiresWorkerAndSharedHistory(t *testing.T) {
 	target := "ag::routing::agent-harness::executor"
 	for _, test := range []struct {
@@ -72,15 +123,15 @@ func TestValidateExternalSubagentConfigRequiresWorkerAndSharedHistory(t *testing
 		mode     appMode
 		target   string
 		executor bool
-		memory   string
+		memory   bool
 		wantErr  string
 	}{
 		{name: "disabled local mode", mode: appModeTUI},
-		{name: "targeted serve", mode: appModeServe, target: target, memory: "http://memorylayer"},
-		{name: "executor standalone", mode: appModeStandalone, executor: true, memory: "http://memorylayer"},
-		{name: "wrong mode", mode: appModeTUI, target: target, memory: "http://memorylayer", wantErr: "require --serve"},
-		{name: "local history", mode: appModeServe, target: target, wantErr: "require --memorylayer"},
-		{name: "short target", mode: appModeServe, target: "executor", memory: "http://memorylayer", wantErr: "full Aether agent topic"},
+		{name: "targeted serve", mode: appModeServe, target: target, memory: true},
+		{name: "executor standalone", mode: appModeStandalone, executor: true, memory: true},
+		{name: "wrong mode", mode: appModeTUI, target: target, memory: true, wantErr: "require --serve"},
+		{name: "local history", mode: appModeServe, target: target, wantErr: "require MemoryLayer"},
+		{name: "short target", mode: appModeServe, target: "executor", memory: true, wantErr: "full Aether agent topic"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			err := validateExternalSubagentConfig(test.mode, test.target, test.executor, test.memory)
@@ -96,16 +147,17 @@ func TestValidateExternalSubagentConfigRequiresWorkerAndSharedHistory(t *testing
 
 func TestNormalizePromptNotesAuthorityIsExplicitAndRequiresMemoryLayer(t *testing.T) {
 	for _, test := range []struct {
-		value, memoryURL, want, wantErr string
+		value, want, wantErr string
+		memory               bool
 	}{
 		{value: "", want: promptNotesAuthorityLocal},
 		{value: " OFF ", want: promptNotesAuthorityOff},
 		{value: "LOCAL", want: promptNotesAuthorityLocal},
-		{value: "memorylayer", memoryURL: "http://memorylayer", want: promptNotesAuthorityMemoryLayer},
-		{value: "memorylayer", wantErr: "requires --memorylayer"},
+		{value: "memorylayer", memory: true, want: promptNotesAuthorityMemoryLayer},
+		{value: "memorylayer", wantErr: "requires MemoryLayer"},
 		{value: "auto", wantErr: "invalid prompt-note authority"},
 	} {
-		got, err := normalizePromptNotesAuthority(test.value, test.memoryURL)
+		got, err := normalizePromptNotesAuthority(test.value, test.memory)
 		if test.wantErr == "" && (err != nil || got != test.want) {
 			t.Fatalf("normalize(%q) = %q, %v; want %q", test.value, got, err, test.want)
 		}
@@ -117,16 +169,17 @@ func TestNormalizePromptNotesAuthorityIsExplicitAndRequiresMemoryLayer(t *testin
 
 func TestNormalizeAgentSpecificationsAuthorityIsExplicitAndRequiresMemoryLayer(t *testing.T) {
 	for _, test := range []struct {
-		value, memoryURL, want, wantErr string
+		value, want, wantErr string
+		memory               bool
 	}{
 		{value: "", want: agentSpecificationsAuthorityLocal},
 		{value: " OFF ", want: agentSpecificationsAuthorityOff},
 		{value: "LOCAL", want: agentSpecificationsAuthorityLocal},
-		{value: "memorylayer", memoryURL: "http://memorylayer", want: agentSpecificationsAuthorityMemoryLayer},
-		{value: "memorylayer", wantErr: "requires --memorylayer"},
+		{value: "memorylayer", memory: true, want: agentSpecificationsAuthorityMemoryLayer},
+		{value: "memorylayer", wantErr: "requires MemoryLayer"},
 		{value: "auto", wantErr: "invalid agent-specification authority"},
 	} {
-		got, err := normalizeAgentSpecificationsAuthority(test.value, test.memoryURL)
+		got, err := normalizeAgentSpecificationsAuthority(test.value, test.memory)
 		if test.wantErr == "" && (err != nil || got != test.want) {
 			t.Fatalf("normalize(%q) = %q, %v; want %q", test.value, got, err, test.want)
 		}
@@ -138,16 +191,17 @@ func TestNormalizeAgentSpecificationsAuthorityIsExplicitAndRequiresMemoryLayer(t
 
 func TestNormalizeRefinementAuthorityIsExplicitAndRequiresMemoryLayer(t *testing.T) {
 	for _, test := range []struct {
-		value, memoryURL, want, wantErr string
+		value, want, wantErr string
+		memory               bool
 	}{
 		{value: "", want: refinementAuthorityLocal},
 		{value: " OFF ", want: refinementAuthorityOff},
 		{value: "LOCAL", want: refinementAuthorityLocal},
-		{value: "memorylayer", memoryURL: "http://memorylayer", want: refinementAuthorityMemoryLayer},
-		{value: "memorylayer", wantErr: "requires --memorylayer"},
+		{value: "memorylayer", memory: true, want: refinementAuthorityMemoryLayer},
+		{value: "memorylayer", wantErr: "requires MemoryLayer"},
 		{value: "dual", wantErr: "invalid refinement authority"},
 	} {
-		got, err := normalizeRefinementAuthority(test.value, test.memoryURL)
+		got, err := normalizeRefinementAuthority(test.value, test.memory)
 		if test.wantErr == "" && (err != nil || got != test.want) {
 			t.Fatalf("normalize(%q) = %q, %v; want %q", test.value, got, err, test.want)
 		}
@@ -167,7 +221,7 @@ func TestOpenRefinementServiceSelectsAuditAndResourceAuthorities(t *testing.T) {
 		t.Fatalf("off refinement service = %+v, %v", off, err)
 	}
 	remoteResource, err := openRefinementService(appConfig{
-		stateDir: t.TempDir(), memorylayerURL: "http://memorylayer", memorylayerWorkspace: "backend",
+		stateDir: t.TempDir(), memorylayerMode: memoryLayerModeHTTP, memorylayerURL: "http://memorylayer", memorylayerWorkspace: "backend",
 		promptNotesAuthority: promptNotesAuthorityMemoryLayer,
 	})
 	if err != nil || remoteResource == nil || remoteResource.Editors[refinement.ResourcePromptNote] == nil || remoteResource.Editors[refinement.ResourceAgentSpecification] != nil {
@@ -189,6 +243,7 @@ func TestOpenAgentSpecificationCatalogSelectsOneAuthority(t *testing.T) {
 	}
 	remote, err := openAgentSpecificationCatalog(appConfig{
 		agentSpecificationsAuthority: agentSpecificationsAuthorityMemoryLayer,
+		memorylayerMode:              memoryLayerModeHTTP,
 		memorylayerURL:               "http://memorylayer",
 		workspaceID:                  "project",
 		memorylayerWorkspace:         "ml-project",

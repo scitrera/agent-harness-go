@@ -69,7 +69,9 @@ containerized agent worker, a host TUI, and a capability-aware multi-model
 | `--subagent-target` | `SAHARA_SUBAGENT_TARGET` | — | target spawned subagents at a full Aether agent topic; requires MemoryLayer |
 | `--subagent-executor` | — | `false` | consume targeted agent-harness subagent tasks on this worker; requires MemoryLayer |
 | `--subagent-executor-concurrency` | — | `4` | bound concurrent externally assigned subagents |
-| `--memorylayer` | `MEMORYLAYER_BASE_URL` | — | store threads + transcripts in MemoryLayer instead of on disk |
+| `--memorylayer-mode` | `MEMORYLAYER_MODE` | `auto` | prefer an explicit HTTP URL, otherwise discover MemoryLayer over Aether; `off`, `http`, and `aether` are explicit policies |
+| `--memorylayer` | `MEMORYLAYER_BASE_URL` | — | explicit direct-HTTP URL; takes priority in `auto` mode |
+| `--memorylayer-target` | `MEMORYLAYER_TARGET_TOPIC` | `sv::memorylayer` | bare or instance-pinned Aether service topic |
 | `--prompt-notes-authority` | `SAHARA_PROMPT_NOTES_AUTHORITY` | `local` | reusable prompt-note authority: `off`, `local`, or `memorylayer`; never dual-writes or falls back |
 | `--agent-specifications-authority` | `SAHARA_AGENT_SPECIFICATIONS_AUTHORITY` | `local` | reusable subagent-definition authority: `off`, local workspace files, or typed MemoryLayer resources |
 | `--memory-recall` | — | `true` | inject MemoryLayer memories relevant to each message |
@@ -285,13 +287,23 @@ prompt- and credential-free.
 
 By default each client keeps a local copy of the conversation it witnessed, so a
 second client attaching mid-conversation sees only what arrives after it
-connects. Point both the worker and its clients at a shared MemoryLayer to give
-them one conversation instead:
+connects. When MemoryLayer is registered as `sv::memorylayer`, pointing both
+processes at Aether is enough to give them one conversation:
 
 ```bash
-agent-harness --serve --aether 127.0.0.1:50051 --memorylayer http://127.0.0.1:61001 --base-url $SAHARA_LLM_BASE_URL
-agent-harness --tui   --aether 127.0.0.1:50051 --memorylayer http://127.0.0.1:61001
+agent-harness --serve --aether 127.0.0.1:50051 --base-url $SAHARA_LLM_BASE_URL
+agent-harness --tui   --aether 127.0.0.1:50051
 ```
+
+The default `--memorylayer-mode auto` prefers an explicit
+`--memorylayer http://...`, then probes `--memorylayer-target` over the existing
+Aether connection. It falls back to local files only when wildcard discovery
+proves that no healthy MemoryLayer service is registered. Authentication,
+authorization, timeout, protocol, and server failures remain startup errors.
+Select `--memorylayer-mode aether` to require the service, or
+`--memorylayer-mode off` to preserve local history while still using Aether.
+With no Aether and no explicit URL, `auto` resolves directly to `off`; the OSS
+TUI/CLI/web/ACP standalone paths therefore open neither dependency.
 
 The workspace (`--memorylayer-workspace`, defaulting to the resolved logical
 workspace or `default`) is created on first use if MemoryLayer does not have it.
@@ -366,7 +378,9 @@ agent-harness --memorylayer http://127.0.0.1:61001 \
   --base-url "$SAHARA_LLM_BASE_URL"
 ```
 
-`memorylayer` requires `--memorylayer`; `off` disables prompt notes explicitly.
+`memorylayer` requires an active MemoryLayer route—an explicit `--memorylayer`
+URL or the discovered/required Aether service. `off` disables prompt notes
+explicitly.
 The resolved turn workspace is forwarded on every read, including additional
 visible workspaces, and an explicit `--memorylayer-workspace` remaps only the
 selected logical default. This resource protocol remains a MemoryLayer API and
