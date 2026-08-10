@@ -26,21 +26,22 @@ const (
 )
 
 type model struct {
-	ctx             context.Context
-	channel         ChannelSurface
-	events          <-chan channel.Event
-	store           HistoryStore
-	index           threadindex.Store
-	approvals       ApprovalResolver
-	canceller       Canceller
-	modelStatus     ModelStatus
-	commandSource   CommandProvider
-	taskStore       TaskStore
-	teamStore       TeamStore
-	agentCatalog    AgentCatalog
-	directoryAccess DirectoryAccess
-	workspaceRoot   string
-	cwd             string
+	ctx               context.Context
+	channel           ChannelSurface
+	events            <-chan channel.Event
+	store             HistoryStore
+	index             threadindex.Store
+	approvals         ApprovalResolver
+	canceller         Canceller
+	modelStatus       ModelStatus
+	commandSource     CommandProvider
+	taskStore         TaskStore
+	teamStore         TeamStore
+	agentCatalog      AgentCatalog
+	directoryAccess   DirectoryAccess
+	executionBindings ExecutionBindingProvider
+	workspaceRoot     string
+	cwd               string
 
 	threadID string
 	threads  []threadindex.Session
@@ -97,33 +98,34 @@ func newModel(ctx context.Context, cfg Config) (model, error) {
 		return model{}, fmt.Errorf("resolve workspace root: %w", err)
 	}
 	m := model{
-		ctx:              ctx,
-		channel:          cfg.Channel,
-		events:           cfg.Channel.Events(),
-		store:            cfg.Store,
-		index:            cfg.Index,
-		approvals:        cfg.Approvals,
-		canceller:        cfg.Canceller,
-		modelStatus:      cfg.ModelStatus,
-		commandSource:    cfg.Commands,
-		taskStore:        cfg.TaskStore,
-		teamStore:        cfg.TeamStore,
-		agentCatalog:     cfg.AgentCatalog,
-		directoryAccess:  cfg.DirectoryAccess,
-		workspaceRoot:    workspaceRoot,
-		cwd:              workspaceRoot,
-		threadID:         threadID,
-		threads:          threads,
-		rows:             rowsFromHistory(messages),
-		pendingApprovals: map[string]approvalRequest{},
-		tools:            map[string]toolEntry{},
-		subagents:        map[string]subagentActivity{},
-		turns:            map[string]turnActivity{},
-		renderedRows:     map[string]renderedRowCache{},
-		clearingThreads:  map[string]struct{}{},
-		tailing:          true,
-		viewport:         viewport.New(),
-		composer:         newComposer(),
+		ctx:               ctx,
+		channel:           cfg.Channel,
+		events:            cfg.Channel.Events(),
+		store:             cfg.Store,
+		index:             cfg.Index,
+		approvals:         cfg.Approvals,
+		canceller:         cfg.Canceller,
+		modelStatus:       cfg.ModelStatus,
+		commandSource:     cfg.Commands,
+		taskStore:         cfg.TaskStore,
+		teamStore:         cfg.TeamStore,
+		agentCatalog:      cfg.AgentCatalog,
+		directoryAccess:   cfg.DirectoryAccess,
+		executionBindings: cfg.ExecutionBindings,
+		workspaceRoot:     workspaceRoot,
+		cwd:               workspaceRoot,
+		threadID:          threadID,
+		threads:           threads,
+		rows:              rowsFromHistory(messages),
+		pendingApprovals:  map[string]approvalRequest{},
+		tools:             map[string]toolEntry{},
+		subagents:         map[string]subagentActivity{},
+		turns:             map[string]turnActivity{},
+		renderedRows:      map[string]renderedRowCache{},
+		clearingThreads:   map[string]struct{}{},
+		tailing:           true,
+		viewport:          viewport.New(),
+		composer:          newComposer(),
 	}
 	m.status = "ready"
 	m.refreshViewport()

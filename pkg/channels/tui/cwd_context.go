@@ -8,6 +8,11 @@ import (
 const tuiWorkingDirectoryPrefix = "[TUI working directory: "
 
 func (m model) withWorkingDirectoryContext(text string) string {
+	// A remote binding carries the view and relative directory to the exact tool
+	// host; never leak that host's absolute path into the model prompt.
+	if m.executionBindings != nil {
+		return text
+	}
 	workingDirectory := m.currentWorkingDirectory()
 	if workingDirectory == "" || workingDirectory == m.workspaceRoot {
 		return text

@@ -90,10 +90,12 @@ type Client struct {
 	// witnessed, which is why it is a projection and not a store.
 	projectionMu sync.Mutex
 	projection   HistoryProjection
+	toolHost     *ClientToolHost
 
 	// sendToAgent is the egress seam, so ingress/egress are testable without a
 	// live gateway.
-	sendToAgent func(payload []byte) error
+	sendToAgent     func(payload []byte) error
+	sendToolMessage func(topic string, payload []byte) error
 }
 
 type sessionAttachResponse struct {
@@ -179,7 +181,9 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	c.sendToAgent = func(payload []byte) error {
 		return user.SendToAgent(c.workspace, c.impl, c.specifier, payload)
 	}
+	c.sendToolMessage = user.SendToolCallMessage
 	user.OnMessage(c.onMessage)
+	user.OnToolCallMessage(c.onToolCallMessage)
 	return c, nil
 }
 
@@ -249,6 +253,17 @@ func (c *Client) Close() error {
 // AgentTopic reports the agent this client submits turns to.
 func (c *Client) AgentTopic() string {
 	return sdk.AgentTopic(c.workspace, c.impl, c.specifier)
+}
+
+// ToolHostID is the gateway-routable identity bound to this exact frontend
+// window. The gateway-provided SourceTopic must match it on the worker.
+func (c *Client) ToolHostID() string { return sdk.UserTopic(c.userID, c.windowID) }
+
+// SetToolHost enables exact-host workspace tool execution on this client.
+func (c *Client) SetToolHost(host *ClientToolHost) {
+	c.mu.Lock()
+	c.toolHost = host
+	c.mu.Unlock()
 }
 
 // ProxyHTTP routes a request over the frontend's existing Aether connection.

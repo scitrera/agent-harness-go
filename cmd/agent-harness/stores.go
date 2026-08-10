@@ -59,6 +59,10 @@ type stores struct {
 	// ledger with CAS alongside the lifecycle projections.
 	continuations goal.ContinuationLedger
 	turns         turnjournal.Store
+	// workspaceViews publishes client/worker-observed local checkout identities
+	// to MemoryLayer when it is the configured authority. nil preserves the
+	// standalone, local-only path.
+	workspaceViews *memorylayer.WorkspaceViewPublisher
 	// remote reports whether transcripts live outside this process, which is
 	// what makes them visible to other clients.
 	remote         bool
@@ -324,6 +328,10 @@ func openStores(ctx context.Context, cfg appConfig) (stores, error) {
 	if err != nil {
 		return stores{}, err
 	}
+	workspaceViews, err := memorylayer.NewWorkspaceViewPublisher(memoryLayerClientConfig(cfg), ml)
+	if err != nil {
+		return stores{}, err
+	}
 	return stores{
 		history:        bindHistoryBackend(ml, cfg.workspaceID, cfg.memorylayerWorkspace),
 		threads:        ml,
@@ -337,6 +345,7 @@ func openStores(ctx context.Context, cfg appConfig) (stores, error) {
 		goals:          goals,
 		continuations:  continuations,
 		turns:          turns,
+		workspaceViews: workspaceViews,
 		remote:         true,
 		historyBackend: "memorylayer " + memoryLayerLocation(cfg),
 	}, nil

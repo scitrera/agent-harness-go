@@ -73,6 +73,19 @@ func runTUIClient(cfg appConfig) error {
 	if !st.remote {
 		client.SetHistoryProjection(st.history)
 	}
+	toolHost, err := aetherchan.NewClientToolHost(ctx, aetherchan.ClientToolHostConfig{
+		WorkspaceID:   effectiveWorkspace("", cfg.workspaceID),
+		WorkspaceRoot: cfg.workspaceRoot,
+		StateDir:      cfg.workspaceIndexDir,
+		ToolHostID:    client.ToolHostID(),
+		AgentTopic:    client.AgentTopic(),
+		Publisher:     st.workspaceViews,
+		Python:        "python3",
+	})
+	if err != nil {
+		return fmt.Errorf("client workspace tool host: %w", err)
+	}
+	client.SetToolHost(toolHost)
 
 	modeStateDir := workspaceStateDir(cfg)
 
@@ -88,11 +101,13 @@ func runTUIClient(cfg appConfig) error {
 		// No local runner to ask, so the status line shows the best local
 		// configuration estimate and the command palette offers only the UI's own
 		// commands. /model remains the worker-authoritative view.
-		ModelStatus:     remoteModelStatus{model: statusModel},
-		TaskStore:       store.NewTaskStateStore(modeStateDir),
-		TeamStore:       team.NewFileGraphStore(filepath.Join(modeStateDir, "team", "graph.json")),
-		AgentCatalog:    st.agentCatalog,
-		InitialThreadID: cfg.thread,
-		WorkspaceRoot:   cfg.workspaceRoot,
+		ModelStatus:       remoteModelStatus{model: statusModel},
+		TaskStore:         store.NewTaskStateStore(modeStateDir),
+		TeamStore:         team.NewFileGraphStore(filepath.Join(modeStateDir, "team", "graph.json")),
+		AgentCatalog:      st.agentCatalog,
+		DirectoryAccess:   toolHost,
+		ExecutionBindings: toolHost,
+		InitialThreadID:   cfg.thread,
+		WorkspaceRoot:     cfg.workspaceRoot,
 	})
 }

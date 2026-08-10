@@ -45,6 +45,9 @@ type appConfig struct {
 	// workspaceID is empty in legacy single-workspace mode. A non-empty value
 	// activates composite workspace/thread history keys for local turns.
 	workspaceID string
+	// workspaceIndexDir is the shared canonical project-to-workspace index used
+	// when a client registers another local coding project with /cd.
+	workspaceIndexDir string
 	// visibleWorkspaces are additional logical workspaces this host permits an
 	// explicit client to address. The selected/default workspace is implicit.
 	visibleWorkspaces []string

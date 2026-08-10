@@ -72,6 +72,9 @@ func runAetherStandalone(cfg appConfig) error {
 	if err != nil {
 		return err
 	}
+	if st.workspaceViews != nil {
+		worker.SetExecutionBindingAuthorizer(st.workspaceViews)
+	}
 	blobs, err := worker.BlobStore(0)
 	if err != nil {
 		return err
@@ -101,7 +104,7 @@ func runAetherStandalone(cfg appConfig) error {
 	if err != nil {
 		return err
 	}
-	runner, _, err := buildRunner(cfg, st, sessionTransport.Publisher, broker, subagentTasks, worker, continuationBackend, authorityHandoff, nil)
+	runner, _, err := buildRunner(cfg, st, sessionTransport.Publisher, broker, subagentTasks, worker, continuationBackend, authorityHandoff, worker.TurnContext)
 	if err != nil {
 		return err
 	}

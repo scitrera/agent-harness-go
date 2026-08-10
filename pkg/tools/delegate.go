@@ -25,8 +25,18 @@ type CommandDelegate interface {
 	RunCommand(ctx context.Context, spec localtools.CommandSpec) (localtools.CommandResult, error)
 }
 
+// ToolDelegate redirects complete tool invocations for a turn. It is used when
+// the tool authority is on another host (for example, an Aether-connected TUI
+// that owns the selected checkout). Registry policy and audit run before this
+// seam, so the remote host receives only admitted calls.
+type ToolDelegate interface {
+	HandlesTool(name string) bool
+	InvokeTool(ctx context.Context, req Request) (Result, error)
+}
+
 type fileDelegateKey struct{}
 type commandDelegateKey struct{}
+type toolDelegateKey struct{}
 
 // WithFileDelegate carries a FileDelegate on ctx. nil is a no-op.
 func WithFileDelegate(ctx context.Context, d FileDelegate) context.Context {
@@ -54,5 +64,19 @@ func WithCommandDelegate(ctx context.Context, d CommandDelegate) context.Context
 // or nil.
 func CommandDelegateFrom(ctx context.Context) CommandDelegate {
 	d, _ := ctx.Value(commandDelegateKey{}).(CommandDelegate)
+	return d
+}
+
+// WithToolDelegate carries a full-invocation delegate on ctx. nil is a no-op.
+func WithToolDelegate(ctx context.Context, d ToolDelegate) context.Context {
+	if d == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, toolDelegateKey{}, d)
+}
+
+// ToolDelegateFrom returns the full-invocation delegate on ctx, or nil.
+func ToolDelegateFrom(ctx context.Context) ToolDelegate {
+	d, _ := ctx.Value(toolDelegateKey{}).(ToolDelegate)
 	return d
 }

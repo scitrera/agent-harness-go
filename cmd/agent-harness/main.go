@@ -173,6 +173,7 @@ func main() {
 	cfg := appConfig{
 		workspaceRoot:     *workspace,
 		workspaceID:       workspaceResolution.WorkspaceID,
+		workspaceIndexDir: *workspaceIndexDir,
 		visibleWorkspaces: parseVisibleWorkspaces(*visibleWorkspaces),
 		stateDir:          stateDir,
 		thread:            *thread,

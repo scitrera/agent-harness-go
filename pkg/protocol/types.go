@@ -12,20 +12,36 @@ import (
 
 // Authoritative spec types, re-exported.
 type (
-	ChatMessage        = spec.ChatMessage
-	MessageAddress     = spec.MessageAddress
-	MessageRef         = spec.MessageRef
-	ContentPart        = spec.ContentPart
-	ToolInvokeEnvelope = spec.ToolInvokeEnvelope
-	Role               = spec.Role
-	ContentPartType    = spec.PartType
-	ToolCallPartBody   = spec.ToolCallPartBody
-	ToolResultPartBody = spec.ToolResultPartBody
-	ToolError          = spec.ToolError
-	ImagePart          = spec.ImagePart
-	FilePart           = spec.FilePart
-	SubagentPart       = spec.SubagentPart
-	SubagentStatus     = spec.SubagentStatus
+	ChatMessage             = spec.ChatMessage
+	MessageAddress          = spec.MessageAddress
+	MessageRef              = spec.MessageRef
+	ContentPart             = spec.ContentPart
+	ToolInvokeEnvelope      = spec.ToolInvokeEnvelope
+	Role                    = spec.Role
+	ContentPartType         = spec.PartType
+	ToolCallPartBody        = spec.ToolCallPartBody
+	ToolResultPartBody      = spec.ToolResultPartBody
+	ToolError               = spec.ToolError
+	ExecutionBinding        = spec.ExecutionBinding
+	ExecutionSite           = spec.ExecutionSite
+	WorkspaceViewKind       = spec.WorkspaceViewKind
+	WorkspaceViewDescriptor = spec.WorkspaceViewDescriptor
+	ImagePart               = spec.ImagePart
+	FilePart                = spec.FilePart
+	SubagentPart            = spec.SubagentPart
+	SubagentStatus          = spec.SubagentStatus
+)
+
+const (
+	ExecutionSiteClient = spec.ExecutionSiteClient
+	ExecutionSiteWorker = spec.ExecutionSiteWorker
+	ExecutionSiteRemote = spec.ExecutionSiteRemote
+
+	WorkspaceViewKindDirectory   = spec.WorkspaceViewKindDirectory
+	WorkspaceViewKindGitWorktree = spec.WorkspaceViewKindGitWorktree
+	WorkspaceViewKindCheckout    = spec.WorkspaceViewKindCheckout
+	WorkspaceViewKindSnapshot    = spec.WorkspaceViewKindSnapshot
+	WorkspaceViewKindOverlay     = spec.WorkspaceViewKindOverlay
 )
 
 // NewImagePart builds an image content part (keeps the harness's historical

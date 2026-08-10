@@ -103,7 +103,12 @@ func (r *Registry) Invoke(ctx context.Context, req Request) (Result, error) {
 		r.emitToolEvent(ctx, event)
 		return Result{}, err
 	}
-	result, err := handler.Invoke(ctx, req)
+	var result Result
+	if delegate := ToolDelegateFrom(ctx); delegate != nil && delegate.HandlesTool(req.Name) {
+		result, err = delegate.InvokeTool(ctx, req)
+	} else {
+		result, err = handler.Invoke(ctx, req)
+	}
 	if err != nil {
 		wrapped := fmt.Errorf("invoke %s: %w", req.Name, err)
 		r.emitToolEvent(ctx, finishedToolEvent(req, started, result, wrapped))

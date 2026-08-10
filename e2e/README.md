@@ -161,6 +161,23 @@ The specifier must match `AETHER_SPECIFIER` in `.env` (Compose defaults it to
 worker that is not running. The TUI's startup target should end in `::e2e`.
 Starting a second TUI with the same command demonstrates that multiple clients
 can attach to the same Aether session and read the MemoryLayer-backed history.
+The host TUI also acts as an exact-window workspace tool host: the worker keeps
+model execution and policy, while file/shell/Python calls return over Aether to
+the client checkout named by the turn's logical execution binding.
+
+To verify this transport deterministically without depending on a model to
+choose a tool, run from the parent `agent-harness/` directory while the stack is
+up:
+
+```bash
+./local-test-oss-e2e.sh check
+```
+
+The check creates conflicting `identity.txt` files on a temporary client root
+and worker root, registers/authorizes the client view through
+`sv::memorylayer`, and asserts that the live Aether tool result contains the
+client value. It then removes the client host and asserts an error instead of a
+worker fallback.
 
 ## 5. Exercise model capabilities
 
@@ -174,6 +191,12 @@ In the TUI:
    turn by the first `vision: true, tools: true` model.
 4. Enter `/model fast-model-id` to return the thread to the fast model. A pinned
    model that cannot satisfy an image turn is bypassed for that turn.
+5. Enter `/cd /absolute/path/to/another/local/project`, then ask the model to
+   list or read a file there. That directory is not mounted into the agent
+   container: Sahara registers a MemoryLayer workspace view and the worker
+   routes the tool call to this exact TUI. Stop the TUI while a bound tool is
+   needed to verify that the worker fails the call instead of reading its own
+   checkout.
 
 Useful observation commands:
 
@@ -196,6 +219,8 @@ when testing provider separation.
 - both clients discover MemoryLayer through `sv::memorylayer` over Aether rather
   than requiring a separately configured HTTP endpoint;
 - session state is shared across attached clients;
+- an unmounted client checkout can service bound file/shell/Python tools over
+  Aether without exposing its absolute path or falling back to a worker checkout;
 - the OSS executable loads `config/models.yaml`, supports `/model` pins, routes
   images by declared capability, and can resolve a provider per model;
 - the build consumes the untagged sibling source graph used during development.

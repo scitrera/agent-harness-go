@@ -77,20 +77,27 @@ type DirectoryAccess interface {
 	GrantWorkingDirectory(dir string) error
 }
 
+// ExecutionBindingProvider maps a host-local working directory to a portable,
+// exact-host workspace view binding for a remote turn.
+type ExecutionBindingProvider interface {
+	ExecutionBindingForDirectory(ctx context.Context, dir string) (protocol.ExecutionBinding, error)
+}
+
 type Config struct {
-	Channel         ChannelSurface
-	Store           HistoryStore
-	Index           threadindex.Store
-	Approvals       ApprovalResolver
-	Canceller       Canceller
-	ModelStatus     ModelStatus
-	Commands        CommandProvider
-	TaskStore       TaskStore
-	TeamStore       TeamStore
-	AgentCatalog    AgentCatalog
-	DirectoryAccess DirectoryAccess
-	InitialThreadID string
-	WorkspaceRoot   string
+	Channel           ChannelSurface
+	Store             HistoryStore
+	Index             threadindex.Store
+	Approvals         ApprovalResolver
+	Canceller         Canceller
+	ModelStatus       ModelStatus
+	Commands          CommandProvider
+	TaskStore         TaskStore
+	TeamStore         TeamStore
+	AgentCatalog      AgentCatalog
+	DirectoryAccess   DirectoryAccess
+	ExecutionBindings ExecutionBindingProvider
+	InitialThreadID   string
+	WorkspaceRoot     string
 }
 
 func Run(ctx context.Context, cfg Config) error {

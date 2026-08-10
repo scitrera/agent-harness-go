@@ -59,6 +59,9 @@ func runServe(cfg appConfig) error {
 	if err != nil {
 		return err
 	}
+	if st.workspaceViews != nil {
+		ch.SetExecutionBindingAuthorizer(st.workspaceViews)
+	}
 	blobs, err := ch.BlobStore(0)
 	if err != nil {
 		return err
@@ -88,7 +91,7 @@ func runServe(cfg appConfig) error {
 	if err != nil {
 		return err
 	}
-	runner, _, err := buildRunner(cfg, st, sessionTransport.Publisher, broker, subagentTasks, ch, continuationBackend, authorityHandoff, nil)
+	runner, _, err := buildRunner(cfg, st, sessionTransport.Publisher, broker, subagentTasks, ch, continuationBackend, authorityHandoff, ch.TurnContext)
 	if err != nil {
 		return err
 	}

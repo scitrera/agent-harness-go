@@ -14,11 +14,14 @@ package aether
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"sync"
+	"time"
 
+	pb "github.com/scitrera/aether/api/proto"
 	sdk "github.com/scitrera/aether/sdk/go/aether"
 	spec "github.com/scitrera/ecosystem-messaging-spec/go"
 
@@ -28,6 +31,7 @@ import (
 	"github.com/scitrera/agent-harness-go/pkg/ids"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 	"github.com/scitrera/agent-harness-go/pkg/turncancel"
+	workspacepkg "github.com/scitrera/agent-harness-go/pkg/workspace"
 )
 
 const (
@@ -52,6 +56,23 @@ type SessionService interface {
 // visibility policy independently from Aether's transport workspace.
 type WorkspaceResolver interface {
 	ResolveWorkspace(ctx context.Context, requested string) (string, error)
+}
+
+// ExecutionBindingAuthorizer verifies that a client-hosted view binding exists
+// in the configured durable workspace authority.
+type ExecutionBindingAuthorizer interface {
+	AuthorizeExecutionBinding(ctx context.Context, request workspacepkg.ExecutionBindingAuthorizationRequest) error
+}
+
+// ToolCallAuthorizationProvider mints or selects the Aether OBO grant used when
+// an agent calls a client tool for another principal. nil is direct mode, which
+// is sufficient for OSS's strict originating-window policy.
+type ToolCallAuthorizationProvider interface {
+	AuthorizationForClientTool(
+		ctx context.Context,
+		access workspacepkg.ExecutionBindingAuthorizationRequest,
+		toolName string,
+	) (*pb.AuthorizationContext, error)
 }
 
 // Config configures the agent-side Aether transport.
@@ -101,15 +122,17 @@ type Config struct {
 // OnMessage delivery into the harness's pull-based FetchTask, and publishes a
 // turn's stream events back to the client that sent the turn.
 type Channel struct {
-	client                 *sdk.AgentClient
-	sourceAgent            string
-	agentNameFn            func() string
-	workspace              string
-	sessionWorkspace       string
-	preferTaskMessageLanes bool
-	workspaceResolver      WorkspaceResolver
-	assignmentRouter       *TaskAssignmentRouter
-	goalContinuations      *AssignedContinuationExecutor
+	client                        *sdk.AgentClient
+	sourceAgent                   string
+	agentNameFn                   func() string
+	workspace                     string
+	sessionWorkspace              string
+	preferTaskMessageLanes        bool
+	workspaceResolver             WorkspaceResolver
+	executionBindingAuthorizer    ExecutionBindingAuthorizer
+	toolCallAuthorizationProvider ToolCallAuthorizationProvider
+	assignmentRouter              *TaskAssignmentRouter
+	goalContinuations             *AssignedContinuationExecutor
 
 	tasks  chan channel.Inbound
 	runErr chan error
@@ -121,8 +144,11 @@ type Channel struct {
 	// replyTo maps an in-flight turn's task id to the topic the turn arrived
 	// from, so stream events go back to that client. Captured at ingress and
 	// dropped when the turn finalizes.
-	mu      sync.Mutex
-	replyTo map[string]string
+	mu                sync.Mutex
+	replyTo           map[string]string
+	executionBindings map[string]spec.ExecutionBinding
+	executionAccess   map[string]workspacepkg.ExecutionBindingAuthorizationRequest
+	pendingToolCalls  map[string]chan toolCallResponse
 
 	sessionMu          sync.Mutex
 	sessionService     SessionService
@@ -132,7 +158,9 @@ type Channel struct {
 
 	// sendMessage sends a CHAT payload to a topic. A seam so egress is testable
 	// without a live connection.
-	sendMessage func(topic string, payload []byte) error
+	sendMessage               func(topic string, payload []byte) error
+	sendToolMessage           func(topic string, payload []byte) error
+	sendAuthorizedToolMessage func(topic string, payload []byte, authorization *pb.AuthorizationContext) error
 }
 
 type sessionSubscriber struct {
@@ -196,6 +224,9 @@ func New(cfg Config) (*Channel, error) {
 		tasks:                  make(chan channel.Inbound, inboxBuffer),
 		runErr:                 make(chan error, 1),
 		replyTo:                map[string]string{},
+		executionBindings:      map[string]spec.ExecutionBinding{},
+		executionAccess:        map[string]workspacepkg.ExecutionBindingAuthorizationRequest{},
+		pendingToolCalls:       map[string]chan toolCallResponse{},
 		sessionSubscribers:     map[string]map[string]*sessionSubscriber{},
 		assignmentRouter:       NewTaskAssignmentRouter(),
 	}
@@ -203,7 +234,14 @@ func New(cfg Config) (*Channel, error) {
 		c.sessionWorkspace = c.workspace
 	}
 	c.sendMessage = client.SendChatMessage
+	c.sendToolMessage = client.SendToolCallMessage
+	c.sendAuthorizedToolMessage = func(topic string, payload []byte, authorization *pb.AuthorizationContext) error {
+		return client.SendWithOptions(sdk.SendMessageOptions{
+			TargetTopic: topic, Payload: payload, MessageType: sdk.MessageTypeToolCall, Authorization: authorization,
+		})
+	}
 	client.OnMessage(c.onMessage)
+	client.OnToolCallMessage(c.onToolCallMessage)
 	client.OnTaskAssignment(c.assignmentRouter.HandleAssignment)
 	return c, nil
 }
@@ -242,6 +280,23 @@ func (c *Channel) SetThreadClearer(fn func(addr protocol.MessageAddress) error) 
 func (c *Channel) SetSessionService(service SessionService) {
 	c.sessionMu.Lock()
 	c.sessionService = service
+	c.sessionMu.Unlock()
+}
+
+// SetExecutionBindingAuthorizer enables authoritative validation of client view
+// bindings. It may be set after connection, before accepting user turns.
+func (c *Channel) SetExecutionBindingAuthorizer(authorizer ExecutionBindingAuthorizer) {
+	c.sessionMu.Lock()
+	c.executionBindingAuthorizer = authorizer
+	c.sessionMu.Unlock()
+}
+
+// SetToolCallAuthorizationProvider enables gateway-validated OBO identity on
+// reverse tool calls. Enterprise compositions use this together with an access
+// authorizer and Aether ACLs; OSS intentionally leaves it nil.
+func (c *Channel) SetToolCallAuthorizationProvider(provider ToolCallAuthorizationProvider) {
+	c.sessionMu.Lock()
+	c.toolCallAuthorizationProvider = provider
 	c.sessionMu.Unlock()
 }
 
@@ -299,6 +354,13 @@ func (c *Channel) onMessage(ctx context.Context, msg *sdk.Message) error {
 		// carry traffic we are not the intended reader of.
 		return nil
 	}
+	binding, bindingErr := spec.GetExecutionBinding(chatMsg)
+	if bindingErr != nil {
+		slog.WarnContext(ctx, "aether: invalid execution binding", slog.Any("err", bindingErr))
+		c.rejectTurn(msg.SourceTopic, chatMsg, "invalid workspace execution binding")
+		return nil
+	}
+	var workspaceResolveErr error
 	if c.workspaceResolver != nil {
 		requestedWorkspace := chatMsg.Addr.WorkspaceID
 		// Older clients stamped the Aether routing workspace into the logical
@@ -309,13 +371,15 @@ func (c *Channel) onMessage(ctx context.Context, msg *sdk.Message) error {
 		}
 		workspaceID, resolveErr := c.workspaceResolver.ResolveWorkspace(ctx, requestedWorkspace)
 		if resolveErr != nil {
-			slog.WarnContext(ctx, "aether: inbound workspace unavailable",
-				slog.String("workspace", chatMsg.Addr.WorkspaceID))
-			return nil
+			workspaceResolveErr = resolveErr
+		} else {
+			chatMsg.Addr.WorkspaceID = workspaceID
 		}
-		chatMsg.Addr.WorkspaceID = workspaceID
 	}
 	if ctrl != nil {
+		if workspaceResolveErr != nil {
+			return nil
+		}
 		c.applyControl(ctx, ctrl, chatMsg.Addr)
 		return nil
 	}
@@ -330,9 +394,118 @@ func (c *Channel) onMessage(ctx context.Context, msg *sdk.Message) error {
 		}
 		chatMsg.Addr.TaskID = taskID
 	}
-	if msg.SourceTopic != "" {
+	if binding != nil {
+		if (workspaceResolveErr == nil && binding.WorkspaceID != chatMsg.Addr.WorkspaceID) ||
+			binding.ExecutionSite != spec.ExecutionSiteClient || msg.SourceTopic == "" {
+			slog.WarnContext(ctx, "aether: execution binding does not match turn source",
+				slog.String("workspace", chatMsg.Addr.WorkspaceID),
+				slog.String("source_topic", msg.SourceTopic),
+				slog.String("tool_host_id", binding.ToolHostID))
+			c.rejectTurn(msg.SourceTopic, chatMsg, "workspace execution binding does not match this turn")
+			return nil
+		}
+		if workspaceResolveErr != nil {
+			chatMsg.Addr.WorkspaceID = binding.WorkspaceID
+		}
+	}
+	c.sessionMu.Lock()
+	authorizer := c.executionBindingAuthorizer
+	toolAuthorizationProvider := c.toolCallAuthorizationProvider
+	c.sessionMu.Unlock()
+	if workspaceResolveErr != nil && (binding == nil || authorizer == nil) {
+		slog.WarnContext(ctx, "aether: inbound workspace unavailable",
+			slog.String("workspace", chatMsg.Addr.WorkspaceID))
+		c.rejectTurn(msg.SourceTopic, chatMsg, "workspace is unavailable")
+		return nil
+	}
+	var access *workspacepkg.ExecutionBindingAuthorizationRequest
+	if binding != nil {
+		request := workspacepkg.ExecutionBindingAuthorizationRequest{
+			Binding: *binding, SourceTopic: msg.SourceTopic, RequestUserID: chatMsg.Addr.UserID,
+		}
+		if msg.OnBehalfSubject != nil {
+			request.OnBehalfOf = workspacepkg.Principal{
+				Type: msg.OnBehalfSubject.GetPrincipalType(), ID: msg.OnBehalfSubject.GetPrincipalId(),
+			}
+		}
+		access = &request
+	}
+	if binding != nil && binding.ToolHostID != msg.SourceTopic &&
+		(authorizer == nil || toolAuthorizationProvider == nil) {
+		slog.WarnContext(ctx, "aether: cross-host execution binding requires access and OBO providers")
+		c.rejectTurn(msg.SourceTopic, chatMsg, "workspace tool sharing is not configured")
+		return nil
+	}
+	if access != nil && authorizer != nil {
+		go c.authorizeAndEnqueueTurn(context.WithoutCancel(ctx), msg.SourceTopic, chatMsg, *access, authorizer)
+		return nil
+	}
+	return c.enqueueTurn(ctx, msg.SourceTopic, chatMsg, access)
+}
+
+func (c *Channel) authorizeAndEnqueueTurn(
+	ctx context.Context,
+	sourceTopic string,
+	chatMsg protocol.ChatMessage,
+	request workspacepkg.ExecutionBindingAuthorizationRequest,
+	authorizer ExecutionBindingAuthorizer,
+) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	if err := authorizer.AuthorizeExecutionBinding(ctx, request); err != nil {
+		slog.WarnContext(ctx, "aether: execution binding is not authoritative", slog.Any("err", err))
+		c.rejectTurn(sourceTopic, chatMsg, "workspace tool access was denied")
+		return
+	}
+	if err := c.enqueueTurn(ctx, sourceTopic, chatMsg, &request); err != nil && ctx.Err() == nil {
+		slog.WarnContext(ctx, "aether: enqueue authorized turn", slog.Any("err", err))
+	}
+}
+
+// rejectTurn emits a terminal assistant message so a policy failure cannot
+// leave a remote UI waiting indefinitely. Detailed authorization errors stay
+// in server logs; the client receives only a stable, non-sensitive reason.
+func (c *Channel) rejectTurn(sourceTopic string, chatMsg protocol.ChatMessage, reason string) {
+	if sourceTopic == "" || chatMsg.Addr.ThreadID == "" {
+		return
+	}
+	messageID, err := ids.New("msg-")
+	if err != nil {
+		slog.Warn("aether: mint workspace rejection message id", slog.Any("err", err))
+		return
+	}
+	part, err := protocol.NewTextPart("Request rejected: " + reason + ".")
+	if err != nil {
+		return
+	}
+	message := protocol.ChatMessage{
+		SchemaVersion: spec.MessagingSchemaVersion,
+		ID:            messageID,
+		Role:          protocol.RoleAssistant,
+		Content:       []protocol.ContentPart{part},
+		Addr:          chatMsg.Addr,
+		Meta:          map[string]json.RawMessage{},
+	}
+	c.mu.Lock()
+	c.replyTo[chatMsg.Addr.TaskID] = sourceTopic
+	c.mu.Unlock()
+	if err := c.PublishEvent(context.Background(), channel.Event{
+		Type: channel.EventMessageFinal, Addr: chatMsg.Addr, Message: &message,
+	}); err != nil {
+		slog.Warn("aether: publish workspace rejection", slog.Any("err", err))
+	}
+}
+
+func (c *Channel) enqueueTurn(ctx context.Context, sourceTopic string, chatMsg protocol.ChatMessage, access *workspacepkg.ExecutionBindingAuthorizationRequest) error {
+	if sourceTopic != "" {
 		c.mu.Lock()
-		c.replyTo[chatMsg.Addr.TaskID] = msg.SourceTopic
+		c.replyTo[chatMsg.Addr.TaskID] = sourceTopic
+		c.mu.Unlock()
+	}
+	if access != nil {
+		c.mu.Lock()
+		c.executionBindings[chatMsg.Addr.TaskID] = access.Binding
+		c.executionAccess[chatMsg.Addr.TaskID] = *access
 		c.mu.Unlock()
 	}
 	select {
@@ -420,6 +593,8 @@ func (c *Channel) PublishEvent(_ context.Context, event channel.Event) error {
 	if event.Type == channel.EventMessageFinal {
 		c.mu.Lock()
 		delete(c.replyTo, event.Addr.TaskID)
+		delete(c.executionBindings, event.Addr.TaskID)
+		delete(c.executionAccess, event.Addr.TaskID)
 		c.mu.Unlock()
 	}
 	return nil

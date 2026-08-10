@@ -104,6 +104,24 @@ Hosts that intentionally serve more than one project can list additional IDs in
 `--visible-workspaces`; omitted request workspace still selects the configured
 default, and unlisted explicit workspaces fail closed.
 
+An Aether-connected TUI registers its local checkout as a workspace view and
+binds each turn to `(workspace_id, view_id, tool_host_id,
+relative_directory)`. File, directory, shell, and Python tools then execute on
+that exact client window, not in the worker container. When MemoryLayer is
+available it stores the durable view plus the client's current Git observation
+and authorizes dynamically discovered project workspaces. Without MemoryLayer,
+the configured default and `--visible-workspaces` policy remains authoritative.
+The ordinary in-process TUI/CLI/web/ACP modes do not require either service.
+
+The OSS remote-tool policy is deliberately single-user and exact-window: the
+turn must originate from the `tool_host_id` named by its binding, and that host
+accepts calls only from its configured Sahara agent. An execution binding is
+not an access grant. Enterprise compositions can replace both authorization
+seams to apply Aether ACLs and gateway-validated on-behalf-of identity for
+same-user, named-principal/group, or workspace-member sharing while retaining
+the same binding and MemoryLayer view model. Message-address `user_id` is never
+used as authenticated identity.
+
 ### Session attachment library
 
 `pkg/sessionlog` is the transport-independent OSS reference for resumable
@@ -430,9 +448,14 @@ conversation, and MemoryLayer extracts from it.
 In the TUI, type `@` followed by a path and use Tab/arrow keys to complete files
 or directories. Paths resolve from `/pwd`; use `/cd <path>` to change that
 virtual working directory without changing the process directory. An explicit
-`/cd` may leave the original workspace: the selected directory becomes an
-additional read/inspect/shell root for the live agent, while persistence,
-skills, and `write_file`/`edit_file` remain rooted in the original workspace.
+`/cd` may leave the original workspace. In the in-process TUI, the selected
+directory remains an additional read/inspect/shell root while structured writes
+remain rooted in the original workspace. In an Aether-connected TUI, the client
+registers the containing project/worktree as a separate logical view; all
+built-in workspace tools execute against that client-owned view, and no client
+absolute path is sent to or dereferenced by the worker. If the bound client
+disconnects, the tool call fails rather than silently falling back to the
+worker's checkout.
 Referenced images are sent inline; other references are normalized to
 workspace-relative or absolute granted paths. Press `Ctrl+C` or `Ctrl+D` twice
 within one second to quit. `Ctrl+Left`/`Ctrl+Right` move the composer by words;

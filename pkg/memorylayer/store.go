@@ -414,6 +414,12 @@ func (s *Store) ensureWorkspace(ctx context.Context, workspaceID string) error {
 	return nil
 }
 
+// EnsureWorkspace makes a logical workspace available for adjacent typed
+// resources (for example workspace views) without requiring a chat write first.
+func (s *Store) EnsureWorkspace(ctx context.Context, workspaceID string) error {
+	return s.ensureWorkspace(ctx, workspaceID)
+}
+
 func (s *Store) workspaceThreadsLocked(workspaceID string) map[string]threadindex.Session {
 	threads := s.threads[workspaceID]
 	if threads == nil {

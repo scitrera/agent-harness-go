@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -8,11 +9,24 @@ import (
 	"testing"
 
 	"charm.land/bubbles/v2/viewport"
+	spec "github.com/scitrera/ecosystem-messaging-spec/go"
+
+	"github.com/scitrera/agent-harness-go/pkg/protocol"
+	"github.com/scitrera/agent-harness-go/pkg/threadindex"
+	"github.com/scitrera/agent-harness-go/pkg/tools"
 )
 
 type recordingDirectoryAccess struct {
 	dirs []string
 	err  error
+}
+
+type fixedExecutionBindingProvider struct {
+	binding protocol.ExecutionBinding
+}
+
+func (p fixedExecutionBindingProvider) ExecutionBindingForDirectory(_ context.Context, _ string) (protocol.ExecutionBinding, error) {
+	return p.binding, nil
 }
 
 func (r *recordingDirectoryAccess) GrantWorkingDirectory(dir string) error {
@@ -148,5 +162,55 @@ func TestWorkingDirectoryKeepsPriorCWDWhenExternalGrantFails(t *testing.T) {
 	}
 	if got := updated.rows[len(updated.rows)-1].Text; !strings.Contains(got, "denied") {
 		t.Fatalf("grant failure = %q", got)
+	}
+}
+
+func TestRemoteWorkingDirectoryUsesLogicalBindingWithoutAbsolutePathMetadata(t *testing.T) {
+	root := t.TempDir()
+	subdir := filepath.Join(root, "src")
+	if err := os.Mkdir(subdir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	index, err := threadindex.NewIndex(t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := index.Touch("thread-1", ""); err != nil {
+		t.Fatal(err)
+	}
+	binding := spec.NewExecutionBinding("project-a", "view-a", "us::drew::w1", spec.ExecutionSiteClient)
+	binding.RootRef = "root:view-a"
+	binding.RelativeDirectory = "src"
+	channel := NewChannel()
+	m := model{
+		ctx: context.Background(), channel: channel, index: index,
+		workspaceRoot: root, cwd: subdir, threadID: "thread-1",
+		executionBindings: fixedExecutionBindingProvider{binding: binding},
+		viewport:          viewport.New(), composer: newComposer(),
+		turns: map[string]turnActivity{}, pendingApprovals: map[string]approvalRequest{},
+		tools: map[string]toolEntry{}, tailing: true,
+	}
+	m.composer.SetValue("inspect the project")
+	_, cmd := m.sendCurrent()
+	if cmd == nil {
+		t.Fatal("message was not enqueued")
+	}
+	if result := cmd(); result.(sendResultMsg).Err != nil {
+		t.Fatal(result)
+	}
+	inbound, err := channel.FetchTask(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := spec.GetExecutionBinding(inbound.Message)
+	if err != nil || got == nil || got.ViewID != "view-a" || got.RelativeDirectory != "src" {
+		t.Fatalf("execution binding = %+v, %v", got, err)
+	}
+	if _, ok := tools.MessageWorkingDirectory(inbound.Message); ok {
+		t.Fatal("remote message leaked absolute working_directory metadata")
+	}
+	text, _ := inbound.Message.Content[0].AsText()
+	if strings.Contains(text.Text, root) {
+		t.Fatalf("remote prompt leaked client root: %q", text.Text)
 	}
 }

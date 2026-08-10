@@ -5,6 +5,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	spec "github.com/scitrera/ecosystem-messaging-spec/go"
 
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 	"github.com/scitrera/agent-harness-go/pkg/threadindex"
@@ -244,7 +245,19 @@ func (m model) sendCurrent() (tea.Model, tea.Cmd) {
 	}
 	addr := protocol.MessageAddress{ThreadID: m.threadID, TaskID: taskID}
 	message := protocol.ChatMessage{ID: "user-" + taskID, Role: protocol.RoleUser, Addr: addr, Content: content}
-	if cwd := m.currentWorkingDirectory(); cwd != "" && cwd != m.workspaceRoot {
+	if m.executionBindings != nil {
+		binding, bindingErr := m.executionBindings.ExecutionBindingForDirectory(m.ctx, m.currentWorkingDirectory())
+		if bindingErr != nil {
+			m.addSystem("could not bind working directory: " + bindingErr.Error())
+			return m, nil
+		}
+		addr.WorkspaceID = binding.WorkspaceID
+		message.Addr.WorkspaceID = binding.WorkspaceID
+		if bindingErr := spec.PutExecutionBinding(&message, binding); bindingErr != nil {
+			m.addSystem("could not encode working directory binding: " + bindingErr.Error())
+			return m, nil
+		}
+	} else if cwd := m.currentWorkingDirectory(); cwd != "" && cwd != m.workspaceRoot {
 		tools.StampWorkingDirectory(&message, cwd)
 	}
 	m.lastTaskID = taskID
