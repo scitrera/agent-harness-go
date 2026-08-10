@@ -175,6 +175,83 @@ func TestRefinementResourceEditorCreatesNativeSkillManifest(t *testing.T) {
 	}
 }
 
+func TestRefinementResourceEditorCreatesNativeSemanticMemory(t *testing.T) {
+	transport := &refinementTransport{roundTrip: func(request *memorylayersdk.Request) *memorylayersdk.Response {
+		if request.Method != http.MethodPost || request.Path != "/memories" {
+			t.Fatalf("request = %s %s", request.Method, request.Path)
+		}
+		if request.Header.Get("If-None-Match") != "*" || request.Header.Get("Idempotency-Key") != "memory-op" {
+			t.Fatalf("conditional headers = %#v", request.Header)
+		}
+		var body map[string]any
+		if err := json.Unmarshal(request.Body, &body); err != nil {
+			t.Fatal(err)
+		}
+		if body["workspace_id"] != "project-a" || body["logical_key"] != "coding/review-policy" || body["type"] != "semantic" {
+			t.Fatalf("body = %#v", body)
+		}
+		return refinementJSONResponse(http.StatusCreated, `{"memory":{"id":"mem-1","workspace_id":"project-a","logical_key":"coding/review-policy","content":"Review before merging.","type":"semantic","tags":["coding"],"metadata":{"source":"refinement"},"refinement_metadata":{"audience":"agents"},"pinned":true,"revision":1,"etag":"m1"}}`)
+	}}
+	editor, err := NewRefinementResourceEditor(Config{}, WithRefinementResourceTransport(transport))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutation, err := editor.Apply(context.Background(), "project-a", "memory-op", refinement.Edit{
+		Action: refinement.ActionCreate, ResourceKind: refinement.ResourceMemory, ResourceKey: "coding/review-policy",
+		Content: map[string]any{
+			"content": "Review before merging.", "type": "semantic", "tags": []string{"coding"},
+			"metadata": map[string]any{"source": "refinement"}, "refinement_metadata": map[string]any{"audience": "agents"}, "pinned": true,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mutation.After == nil || mutation.After.ResourceID != "mem-1" || mutation.After.ResourceKey != "coding/review-policy" || mutation.After.ETag != "m1" {
+		t.Fatalf("mutation = %#v", mutation)
+	}
+	if mutation.After.Content["content"] != "Review before merging." || mutation.After.Content["pinned"] != true {
+		t.Fatalf("snapshot = %#v", mutation.After)
+	}
+}
+
+func TestRefinementResourceEditorReplaysSemanticMemoryReplaceFromHistory(t *testing.T) {
+	requests := 0
+	transport := &refinementTransport{roundTrip: func(request *memorylayersdk.Request) *memorylayersdk.Response {
+		requests++
+		switch requests {
+		case 1:
+			if request.Query.Get("workspace_id") != "project-a" || request.Query.Get("include_deleted") != "true" {
+				t.Fatalf("get query = %#v", request.Query)
+			}
+			return refinementJSONResponse(http.StatusOK, `{"memory":{"id":"mem-1","workspace_id":"project-a","logical_key":"policy","content":"New","type":"semantic","tags":[],"metadata":{},"refinement_metadata":{},"pinned":false,"revision":2,"etag":"m2"}}`)
+		case 2:
+			if request.Method != http.MethodPut || request.Path != "/memories/mem-1/semantic" || request.Header.Get("If-Match") != "m1" {
+				t.Fatalf("replace request = %#v", request)
+			}
+			return refinementJSONResponse(http.StatusOK, `{"memory":{"id":"mem-1","workspace_id":"project-a","logical_key":"policy","content":"New","type":"semantic","tags":[],"metadata":{},"refinement_metadata":{},"pinned":false,"revision":2,"etag":"m2"},"replayed":true}`)
+		case 3:
+			if request.Path != "/memories/mem-1/revisions" {
+				t.Fatalf("history path = %s", request.Path)
+			}
+			return refinementJSONResponse(http.StatusOK, `{"revisions":[{"memory":{"id":"mem-1","workspace_id":"project-a","logical_key":"policy","content":"New","type":"semantic","tags":[],"metadata":{},"refinement_metadata":{},"pinned":false,"revision":2,"etag":"m2"},"action":"replace","operation_id":"replace-op"},{"memory":{"id":"mem-1","workspace_id":"project-a","logical_key":"policy","content":"Old","type":"semantic","tags":[],"metadata":{},"refinement_metadata":{},"pinned":false,"revision":1,"etag":"m1"},"action":"create","operation_id":"create-op"}]}`)
+		default:
+			t.Fatalf("unexpected request %d: %s %s", requests, request.Method, request.Path)
+			return nil
+		}
+	}}
+	editor, _ := NewRefinementResourceEditor(Config{}, WithRefinementResourceTransport(transport))
+	mutation, err := editor.Apply(context.Background(), "project-a", "replace-op", refinement.Edit{
+		Action: refinement.ActionReplace, ResourceKind: refinement.ResourceMemory, ResourceKey: "policy", ResourceID: "mem-1", ExpectedETag: "m1",
+		Content: map[string]any{"content": "New", "type": "semantic", "subtype": nil, "tags": []string{}, "refinement_metadata": map[string]any{}, "pinned": false},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !mutation.Replayed || mutation.Before == nil || mutation.Before.ETag != "m1" || mutation.Before.Content["content"] != "Old" || mutation.After.ETag != "m2" {
+		t.Fatalf("replayed mutation = %#v", mutation)
+	}
+}
+
 func TestRefinementResourceEditorRestoresNativeSkillTombstone(t *testing.T) {
 	requests := 0
 	transport := &refinementTransport{roundTrip: func(request *memorylayersdk.Request) *memorylayersdk.Response {

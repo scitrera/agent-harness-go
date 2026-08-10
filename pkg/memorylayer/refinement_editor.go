@@ -16,10 +16,9 @@ import (
 
 const maxRefinementHistoryPages = 10
 
-// RefinementResourceEditor applies conflict-checked prompt-note and
-// agent-specification and skill-manifest edits against MemoryLayer's
-// revisioned native resource APIs. Memories remain unsupported until they
-// expose equivalent native CAS and history semantics.
+// RefinementResourceEditor applies conflict-checked prompt-note, memory,
+// agent-specification, and skill-manifest edits against MemoryLayer's
+// revisioned native resource APIs.
 type RefinementResourceEditor struct {
 	client *memorylayersdk.Client
 }
@@ -73,12 +72,77 @@ func (e *RefinementResourceEditor) Apply(ctx context.Context, workspaceID, opera
 	switch edit.ResourceKind {
 	case refinement.ResourcePromptNote:
 		return e.applyPromptNote(ctx, workspaceID, operationID, edit)
+	case refinement.ResourceMemory:
+		return e.applyMemory(ctx, workspaceID, operationID, edit)
 	case refinement.ResourceAgentSpecification:
 		return e.applyAgentSpecification(ctx, workspaceID, operationID, edit)
 	case refinement.ResourceSkill:
 		return e.applySkill(ctx, workspaceID, operationID, edit)
 	default:
 		return refinement.Mutation{}, fmt.Errorf("%w: %s", refinement.ErrUnsupportedResource, edit.ResourceKind)
+	}
+}
+
+func (e *RefinementResourceEditor) applyMemory(ctx context.Context, workspaceID, operationID string, edit refinement.Edit) (refinement.Mutation, error) {
+	authority := promptNoteAuthority(ctx)
+	opts := memorylayersdk.MemoryMutationOptions{
+		WorkspaceID: workspaceID, IdempotencyKey: operationID, ETag: edit.ExpectedETag, Authority: authority,
+	}
+	switch edit.Action {
+	case refinement.ActionCreate:
+		var input memorylayersdk.SemanticMemoryCreateInput
+		if err := decodeRefinementContent(edit.Content, &input); err != nil {
+			return refinement.Mutation{}, err
+		}
+		input.LogicalKey = edit.ResourceKey
+		result, err := e.client.CreateMemoryVersioned(ctx, input, opts)
+		if err != nil {
+			return refinement.Mutation{}, mapRefinementMutationError("create memory", err)
+		}
+		return refinement.Mutation{After: memorySnapshot(result.Memory), Replayed: result.Replayed}, nil
+	case refinement.ActionReplace, refinement.ActionDelete, refinement.ActionRestore:
+		if strings.TrimSpace(edit.ResourceID) == "" {
+			return refinement.Mutation{}, fmt.Errorf("%w: memory %s requires resource_id", refinement.ErrInvalid, edit.Action)
+		}
+		current, err := e.client.GetMemory(ctx, edit.ResourceID, memorylayersdk.GetMemoryOptions{
+			WorkspaceID: workspaceID, IncludeDeleted: true, Authority: authority,
+		})
+		if err != nil {
+			return refinement.Mutation{}, mapRefinementMutationError("get memory", err)
+		}
+		if current.LogicalKey == nil || *current.LogicalKey != edit.ResourceKey {
+			return refinement.Mutation{}, fmt.Errorf("%w: memory id %s has logical key %q, not %q", refinement.ErrConflict, edit.ResourceID, optionalStringValue(current.LogicalKey), edit.ResourceKey)
+		}
+		var result *memorylayersdk.MemoryMutationResult
+		switch edit.Action {
+		case refinement.ActionReplace:
+			var input memorylayersdk.SemanticMemoryReplaceInput
+			if err := decodeRefinementContent(edit.Content, &input); err != nil {
+				return refinement.Mutation{}, err
+			}
+			result, err = e.client.ReplaceSemanticMemory(ctx, edit.ResourceID, input, opts)
+		case refinement.ActionDelete:
+			result, err = e.client.DeleteMemoryVersioned(ctx, edit.ResourceID, opts)
+		case refinement.ActionRestore:
+			result, err = e.client.RestoreMemoryVersioned(ctx, edit.ResourceID, opts)
+		}
+		if err != nil {
+			return refinement.Mutation{}, mapRefinementMutationError(string(edit.Action)+" memory", err)
+		}
+		before := memorySnapshot(*current)
+		expectedDeleted := edit.Action == refinement.ActionRestore
+		if before.ETag != edit.ExpectedETag || before.Deleted != expectedDeleted {
+			if !result.Replayed {
+				return refinement.Mutation{}, fmt.Errorf("%w: authority accepted a memory mutation whose observed head did not match its expected ETag", refinement.ErrConflict)
+			}
+			before, err = e.findMemorySnapshot(ctx, workspaceID, edit.ResourceID, edit.ExpectedETag, authority)
+			if err != nil {
+				return refinement.Mutation{}, err
+			}
+		}
+		return refinement.Mutation{Before: before, After: memorySnapshot(result.Memory), Replayed: result.Replayed}, nil
+	default:
+		return refinement.Mutation{}, fmt.Errorf("%w: unsupported memory action %q", refinement.ErrInvalid, edit.Action)
 	}
 }
 
@@ -337,6 +401,28 @@ func (e *RefinementResourceEditor) findSkillSnapshot(ctx context.Context, worksp
 	return nil, fmt.Errorf("%w: expected skill revision %s is absent from bounded history", refinement.ErrConflict, etag)
 }
 
+func (e *RefinementResourceEditor) findMemorySnapshot(ctx context.Context, workspaceID, resourceID, etag string, authority *memorylayersdk.AuthorityContext) (*refinement.ResourceSnapshot, error) {
+	pageToken := ""
+	for page := 0; page < maxRefinementHistoryPages; page++ {
+		history, err := e.client.MemoryHistory(ctx, resourceID, memorylayersdk.MemoryHistoryOptions{
+			WorkspaceID: workspaceID, Limit: 100, PageToken: pageToken, Authority: authority,
+		})
+		if err != nil {
+			return nil, mapRefinementMutationError("read memory history", err)
+		}
+		for _, revision := range history.Revisions {
+			if revision.Memory.ETag == etag {
+				return memorySnapshot(revision.Memory), nil
+			}
+		}
+		if history.NextPageToken == "" {
+			break
+		}
+		pageToken = history.NextPageToken
+	}
+	return nil, fmt.Errorf("%w: expected memory revision %s is absent from bounded history", refinement.ErrConflict, etag)
+}
+
 func decodeRefinementContent(content map[string]any, output any) error {
 	encoded, err := json.Marshal(content)
 	if err != nil {
@@ -389,6 +475,21 @@ func skillSnapshot(skill memorylayersdk.SkillModel) *refinement.ResourceSnapshot
 			"metadata": skill.Metadata, "source_mode": skill.SourceMode, "enabled": skill.Enabled,
 		},
 		Metadata: skill.Metadata, Deleted: skill.DeletedAt != nil,
+	}
+}
+
+func memorySnapshot(memory memorylayersdk.Memory) *refinement.ResourceSnapshot {
+	logicalKey := ""
+	if memory.LogicalKey != nil {
+		logicalKey = *memory.LogicalKey
+	}
+	return &refinement.ResourceSnapshot{
+		ResourceID: memory.ID, ResourceKey: logicalKey, ETag: memory.ETag, SchemaVersion: 1,
+		Content: map[string]any{
+			"content": memory.Content, "type": memory.Type, "subtype": optionalStringValue(memory.Subtype),
+			"tags": memory.Tags, "refinement_metadata": memory.RefinementMetadata, "pinned": memory.Pinned,
+		},
+		Metadata: memory.Metadata, Deleted: memory.DeletedAt != nil,
 	}
 }
 
