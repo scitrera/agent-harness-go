@@ -62,6 +62,10 @@ func runServe(cfg appConfig) error {
 	if st.workspaceViews != nil {
 		ch.SetExecutionBindingAuthorizer(st.workspaceViews)
 	}
+	workerToolHost, err := configureAetherWorkerViews(ctx, ch, cfg, st.workspaceViews)
+	if err != nil {
+		return err
+	}
 	blobs, err := ch.BlobStore(0)
 	if err != nil {
 		return err
@@ -87,6 +91,9 @@ func runServe(cfg appConfig) error {
 		return err
 	}
 	authorityHandoff := authhandoff.New()
+	if err := enableAetherScheduledTurns(ctx, ch, workerToolHost, authorityHandoff, cfg); err != nil {
+		return err
+	}
 	continuationBackend, err := ch.EnableGoalContinuations(st.continuations, authorityHandoff, 0)
 	if err != nil {
 		return err
@@ -110,7 +117,7 @@ func runServe(cfg appConfig) error {
 		return deleteAddressHistory(context.Background(), st.history, addr)
 	})
 
-	rt, err := runtime.NewRunner(ch, withAetherGoalTaskLifecycle(ch, runner))
+	rt, err := runtime.NewRunner(ch, withAetherTaskLifecycle(ch, runner))
 	if err != nil {
 		return fmt.Errorf("runtime: %w", err)
 	}
@@ -118,6 +125,9 @@ func runServe(cfg appConfig) error {
 
 	if err := ch.ReconcileGoalContinuations(ctx); err != nil {
 		return fmt.Errorf("goal continuation recovery: %w", err)
+	}
+	if err := ch.ReconcileScheduledTurns(ctx); err != nil {
+		return fmt.Errorf("scheduled turn recovery: %w", err)
 	}
 	if err := startAetherTurnRecovery(ctx, ch, runner); err != nil {
 		return err

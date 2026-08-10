@@ -474,8 +474,10 @@ and shutdown drains any in-flight turn.
 Native tool-calling turn loop with bounded tool iterations, streaming egress,
 cancellation, context compaction + token-aware overflow recovery, transcript
 hygiene, provider error classification, in-process sub-agents, OpenClaw-style
-slash commands, filesystem skills, MCP client, OpenTelemetry spans, and an
-optional in-process scheduler for proactive work.
+slash commands, filesystem skills, MCP client, OpenTelemetry spans, and optional
+Aether WorkflowEngine schedules pinned to MemoryLayer workspace views. The
+older in-process scheduler remains an embedding seam; durable server operation
+uses Aether tasks and their lifecycle instead.
 
 ## Releases
 

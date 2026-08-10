@@ -138,6 +138,39 @@ build, but the worker reads them at startup, so recreate it:
 docker compose up -d --force-recreate agent
 ```
 
+### Optional: scheduled worker turns
+
+Aether's WorkflowEngine is enabled in this development stack. To declare a
+scheduled turn, copy the example, explicitly enable the entry, and tell the
+worker where the container-visible file lives:
+
+```bash
+cp schedules.example.yaml workspace/config/schedules.yaml
+$EDITOR workspace/config/schedules.yaml
+printf '\nSAHARA_SCHEDULE_CONFIG=/workspace/config/schedules.yaml\n' >> .env
+docker compose up -d --force-recreate agent
+```
+
+Each declaration is upserted idempotently into Aether and targets the concrete
+worker topic. Its payload carries a versioned logical binding to a
+MemoryLayer-authoritative workspace view; it never carries the host's absolute
+path. Clean Git views pin the current commit by default. Mutable directories
+and dirty worktrees are rejected unless the declaration opts in with
+`allow_mutable_view` or `allow_dirty_view` respectively. `miss_policy` defaults
+to `fire_once`; supported schedule types are `cron`, `interval`, and `once`.
+
+That workspace policy is rechecked when the task is admitted and before every
+tool call. A schedule that intentionally modifies its checkout must therefore
+set `allow_dirty_view: true`; otherwise its next tool call fails closed after
+the first write makes the view dirty. The registration remains pinned to the
+revision selected at worker startup. If the checkout moves to another revision,
+later fires fail closed until the worker is restarted or the declaration is
+reconciled against a newly published view.
+
+Editing a declaration changes its digest. Already queued work with an older
+digest fails closed instead of running the new prompt or a replacement view.
+Set `enabled: false` to remove that declaration's deterministic Aether schedule.
+
 ## 4. Attach the host TUI
 
 In a second terminal, from the OSS repository root (`oss/`):
@@ -178,6 +211,9 @@ and worker root, registers/authorizes the client view through
 `sv::memorylayer`, and asserts that the live Aether tool result contains the
 client value. It then removes the client host and asserts an error instead of a
 worker fallback.
+It also creates a one-shot Aether schedule, publishes a temporary worker view
+through MemoryLayer, and asserts that the resulting targeted background task
+arrives with the exact worker/view binding. Neither scenario invokes a model.
 
 ## 5. Exercise model capabilities
 
@@ -221,14 +257,15 @@ when testing provider separation.
 - session state is shared across attached clients;
 - an unmounted client checkout can service bound file/shell/Python tools over
   Aether without exposing its absolute path or falling back to a worker checkout;
+- Aether's WorkflowEngine can create an exact-worker scheduled turn whose
+  MemoryLayer view, declaration digest, and revision remain pinned at ingress;
 - the OSS executable loads `config/models.yaml`, supports `/model` pins, routes
   images by declared capability, and can resolve a provider per model;
 - the build consumes the untagged sibling source graph used during development.
 
 It does not prove production authentication, semantic retrieval quality with the
-default lexical embedder, or scheduled workflow behavior. The compose file keeps
-Aether's WorkflowEngine disabled; the planned scheduled/cron refinement and
-reconciliation slice needs a dedicated scenario when implemented.
+default lexical embedder, model execution for a scheduled prompt, or recovery
+across a deliberately interrupted scheduled turn.
 
 ## Services
 

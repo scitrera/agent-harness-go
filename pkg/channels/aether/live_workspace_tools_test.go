@@ -158,3 +158,87 @@ func TestLiveAetherClientWorkspaceToolRouting(t *testing.T) {
 		t.Fatal("missing live client host silently fell back to worker checkout")
 	}
 }
+
+// TestLiveAetherScheduledWorkerView verifies the WorkflowEngine path without an
+// LLM: a one-shot schedule creates an exact-target BACKGROUND task, the worker
+// reconstructs its versioned envelope, and ingress retains the published view.
+func TestLiveAetherScheduledWorkerView(t *testing.T) {
+	serverAddr := os.Getenv("AETHER_E2E_ADDR")
+	if serverAddr == "" {
+		t.Skip("set AETHER_E2E_ADDR to run the live Aether scheduled-view test")
+	}
+	aetherWorkspace := os.Getenv("AETHER_E2E_WORKSPACE")
+	if aetherWorkspace == "" {
+		aetherWorkspace = "default"
+	}
+	memoryLayerTarget := os.Getenv("MEMORYLAYER_E2E_TARGET")
+	if memoryLayerTarget == "" {
+		memoryLayerTarget = "sv::memorylayer"
+	}
+	suffix := strconv.FormatInt(time.Now().UnixNano(), 36)
+	logicalWorkspace := "e2e-schedule-" + suffix
+
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	worker, err := aetherchan.New(aetherchan.Config{
+		ServerAddr: serverAddr, Workspace: aetherWorkspace, SessionWorkspace: logicalWorkspace,
+		Specifier: "schedule-test-" + suffix,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = worker.Close() }()
+	mlConfig := memorylayer.Config{
+		Transport: mlaether.NewTransport(worker, mlaether.WithTarget(memoryLayerTarget)),
+		Workspace: logicalWorkspace,
+	}
+	mlStore, err := memorylayer.New(mlConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publisher, err := memorylayer.NewWorkspaceViewPublisher(mlConfig, mlStore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	host, err := aetherchan.NewWorkerToolHost(ctx, aetherchan.WorkerToolHostConfig{
+		WorkspaceID: logicalWorkspace, WorkspaceRoot: root, StateDir: t.TempDir(),
+		ToolHostID: worker.Topic(), Publisher: publisher,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker.SetWorkerToolHost(host)
+	binding, err := host.ScheduledExecutionBindingForDirectory(ctx, root, true, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fireAt := time.Now().Add(3 * time.Second).UTC().Format(time.RFC3339)
+	if err := worker.EnableScheduledTurns(ctx, []aetherchan.ScheduledTurnRegistration{{
+		ID: "once-" + suffix, Name: "E2E scheduled view", Enabled: true,
+		ScheduleType: "once", ScheduleExpression: fireAt, MissPolicy: "fire_once",
+		ThreadID: "scheduled-e2e", Prompt: "Inspect the exact worker view", Binding: binding,
+		ViewPolicy: aetherchan.ScheduledViewPolicy{AllowMutableView: true},
+	}}, nil, 0); err != nil {
+		t.Fatal(err)
+	}
+	inbound, err := worker.FetchTask(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inbound.Addr.WorkspaceID != logicalWorkspace || inbound.Addr.ThreadID != "scheduled-e2e" ||
+		inbound.Addr.TaskID == "" || !aetherchan.IsScheduledTurnMessage(inbound.Message) {
+		t.Fatalf("scheduled inbound = %+v", inbound)
+	}
+	gotBinding, err := spec.GetExecutionBinding(inbound.Message)
+	if err != nil || gotBinding == nil || gotBinding.ViewID != binding.ViewID ||
+		gotBinding.ToolHostID != worker.Topic() || gotBinding.ExecutionSite != spec.ExecutionSiteWorker {
+		t.Fatalf("scheduled binding = %+v err=%v", gotBinding, err)
+	}
+	if err := worker.FailTask(context.Background(), inbound.Addr.TaskID, "E2E inspection complete"); err != nil {
+		t.Fatal(err)
+	}
+}

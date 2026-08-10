@@ -26,8 +26,23 @@ type remoteToolDelegate struct {
 }
 
 func (d remoteToolDelegate) HandlesTool(name string) bool {
-	_, ok := clientWorkspaceTools[name]
+	_, ok := workspaceToolNames[name]
 	return ok
+}
+
+type workerToolDelegate struct {
+	host    *WorkerToolHost
+	binding spec.ExecutionBinding
+	policy  ScheduledViewPolicy
+}
+
+func (d workerToolDelegate) HandlesTool(name string) bool {
+	_, ok := workspaceToolNames[name]
+	return ok
+}
+
+func (d workerToolDelegate) InvokeTool(ctx context.Context, req tools.Request) (tools.Result, error) {
+	return d.host.invoke(ctx, d.binding, d.policy, req)
 }
 
 func (d remoteToolDelegate) InvokeTool(ctx context.Context, req tools.Request) (tools.Result, error) {
@@ -40,9 +55,16 @@ func (d remoteToolDelegate) InvokeTool(ctx context.Context, req tools.Request) (
 func (c *Channel) TurnContext(ctx context.Context, addr protocol.MessageAddress) context.Context {
 	c.mu.Lock()
 	binding, ok := c.executionBindings[addr.TaskID]
+	policy := c.executionPolicies[addr.TaskID]
 	c.mu.Unlock()
 	if !ok {
 		return ctx
+	}
+	if binding.ExecutionSite == spec.ExecutionSiteWorker {
+		c.sessionMu.Lock()
+		host := c.workerToolHost
+		c.sessionMu.Unlock()
+		return tools.WithToolDelegate(ctx, workerToolDelegate{host: host, binding: binding, policy: policy})
 	}
 	return tools.WithToolDelegate(ctx, remoteToolDelegate{channel: c, binding: binding})
 }
@@ -199,3 +221,4 @@ func (c *Channel) onToolCallMessage(_ context.Context, msg *sdk.Message) error {
 func toolCallKey(taskID, callID string) string { return taskID + "\x00" + callID }
 
 var _ tools.ToolDelegate = remoteToolDelegate{}
+var _ tools.ToolDelegate = workerToolDelegate{}

@@ -1,0 +1,23 @@
+# Copy to workspace/config/schedules.yaml, set enabled: true, and add
+# SAHARA_SCHEDULE_CONFIG=/workspace/config/schedules.yaml to e2e/.env.
+version: 1
+schedules:
+  - id: daily-workspace-review
+    name: Daily workspace review
+    enabled: false
+    schedule:
+      type: cron
+      expression: "0 9 * * *"
+      # Explicitly fire once after a gateway outage. "skip" is intentionally
+      # not accepted by Sahara because it can discard the first due fire.
+      miss_policy: fire_once
+    thread_id: scheduled-workspace-review
+    relative_directory: ""
+    # The compose workspace is a bind-mounted directory, not a Git checkout.
+    # Production coding schedules should normally pin a clean Git worktree and
+    # omit both opt-ins.
+    allow_mutable_view: true
+    allow_dirty_view: false
+    prompt: >-
+      Review the current workspace, summarize material changes, and record any
+      concrete follow-up tasks.

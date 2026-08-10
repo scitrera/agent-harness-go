@@ -168,6 +168,78 @@ func TestResolveCurrentBindingRejectsChangedGitRevision(t *testing.T) {
 	}
 }
 
+func TestScheduledBindingRequiresExplicitMutableOrDirtyOptIn(t *testing.T) {
+	ctx := context.Background()
+	mutable := t.TempDir()
+	registry, err := NewViewRegistry(ctx, ViewRegistryConfig{
+		InitialWorkspaceID: "project-a", InitialRoot: mutable, StateDir: t.TempDir(),
+		ToolHostID: "ag::routing::agent-harness::worker", ExecutionSite: spec.ExecutionSiteWorker,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registry.ScheduledExecutionBindingForDirectory(ctx, mutable, false, false); err == nil ||
+		!strings.Contains(err.Error(), "allow_mutable_view") {
+		t.Fatalf("mutable view error = %v", err)
+	}
+	if binding, err := registry.ScheduledExecutionBindingForDirectory(ctx, mutable, true, false); err != nil || binding.Revision != "" {
+		t.Fatalf("mutable opt-in binding = %+v, %v", binding, err)
+	}
+
+	repository := t.TempDir()
+	runGit(t, repository, "init")
+	runGit(t, repository, "config", "user.email", "tests@example.invalid")
+	runGit(t, repository, "config", "user.name", "Workspace Tests")
+	tracked := filepath.Join(repository, "tracked.txt")
+	if err := os.WriteFile(tracked, []byte("one"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, repository, "add", "tracked.txt")
+	runGit(t, repository, "commit", "-m", "initial")
+	dirtyRegistry, err := NewViewRegistry(ctx, ViewRegistryConfig{
+		InitialWorkspaceID: "project-b", InitialRoot: repository, StateDir: t.TempDir(),
+		ToolHostID: "ag::routing::agent-harness::worker", ExecutionSite: spec.ExecutionSiteWorker,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanBinding, err := dirtyRegistry.ScheduledExecutionBindingForDirectory(ctx, repository, false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tracked, []byte("dirty"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := dirtyRegistry.ValidateScheduledBinding(ctx, cleanBinding, false, false); err == nil ||
+		!strings.Contains(err.Error(), "allow_dirty_view") {
+		t.Fatalf("post-registration dirty view error = %v", err)
+	}
+	if _, err := dirtyRegistry.ScheduledExecutionBindingForDirectory(ctx, repository, false, false); err == nil ||
+		!strings.Contains(err.Error(), "allow_dirty_view") {
+		t.Fatalf("dirty view error = %v", err)
+	}
+	if binding, err := dirtyRegistry.ScheduledExecutionBindingForDirectory(ctx, repository, false, true); err != nil || binding.Revision == "" {
+		t.Fatalf("dirty opt-in binding = %+v, %v", binding, err)
+	}
+}
+
+func TestRenewRegisteredViewsRepublishesLease(t *testing.T) {
+	publisher := &recordingViewPublisher{}
+	registry, err := NewViewRegistry(context.Background(), ViewRegistryConfig{
+		InitialWorkspaceID: "project-a", InitialRoot: t.TempDir(), StateDir: t.TempDir(),
+		ToolHostID: "worker", ExecutionSite: spec.ExecutionSiteWorker, Publisher: publisher,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.RenewRegisteredViews(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(publisher.observations) != 2 || publisher.observations[1].Sequence <= publisher.observations[0].Sequence {
+		t.Fatalf("renewed observations = %+v", publisher.observations)
+	}
+}
+
 func runGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	commandArgs := append([]string{"-C", dir}, args...)

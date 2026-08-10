@@ -207,6 +207,67 @@ func (r *ViewRegistry) ExecutionBindingForDirectory(ctx context.Context, dir str
 	return binding, binding.Validate()
 }
 
+// ScheduledExecutionBindingForDirectory pins a background turn to the latest
+// observed revision. Mutable directories and dirty worktrees require explicit
+// opt-in because they cannot otherwise be reproduced after a delayed fire.
+func (r *ViewRegistry) ScheduledExecutionBindingForDirectory(
+	ctx context.Context,
+	dir string,
+	allowMutable bool,
+	allowDirty bool,
+) (spec.ExecutionBinding, error) {
+	binding, err := r.ExecutionBindingForDirectory(ctx, dir)
+	if err != nil {
+		return spec.ExecutionBinding{}, err
+	}
+	if err := r.ValidateScheduledBinding(ctx, binding, allowMutable, allowDirty); err != nil {
+		return spec.ExecutionBinding{}, err
+	}
+	return binding, nil
+}
+
+// ValidateScheduledBinding rechecks reproducibility policy immediately before
+// admission or execution. Unlike interactive views, a scheduled clean Git view
+// must stay clean for the full task; dirty or non-VCS views are usable only
+// under the explicit policy captured in the versioned schedule envelope.
+func (r *ViewRegistry) ValidateScheduledBinding(
+	ctx context.Context,
+	binding spec.ExecutionBinding,
+	allowMutable bool,
+	allowDirty bool,
+) error {
+	view, err := r.ResolveCurrentBinding(ctx, binding)
+	if err != nil {
+		return err
+	}
+	vcs := observeGit(ctx, view.Root)
+	if vcs == nil && !allowMutable {
+		return fmt.Errorf("scheduled workspace view is mutable; set allow_mutable_view explicitly")
+	}
+	if vcs != nil && vcs.Dirty && !allowDirty {
+		return fmt.Errorf("scheduled workspace view has uncommitted changes; set allow_dirty_view explicitly")
+	}
+	return nil
+}
+
+// RenewRegisteredViews republishes current observations without changing view
+// identity. Worker processes call it before MemoryLayer's observation lease
+// expires so durable selectors remain live.
+func (r *ViewRegistry) RenewRegisteredViews(ctx context.Context) error {
+	r.mu.RLock()
+	views := make([]View, 0, len(r.views))
+	for _, view := range r.views {
+		views = append(views, view)
+	}
+	r.mu.RUnlock()
+	for _, view := range views {
+		if _, err := r.refreshObservation(ctx, view); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (r *ViewRegistry) refreshObservation(ctx context.Context, view View) (View, error) {
 	r.publishMu.Lock()
 	defer r.publishMu.Unlock()

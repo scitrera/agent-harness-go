@@ -32,9 +32,9 @@ type recoverableTurnRunner interface {
 	InterruptTurn(ctx context.Context, workspaceID, taskID, reason string) error
 }
 
-func withAetherGoalTaskLifecycle(ch *aetherchan.Channel, runner runtime.TurnExecutor) runtime.TurnExecutor {
+func withAetherTaskLifecycle(ch *aetherchan.Channel, runner runtime.TurnExecutor) runtime.TurnExecutor {
 	return tasklifecycle.WrapWhen(runner, ch, func(_ protocol.MessageAddress, message protocol.ChatMessage) bool {
-		return goal.IsContinuationMessage(message)
+		return goal.IsContinuationMessage(message) || aetherchan.IsScheduledTurnMessage(message)
 	})
 }
 

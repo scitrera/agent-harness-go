@@ -113,6 +113,9 @@ type appConfig struct {
 	// goalMaxContinuations bounds host-created follow-up turns for one durable
 	// goal. Zero keeps goal tools/state enabled but disables automatic follow-ups.
 	goalMaxContinuations uint32
+	// scheduleConfig declares Aether WorkflowEngine schedules whose task payload
+	// is pinned to a MemoryLayer-authoritative worker view.
+	scheduleConfig string
 
 	// streamFlush is the token-delta coalescing interval handed to the turn
 	// runner; 0 streams every delta.

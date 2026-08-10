@@ -54,6 +54,7 @@ func main() {
 	memoryRecall := flag.Bool("memory-recall", true, "inject MemoryLayer memories relevant to each message when available")
 	memoryRecallLimit := flag.Int("memory-recall-limit", 5, "how many recalled memories to inject")
 	goalMaxContinuations := flag.Uint("goal-max-continuations", 3, "maximum automatic follow-up turns per durable goal; 0 disables automatic continuation")
+	scheduleConfig := flag.String("schedule-config", os.Getenv("SAHARA_SCHEDULE_CONFIG"), "YAML declarations for Aether-backed scheduled worker turns (serve modes; requires MemoryLayer)")
 	addr := flag.String("addr", env("SAHARA_WEB_ADDR", "127.0.0.1:8787"), "web UI listen address (NO auth - localhost only)")
 	noBrowser := flag.Bool("no-browser", false, "do not open a browser (web mode)")
 	exportThread := flag.String("export", "", "export thread history as JSONL to stdout and exit (a thread id, or 'all')")
@@ -139,8 +140,17 @@ func main() {
 		fmt.Fprintln(os.Stderr, "error: --goal-max-continuations is too large")
 		os.Exit(2)
 	}
+	if strings.TrimSpace(*scheduleConfig) != "" && selectedMode != appModeServe && selectedMode != appModeStandalone {
+		fmt.Fprintln(os.Stderr, "error: --schedule-config is supported only with --serve or --aether-standalone")
+		os.Exit(2)
+	}
+	if strings.TrimSpace(*scheduleConfig) != "" && !hasMemoryLayer {
+		fmt.Fprintln(os.Stderr, "error: --schedule-config requires MemoryLayer workspace authority")
+		os.Exit(2)
+	}
 	requiresMemoryLayer := normalizedMemoryLayerMode == memoryLayerModeAether ||
 		strings.TrimSpace(*subagentTarget) != "" || *subagentExecutor ||
+		strings.TrimSpace(*scheduleConfig) != "" ||
 		normalizedPromptNotesAuthority == promptNotesAuthorityMemoryLayer ||
 		normalizedAgentSpecificationsAuthority == agentSpecificationsAuthorityMemoryLayer ||
 		normalizedRefinementAuthority == refinementAuthorityMemoryLayer
@@ -209,6 +219,7 @@ func main() {
 		memoryRecall:                 *memoryRecall,
 		memoryRecallLimit:            *memoryRecallLimit,
 		goalMaxContinuations:         uint32(*goalMaxContinuations),
+		scheduleConfig:               strings.TrimSpace(*scheduleConfig),
 	}
 	if selectedMode == appModeServe || selectedMode == appModeStandalone {
 		cfg.streamFlush = aetherStreamFlush

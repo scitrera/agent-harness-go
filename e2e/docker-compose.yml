@@ -43,7 +43,7 @@ services:
       - --data-dir=/data
       - --dev
       - --insecure-admin
-      - --workflow=false
+      - --workflow=true
     environment:
       AETHER_ALLOW_DEV_MODE: "true"
     volumes:
@@ -132,6 +132,7 @@ services:
       SAHARA_LLM_API_KEY: ${SAHARA_LLM_API_KEY:-}
       SAHARA_LLM_MODEL: ${SAHARA_LLM_MODEL:-gpt-4o-mini}
       SAHARA_LLM_FORMAT: ${SAHARA_LLM_FORMAT:-openai}
+      SAHARA_SCHEDULE_CONFIG: ${SAHARA_SCHEDULE_CONFIG:-}
       # Optional named-provider credentials for config/models.yaml. Keep secrets
       # in .env and refer to them with api_key_env; never put keys in the YAML.
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}

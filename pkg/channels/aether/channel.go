@@ -133,6 +133,8 @@ type Channel struct {
 	toolCallAuthorizationProvider ToolCallAuthorizationProvider
 	assignmentRouter              *TaskAssignmentRouter
 	goalContinuations             *AssignedContinuationExecutor
+	scheduledTurns                *ScheduledTurnExecutor
+	workerToolHost                *WorkerToolHost
 
 	tasks  chan channel.Inbound
 	runErr chan error
@@ -147,6 +149,7 @@ type Channel struct {
 	mu                sync.Mutex
 	replyTo           map[string]string
 	executionBindings map[string]spec.ExecutionBinding
+	executionPolicies map[string]ScheduledViewPolicy
 	executionAccess   map[string]workspacepkg.ExecutionBindingAuthorizationRequest
 	pendingToolCalls  map[string]chan toolCallResponse
 
@@ -225,6 +228,7 @@ func New(cfg Config) (*Channel, error) {
 		runErr:                 make(chan error, 1),
 		replyTo:                map[string]string{},
 		executionBindings:      map[string]spec.ExecutionBinding{},
+		executionPolicies:      map[string]ScheduledViewPolicy{},
 		executionAccess:        map[string]workspacepkg.ExecutionBindingAuthorizationRequest{},
 		pendingToolCalls:       map[string]chan toolCallResponse{},
 		sessionSubscribers:     map[string]map[string]*sessionSubscriber{},
@@ -577,9 +581,82 @@ func (c *Channel) Enqueue(ctx context.Context, in channel.Inbound) error {
 	}
 }
 
+// SetWorkerToolHost installs the exact-view executor used by targeted durable
+// background turns. It is intentionally separate from the channel's default
+// local registry: a scheduled task must never silently fall back to another
+// root if its pinned view is unavailable.
+func (c *Channel) SetWorkerToolHost(host *WorkerToolHost) {
+	c.sessionMu.Lock()
+	c.workerToolHost = host
+	c.sessionMu.Unlock()
+}
+
+// EnqueueBoundTurn admits an internally reconstructed task with an execution
+// selector already authorized by its Aether assignment. The selector is stored
+// atomically with enqueue and removed if the bounded inbox cannot accept it.
+func (c *Channel) EnqueueBoundTurn(
+	ctx context.Context,
+	in channel.Inbound,
+	binding spec.ExecutionBinding,
+	policy ScheduledViewPolicy,
+) error {
+	if err := binding.Validate(); err != nil {
+		return fmt.Errorf("aether: invalid bound turn: %w", err)
+	}
+	if binding.ExecutionSite != spec.ExecutionSiteWorker || binding.ToolHostID != c.Topic() {
+		return fmt.Errorf("aether: bound turn targets a different worker")
+	}
+	if in.Addr.TaskID == "" || in.Message.Addr.TaskID != in.Addr.TaskID {
+		return fmt.Errorf("aether: bound turn requires one task id")
+	}
+	if in.Addr.WorkspaceID != binding.WorkspaceID || in.Message.Addr.WorkspaceID != binding.WorkspaceID {
+		return fmt.Errorf("aether: bound turn workspace does not match execution binding")
+	}
+	c.sessionMu.Lock()
+	host := c.workerToolHost
+	c.sessionMu.Unlock()
+	if host == nil || host.local == nil {
+		return fmt.Errorf("aether: worker workspace tool host is not configured")
+	}
+	if err := host.validateScheduledBinding(ctx, binding, policy); err != nil {
+		return fmt.Errorf("aether: bound turn view is unavailable: %w", err)
+	}
+	c.mu.Lock()
+	if _, exists := c.executionBindings[in.Addr.TaskID]; exists {
+		c.mu.Unlock()
+		return fmt.Errorf("aether: task %q already has an execution binding", in.Addr.TaskID)
+	}
+	c.executionBindings[in.Addr.TaskID] = binding
+	c.executionPolicies[in.Addr.TaskID] = policy
+	c.mu.Unlock()
+	select {
+	case c.tasks <- in:
+		return nil
+	case <-ctx.Done():
+		c.mu.Lock()
+		delete(c.executionBindings, in.Addr.TaskID)
+		delete(c.executionPolicies, in.Addr.TaskID)
+		c.mu.Unlock()
+		return ctx.Err()
+	}
+}
+
 // PublishEvent maps a harness stream event onto the wire and sends it to the
 // client that submitted the turn.
 func (c *Channel) PublishEvent(_ context.Context, event channel.Event) error {
+	if event.Type == channel.EventMessageFinal {
+		defer func() {
+			c.mu.Lock()
+			delete(c.replyTo, event.Addr.TaskID)
+			delete(c.executionBindings, event.Addr.TaskID)
+			delete(c.executionPolicies, event.Addr.TaskID)
+			delete(c.executionAccess, event.Addr.TaskID)
+			c.mu.Unlock()
+			if c.scheduledTurns != nil {
+				c.scheduledTurns.forget(event.Addr.TaskID)
+			}
+		}()
+	}
 	topic, payload, ok, err := c.streamMessage(event)
 	if err != nil {
 		return err
@@ -589,13 +666,6 @@ func (c *Channel) PublishEvent(_ context.Context, event channel.Event) error {
 	}
 	if err := c.sendMessage(topic, payload); err != nil {
 		return fmt.Errorf("aether: send stream event: %w", err)
-	}
-	if event.Type == channel.EventMessageFinal {
-		c.mu.Lock()
-		delete(c.replyTo, event.Addr.TaskID)
-		delete(c.executionBindings, event.Addr.TaskID)
-		delete(c.executionAccess, event.Addr.TaskID)
-		c.mu.Unlock()
 	}
 	return nil
 }
