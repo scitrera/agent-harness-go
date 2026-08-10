@@ -1,0 +1,32 @@
+# Repository metadata and local configuration must not be transferred to the
+# Docker builder. This matters even with a multi-stage image: builder inputs and
+# cache layers may live on a remote builder although they are absent at runtime.
+.git
+.git/**
+**/.git
+**/.git/**
+**/.env
+**/.env.*
+!**/.env.example
+
+# Agent/editor scratch state may contain transcripts, cloned references, and
+# other developer-local data that is neither source nor a build dependency.
+**/.claude
+**/.claude/**
+**/.codex
+**/.codex/**
+**/.omc
+**/.omc/**
+**/.slop
+**/.slop/**
+
+# Generated outputs and local dependency/cache trees.
+**/node_modules
+**/node_modules/**
+**/.venv
+**/.venv/**
+**/coverage.out
+**/dist
+**/dist/**
+**/build
+**/build/**
