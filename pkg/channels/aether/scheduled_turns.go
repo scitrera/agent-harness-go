@@ -74,6 +74,9 @@ func (r ScheduledTurnRegistration) Validate() error {
 	if r.Binding.ExecutionSite != spec.ExecutionSiteWorker {
 		return fmt.Errorf("aether: scheduled turn %q must target a worker execution site", r.ID)
 	}
+	if err := r.ViewPolicy.Validate(); err != nil {
+		return fmt.Errorf("aether: scheduled turn %q view policy: %w", r.ID, err)
+	}
 	return nil
 }
 
@@ -99,6 +102,9 @@ func (e scheduledTurnEnvelope) validate() error {
 	}
 	if e.Binding.ExecutionSite != spec.ExecutionSiteWorker {
 		return errors.New("aether: scheduled turn execution site is not worker")
+	}
+	if err := e.ViewPolicy.Validate(); err != nil {
+		return fmt.Errorf("aether: scheduled turn view policy: %w", err)
 	}
 	return nil
 }

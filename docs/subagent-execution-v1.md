@@ -1,5 +1,9 @@
 # Subagent Execution Envelope v1
 
+Revision 1 is retained for rolling compatibility with already-admitted unbound
+tasks. New work uses [revision 2](subagent-execution-v2.md), which adds exact
+workspace-view inheritance and write admission.
+
 Status: implemented for the default in-process path and the opt-in targeted
 Aether executor. The schema remains pre-release while sibling modules are tested
 through local replacements.

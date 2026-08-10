@@ -67,6 +67,7 @@ func ReconstructExecutionRequest(
 		SubjectType:     subjectType,
 		SubjectID:       subjectID,
 		Background:      envelope.Background,
+		ExecutionScope:  cloneExecutionScope(envelope.ExecutionScope),
 	}
 
 	if envelope.Policy.AgentType == "" {

@@ -46,6 +46,8 @@ type ClientToolHost struct {
 // named-principal, and workspace-member sharing without trusting envelope JSON.
 type ClientToolAccessRequest struct {
 	Binding    spec.ExecutionBinding
+	Policy     workspacepkg.ExecutionViewPolicy
+	ToolName   string
 	AgentTopic string
 	OnBehalfOf workspacepkg.Principal
 	Address    spec.MessageAddress
@@ -93,14 +95,17 @@ func (h *ClientToolHost) invoke(ctx context.Context, access ClientToolAccessRequ
 	if _, ok := workspaceToolNames[envelope.Name]; !ok {
 		return tools.Result{}, fmt.Errorf("tool %q is not hosted by this client", envelope.Name)
 	}
-	binding, err := toolEnvelopeBinding(envelope)
+	scope, err := toolEnvelopeExecutionScope(envelope)
 	if err != nil {
 		return tools.Result{}, err
 	}
+	binding := scope.Binding
 	if envelope.Addr.WorkspaceID != binding.WorkspaceID {
 		return tools.Result{}, fmt.Errorf("tool invocation workspace does not match execution binding")
 	}
 	access.Binding = binding
+	access.Policy = scope.Policy
+	access.ToolName = envelope.Name
 	access.Address = envelope.Addr
 	if h.accessAuthorizer != nil {
 		if err := h.accessAuthorizer.AuthorizeClientTool(ctx, access); err != nil {
@@ -109,22 +114,36 @@ func (h *ClientToolHost) invoke(ctx context.Context, access ClientToolAccessRequ
 	} else if access.AgentTopic == "" || access.AgentTopic != h.agentTopic {
 		return tools.Result{}, fmt.Errorf("client tool access denied: unexpected agent")
 	}
+	ctx = workspacepkg.WithExecutionScope(ctx, scope)
 	return h.local.invokeBound(ctx, binding, tools.RequestFromEnvelope(envelope))
 }
 
 func toolEnvelopeBinding(envelope spec.ToolInvokeEnvelope) (spec.ExecutionBinding, error) {
+	scope, err := toolEnvelopeExecutionScope(envelope)
+	return scope.Binding, err
+}
+
+func toolEnvelopeExecutionScope(envelope spec.ToolInvokeEnvelope) (workspacepkg.ExecutionScope, error) {
 	raw := envelope.Meta[spec.ExecutionBindingMetaKey]
 	if len(raw) == 0 {
-		return spec.ExecutionBinding{}, fmt.Errorf("tool invocation has no execution binding")
+		return workspacepkg.ExecutionScope{}, fmt.Errorf("tool invocation has no execution binding")
 	}
 	var binding spec.ExecutionBinding
 	if err := json.Unmarshal(raw, &binding); err != nil {
-		return spec.ExecutionBinding{}, fmt.Errorf("decode tool execution binding: %w", err)
+		return workspacepkg.ExecutionScope{}, fmt.Errorf("decode tool execution binding: %w", err)
 	}
 	if err := binding.Validate(); err != nil {
-		return spec.ExecutionBinding{}, err
+		return workspacepkg.ExecutionScope{}, err
 	}
-	return binding, nil
+	policy := workspacepkg.ExecutionViewPolicy{WriteAccess: workspacepkg.ViewWriteAccessReadWrite}
+	if rawPolicy := envelope.Meta[workspacepkg.ExecutionViewPolicyMetaKey]; len(rawPolicy) > 0 {
+		var err error
+		policy, err = workspacepkg.DecodeExecutionViewPolicy(rawPolicy)
+		if err != nil {
+			return workspacepkg.ExecutionScope{}, err
+		}
+	}
+	return workspacepkg.NewExecutionScope(binding, policy)
 }
 
 func toolResultBody(envelope spec.ToolInvokeEnvelope, result tools.Result, invokeErr error) spec.ToolResultPartBody {

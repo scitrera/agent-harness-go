@@ -12,6 +12,7 @@ import (
 
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 	"github.com/scitrera/agent-harness-go/pkg/subagent"
+	workspacepkg "github.com/scitrera/agent-harness-go/pkg/workspace"
 )
 
 type spySubagent struct {
@@ -26,6 +27,7 @@ type spySubagent struct {
 	instructions    string
 	resumeThreadID  string
 	parentMessageID string
+	executionScope  *workspacepkg.ExecutionScope
 	// resultThreadID/resultSummary let a test control the returned handle+digest.
 	resultThreadID string
 	resultSummary  string
@@ -54,7 +56,34 @@ func (s *spySubagent) RunSubagent(_ context.Context, req subagent.Request) (suba
 	s.instructions = req.Instructions
 	s.resumeThreadID = req.ResumeThreadID
 	s.parentMessageID = req.ParentMessageID
+	s.executionScope = req.ExecutionScope
 	return subagent.Result{Text: "sub-agent answer", ThreadID: s.resultThreadID, Summary: s.resultSummary}, nil
+}
+
+func TestRegisterSubagentInheritsExactExecutionScope(t *testing.T) {
+	registry := NewRegistry()
+	spy := &spySubagent{}
+	if err := RegisterSubagent(registry, spy, 2); err != nil {
+		t.Fatal(err)
+	}
+	binding := spec.NewExecutionBinding("project-a", "view-a", "window-a", spec.ExecutionSiteClient)
+	scope, err := workspacepkg.NewExecutionScope(binding, workspacepkg.ExecutionViewPolicy{
+		WriteAccess: workspacepkg.ViewWriteAccessReadOnly,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := workspacepkg.WithExecutionScope(context.Background(), scope)
+	_, err = registry.Invoke(ctx, Request{
+		CallID: "call-1", Name: SubagentToolName, Addr: protocol.MessageAddress{WorkspaceID: "project-a"},
+		Arguments: json.RawMessage(`{"task":"inspect the view"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !workspacepkg.ExecutionScopesEqual(&scope, spy.executionScope) {
+		t.Fatalf("inherited scope = %+v", spy.executionScope)
+	}
 }
 
 func TestRegisterSubagentInvokes(t *testing.T) {

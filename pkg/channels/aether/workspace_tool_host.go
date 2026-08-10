@@ -2,6 +2,7 @@ package aether
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sync"
@@ -117,6 +118,7 @@ func (h *boundWorkspaceToolHost) invokeBound(ctx context.Context, binding spec.E
 	if binding.RelativeDirectory != "" {
 		cwd = filepath.Join(view.Root, filepath.FromSlash(binding.RelativeDirectory))
 	}
+	ctx = tools.WithoutToolDelegate(ctx)
 	return registry.Invoke(tools.WithWorkingDirectory(ctx, cwd), req)
 }
 
@@ -161,6 +163,8 @@ type WorkerToolHostConfig struct {
 
 type WorkerToolAccessRequest struct {
 	Binding   spec.ExecutionBinding
+	Policy    workspacepkg.ExecutionViewPolicy
+	ToolName  string
 	Address   spec.MessageAddress
 	Authority tools.MemoryAuthority
 }
@@ -172,8 +176,35 @@ type WorkerToolAccessAuthorizer interface {
 // ScheduledViewPolicy is captured with a versioned task envelope. False values
 // are the safe default: require a clean Git worktree.
 type ScheduledViewPolicy struct {
-	AllowMutableView bool `json:"allow_mutable_view"`
-	AllowDirtyView   bool `json:"allow_dirty_view"`
+	WriteAccess      workspacepkg.ViewWriteAccess `json:"write_access,omitempty"`
+	AllowMutableView bool                         `json:"allow_mutable_view"`
+	AllowDirtyView   bool                         `json:"allow_dirty_view"`
+}
+
+// Validate rejects policy combinations that would permit a first write and
+// then strand the schedule on the dirty-view check before its next tool call.
+func (p ScheduledViewPolicy) Validate() error {
+	policy := p.executionViewPolicy()
+	if err := policy.Validate(); err != nil {
+		return err
+	}
+	if policy.WriteAccess == workspacepkg.ViewWriteAccessReadWrite && !p.AllowDirtyView {
+		return errors.New("read-write access requires allow_dirty_view")
+	}
+	return nil
+}
+
+func (p ScheduledViewPolicy) executionViewPolicy() workspacepkg.ExecutionViewPolicy {
+	access := p.WriteAccess
+	if access == "" {
+		access = workspacepkg.ViewWriteAccessReadOnly
+		if p.AllowDirtyView {
+			access = workspacepkg.ViewWriteAccessReadWrite
+		}
+	}
+	return workspacepkg.ExecutionViewPolicy{
+		WriteAccess: access, AllowMutableView: p.AllowMutableView, AllowDirtyView: p.AllowDirtyView,
+	}
 }
 
 // WorkerToolHost exposes only exact bindings registered by this worker. The
@@ -219,6 +250,9 @@ func (h *WorkerToolHost) validateScheduledBinding(
 	if h == nil || h.local == nil {
 		return fmt.Errorf("aether: worker workspace tool host is not configured")
 	}
+	if err := policy.Validate(); err != nil {
+		return fmt.Errorf("aether: invalid scheduled view policy: %w", err)
+	}
 	return h.local.views.ValidateScheduledBinding(
 		ctx, binding, policy.AllowMutableView, policy.AllowDirtyView,
 	)
@@ -236,10 +270,16 @@ func (h *WorkerToolHost) invoke(
 	if err := h.validateScheduledBinding(ctx, binding, policy); err != nil {
 		return tools.Result{}, fmt.Errorf("aether: scheduled workspace view is no longer admissible: %w", err)
 	}
+	viewPolicy := policy.executionViewPolicy()
+	scope, err := workspacepkg.NewExecutionScope(binding, viewPolicy)
+	if err != nil {
+		return tools.Result{}, err
+	}
+	ctx = workspacepkg.WithExecutionScope(ctx, scope)
 	if h.accessAuthorizer != nil {
 		authority, _ := tools.MemoryAuthorityFrom(ctx)
 		if err := h.accessAuthorizer.AuthorizeWorkerTool(ctx, WorkerToolAccessRequest{
-			Binding: binding, Address: req.Addr, Authority: authority,
+			Binding: binding, Policy: viewPolicy, ToolName: req.Name, Address: req.Addr, Authority: authority,
 		}); err != nil {
 			return tools.Result{}, fmt.Errorf("worker tool access denied: %w", err)
 		}

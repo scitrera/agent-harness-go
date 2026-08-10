@@ -38,6 +38,14 @@ type fakeCommandDelegate struct {
 	res  localtools.CommandResult
 }
 
+type fakeToolDelegate struct{}
+
+func (*fakeToolDelegate) HandlesTool(string) bool { return true }
+
+func (*fakeToolDelegate) InvokeTool(context.Context, Request) (Result, error) {
+	return Result{}, nil
+}
+
 func (f *fakeCommandDelegate) RunCommand(_ context.Context, spec localtools.CommandSpec) (localtools.CommandResult, error) {
 	f.spec = spec
 	return f.res, nil
@@ -93,6 +101,17 @@ func TestFileDelegateOverridesReadWriteEdit(t *testing.T) {
 	}
 	if fake.editPath != "c.txt" || fake.editOld != "x" || fake.editNew != "y" {
 		t.Fatalf("edit delegate not called: %+v", fake)
+	}
+}
+
+func TestWithoutToolDelegateMasksOuterDelegate(t *testing.T) {
+	delegate := &fakeToolDelegate{}
+	ctx := WithToolDelegate(context.Background(), delegate)
+	if ToolDelegateFrom(ctx) == nil {
+		t.Fatal("outer delegate missing")
+	}
+	if ToolDelegateFrom(WithoutToolDelegate(ctx)) != nil {
+		t.Fatal("host-local boundary retained outer delegate")
 	}
 }
 

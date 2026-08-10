@@ -47,6 +47,18 @@ func scheduledRegistration() ScheduledTurnRegistration {
 	}
 }
 
+func TestScheduledViewPolicyRequiresDirtyOptInForWrites(t *testing.T) {
+	registration := scheduledRegistration()
+	registration.ViewPolicy = ScheduledViewPolicy{WriteAccess: "read_write"}
+	if err := registration.Validate(); err == nil {
+		t.Fatal("expected read-write schedule without dirty-view admission to fail")
+	}
+	registration.ViewPolicy.WriteAccess = "read_only"
+	if err := registration.Validate(); err != nil {
+		t.Fatalf("read-only schedule: %v", err)
+	}
+}
+
 func TestScheduledWorkflowDataTargetsExactWorkerWithJSONEnvelope(t *testing.T) {
 	registration := scheduledRegistration()
 	data, err := scheduledWorkflowData("routing", registration.Binding.ToolHostID, registration)

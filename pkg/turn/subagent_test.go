@@ -20,12 +20,64 @@ import (
 	"github.com/scitrera/agent-harness-go/pkg/provider"
 	"github.com/scitrera/agent-harness-go/pkg/subagent"
 	"github.com/scitrera/agent-harness-go/pkg/tools"
+	workspacepkg "github.com/scitrera/agent-harness-go/pkg/workspace"
 )
+
+type scopeAuthorizerFunc func(context.Context, subagent.ExecutionScopeAuthorizationRequest) error
+
+func (f scopeAuthorizerFunc) AuthorizeSubagentExecutionScope(ctx context.Context, request subagent.ExecutionScopeAuthorizationRequest) error {
+	return f(ctx, request)
+}
 
 type captureSubagentLifecycle struct {
 	mu     sync.Mutex
 	events []subagent.LifecycleEvent
 	err    error
+}
+
+func TestSubagentExecutionScopeInheritanceNarrowingAndOverride(t *testing.T) {
+	parentBinding := spec.NewExecutionBinding("project-a", "view-a", "window-a", spec.ExecutionSiteClient)
+	parent, err := workspacepkg.NewExecutionScope(parentBinding, workspacepkg.ExecutionViewPolicy{
+		WriteAccess: workspacepkg.ViewWriteAccessReadWrite,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := &Runner{subagentDefaultWorkspace: "project-a"}
+	ctx := workspacepkg.WithExecutionScope(context.Background(), parent)
+	req := subagent.Request{
+		Parent:         protocol.MessageAddress{WorkspaceID: "project-a"},
+		PermissionMode: subagent.PermissionModeReadOnly,
+	}
+	resolved, err := runner.resolveSubagentExecutionScope(ctx, req, "parent_inheritance")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.ExecutionScope == nil || resolved.ExecutionScope.Policy.WriteAccess != workspacepkg.ViewWriteAccessReadOnly ||
+		resolved.ExecutionScope.Binding.ViewID != "view-a" {
+		t.Fatalf("resolved scope = %+v", resolved.ExecutionScope)
+	}
+
+	overrideBinding := spec.NewExecutionBinding("project-a", "view-b", "window-b", spec.ExecutionSiteClient)
+	override, err := workspacepkg.NewExecutionScope(overrideBinding, workspacepkg.ExecutionViewPolicy{
+		WriteAccess: workspacepkg.ViewWriteAccessReadOnly,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.ExecutionScope = &override
+	if _, err := runner.resolveSubagentExecutionScope(ctx, req, "parent_inheritance"); err == nil ||
+		!strings.Contains(err.Error(), "not authorized") {
+		t.Fatalf("override error = %v", err)
+	}
+	called := false
+	runner.subagentScopeAuthorizer = scopeAuthorizerFunc(func(_ context.Context, request subagent.ExecutionScopeAuthorizationRequest) error {
+		called = request.Parent.Binding.ViewID == "view-a" && request.Requested.Binding.ViewID == "view-b"
+		return nil
+	})
+	if _, err := runner.resolveSubagentExecutionScope(ctx, req, "parent_inheritance"); err != nil || !called {
+		t.Fatalf("authorized override = called:%v err:%v", called, err)
+	}
 }
 
 type captureSubagentTasks struct {
@@ -585,6 +637,43 @@ func Test_Runner_RunSubagent_denies_hidden_or_unlisted_tool_calls(t *testing.T) 
 	}
 	if !requestTextContains(provider.requests[1], "tool denied") {
 		t.Fatalf("denied tool_result missing from reprompt: %#v", provider.requests[1].Messages)
+	}
+}
+
+func Test_Runner_RunSubagent_readOnlyHidesAndDeniesViewMutation(t *testing.T) {
+	calledShell := false
+	registry := tools.NewRegistry()
+	if err := registry.Register("shell", tools.HandlerFunc(func(_ context.Context, req tools.Request) (tools.Result, error) {
+		calledShell = true
+		return tools.NewJSONResult(req.CallID, req.Name, json.RawMessage(`{"ran":true}`))
+	})); err != nil {
+		t.Fatal(err)
+	}
+	callPart, _ := protocol.NewToolCallPart(protocol.ToolInvokeEnvelope{CallID: "call-1", Name: "shell"})
+	finalPart, _ := protocol.NewTextPart("continued without mutation")
+	provider := &scriptedProvider{responses: []provider.ChatResponse{
+		{Message: protocol.ChatMessage{ID: "assistant-tool", Role: protocol.RoleAssistant, Content: []protocol.ContentPart{callPart}}},
+		{Message: protocol.ChatMessage{ID: "assistant-final", Role: protocol.RoleAssistant, Content: []protocol.ContentPart{finalPart}}},
+	}}
+	runner, err := NewRunner(Config{
+		Store: &fakeStore{}, Loader: fakeLoader{}, Registry: registry, Provider: provider,
+		Assembler: contextpack.NewAssembler(contextpack.Config{MaxHistoryMessages: 8}), MaxToolIterations: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := runner.RunSubagent(context.Background(), subagent.Request{
+		Task: "inspect only", Parent: protocol.MessageAddress{ThreadID: "thread-1"},
+		PermissionMode: subagent.PermissionModeReadOnly,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calledShell || result.Text != "continued without mutation" || len(provider.requests) != 2 {
+		t.Fatalf("called=%v result=%q requests=%d", calledShell, result.Text, len(provider.requests))
+	}
+	if len(provider.requests[0].Tools) != 0 || !requestTextContains(provider.requests[1], "read-only") {
+		t.Fatalf("read-only surface/result = tools:%+v messages:%+v", provider.requests[0].Tools, provider.requests[1].Messages)
 	}
 }
 

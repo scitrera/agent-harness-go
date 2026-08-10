@@ -15,6 +15,7 @@ import (
 	spec "github.com/scitrera/ecosystem-messaging-spec/go"
 
 	"github.com/scitrera/agent-harness-go/pkg/aetherwire"
+	"github.com/scitrera/agent-harness-go/pkg/channel"
 	"github.com/scitrera/agent-harness-go/pkg/localtools"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 	"github.com/scitrera/agent-harness-go/pkg/tools"
@@ -98,6 +99,19 @@ func TestClientBoundToolExecutesOnExactClientWithoutWorkerFallback(t *testing.T)
 		t.Fatalf("read %q, want client checkout", output.Text)
 	}
 
+	// A detached child captures the already-authorized delegate. Parent turn
+	// cleanup may remove its task-indexed maps, but that must not redirect or
+	// strand the child's exact-host calls.
+	worker.mu.Lock()
+	delete(worker.executionBindings, addr.TaskID)
+	delete(worker.executionAccess, addr.TaskID)
+	worker.mu.Unlock()
+	if _, err := registry.Invoke(ctx, tools.Request{
+		CallID: "call-detached", Name: "read_file", Arguments: json.RawMessage(`{"path":"identity.txt"}`), Addr: addr,
+	}); err != nil {
+		t.Fatalf("captured detached delegate: %v", err)
+	}
+
 	// Once bound, losing the client host is an error. The worker's similarly
 	// named local file must never be used as a silent fallback.
 	client.SetToolHost(nil)
@@ -106,6 +120,95 @@ func TestClientBoundToolExecutesOnExactClientWithoutWorkerFallback(t *testing.T)
 	})
 	if err == nil {
 		t.Fatal("missing client host silently fell back to the worker")
+	}
+}
+
+func TestClientToolHostEnforcesReadOnlyScopeBeforeWrite(t *testing.T) {
+	root := t.TempDir()
+	host, err := NewClientToolHost(context.Background(), ClientToolHostConfig{
+		WorkspaceID: "default", WorkspaceRoot: root, StateDir: t.TempDir(),
+		ToolHostID: "us::owner::window-1", AgentTopic: "ag::sahara",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding, err := host.ExecutionBindingForDirectory(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bindingJSON, _ := json.Marshal(binding)
+	policyJSON, _ := workspacepkg.EncodeExecutionViewPolicy(workspacepkg.ExecutionViewPolicy{
+		WriteAccess: workspacepkg.ViewWriteAccessReadOnly,
+	})
+	envelope := spec.ToolInvokeEnvelope{
+		SchemaVersion: spec.ToolsSchemaVersion, CallID: "call-write", Name: "write_file",
+		Args: map[string]json.RawMessage{
+			"path": json.RawMessage(`"forbidden.txt"`), "content": json.RawMessage(`"no"`),
+		},
+		Addr: spec.MessageAddress{WorkspaceID: "default", TaskID: "task-write"},
+		Meta: map[string]json.RawMessage{
+			spec.ExecutionBindingMetaKey: bindingJSON, workspacepkg.ExecutionViewPolicyMetaKey: policyJSON,
+		},
+	}
+	_, err = host.invoke(context.Background(), ClientToolAccessRequest{AgentTopic: "ag::sahara"}, envelope)
+	if err == nil || !strings.Contains(err.Error(), "requires write admission") {
+		t.Fatalf("read-only write error = %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(root, "forbidden.txt")); !os.IsNotExist(statErr) {
+		t.Fatalf("write escaped read-only scope: %v", statErr)
+	}
+}
+
+func TestInternalCompletionEnqueueRestoresExecutionScope(t *testing.T) {
+	worker, _ := newTestChannel(t)
+	binding := spec.NewExecutionBinding("project-a", "view-a", "window-a", spec.ExecutionSiteClient)
+	scope, err := workspacepkg.NewExecutionScope(binding, workspacepkg.ExecutionViewPolicy{
+		WriteAccess: workspacepkg.ViewWriteAccessReadOnly,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := protocol.MessageAddress{WorkspaceID: "project-a", ThreadID: "parent", TaskID: "completion-task"}
+	message := protocol.ChatMessage{ID: "completion", Role: protocol.RoleUser, Addr: addr}
+	if err := workspacepkg.PutExecutionScope(&message, scope); err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.Enqueue(context.Background(), channel.Inbound{Addr: addr, Message: message}); err != nil {
+		t.Fatal(err)
+	}
+	turnCtx := worker.TurnContext(context.Background(), addr)
+	got, ok := workspacepkg.ExecutionScopeFrom(turnCtx)
+	if !ok || !workspacepkg.ExecutionScopesEqual(&scope, &got) || tools.ToolDelegateFrom(turnCtx) == nil {
+		t.Fatalf("restored execution scope = %+v ok=%v delegate=%T", got, ok, tools.ToolDelegateFrom(turnCtx))
+	}
+}
+
+func TestTurnContextInvalidPolicyStillBlocksWorkspaceFallback(t *testing.T) {
+	worker, _ := newTestChannel(t)
+	addr := protocol.MessageAddress{WorkspaceID: "project-a", TaskID: "task-invalid-policy"}
+	binding := spec.NewExecutionBinding("project-a", "view-a", worker.Topic(), spec.ExecutionSiteWorker)
+	worker.mu.Lock()
+	worker.executionBindings[addr.TaskID] = binding
+	worker.executionPolicies[addr.TaskID] = ScheduledViewPolicy{WriteAccess: "future_access"}
+	worker.mu.Unlock()
+
+	ctx := worker.TurnContext(context.Background(), addr)
+	if tools.ToolDelegateFrom(ctx) == nil {
+		t.Fatal("invalid bound policy dropped the exact-host delegate")
+	}
+	registry := tools.NewRegistry()
+	calledFallback := false
+	if err := registry.Register("read_file", tools.HandlerFunc(func(context.Context, tools.Request) (tools.Result, error) {
+		calledFallback = true
+		return tools.Result{}, nil
+	})); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registry.Invoke(ctx, tools.Request{CallID: "read", Name: "read_file", Addr: addr}); err == nil {
+		t.Fatal("invalid exact-view policy unexpectedly invoked a workspace tool")
+	}
+	if calledFallback {
+		t.Fatal("invalid exact-view policy fell back to the worker registry")
 	}
 }
 

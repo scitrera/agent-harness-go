@@ -6,8 +6,11 @@ import (
 	"encoding/json"
 	"testing"
 
+	spec "github.com/scitrera/ecosystem-messaging-spec/go"
+
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 	"github.com/scitrera/agent-harness-go/pkg/subagent"
+	workspacepkg "github.com/scitrera/agent-harness-go/pkg/workspace"
 )
 
 // spyBackgroundSubagent is a spySubagent that also implements BackgroundRunner.
@@ -24,6 +27,7 @@ func (s *spyBackgroundSubagent) StartBackground(_ context.Context, req subagent.
 	s.bgCalled = true
 	s.task = req.Task
 	s.depth = req.Depth
+	s.executionScope = req.ExecutionScope
 	if s.bgErr != nil {
 		return "", s.bgErr
 	}
@@ -43,7 +47,15 @@ func Test_spawn_subagent_background_returns_running_handle(t *testing.T) {
 		}
 	}
 
-	res, err := reg.Invoke(context.Background(), Request{
+	binding := spec.NewExecutionBinding("project-a", "view-a", "window-a", spec.ExecutionSiteClient)
+	scope, err := workspacepkg.NewExecutionScope(binding, workspacepkg.ExecutionViewPolicy{
+		WriteAccess: workspacepkg.ViewWriteAccessReadOnly,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := workspacepkg.WithExecutionScope(context.Background(), scope)
+	res, err := reg.Invoke(ctx, Request{
 		CallID:    "c1",
 		Name:      "spawn_subagent",
 		Arguments: json.RawMessage(`{"task":"research X","background":true}`),
@@ -56,6 +68,9 @@ func Test_spawn_subagent_background_returns_running_handle(t *testing.T) {
 	}
 	if spy.called {
 		t.Fatal("synchronous RunSubagent must not run for a background spawn")
+	}
+	if !workspacepkg.ExecutionScopesEqual(&scope, spy.executionScope) {
+		t.Fatalf("background execution scope = %+v", spy.executionScope)
 	}
 	if !bytes.Contains(res.Payload, []byte(`"status":"running"`)) {
 		t.Fatalf("payload missing running status: %s", res.Payload)

@@ -37,6 +37,7 @@ type ToolDelegate interface {
 type fileDelegateKey struct{}
 type commandDelegateKey struct{}
 type toolDelegateKey struct{}
+type noToolDelegate struct{}
 
 // WithFileDelegate carries a FileDelegate on ctx. nil is a no-op.
 func WithFileDelegate(ctx context.Context, d FileDelegate) context.Context {
@@ -73,6 +74,13 @@ func WithToolDelegate(ctx context.Context, d ToolDelegate) context.Context {
 		return ctx
 	}
 	return context.WithValue(ctx, toolDelegateKey{}, d)
+}
+
+// WithoutToolDelegate marks a host-local execution boundary. A remote/worker
+// delegate calls a local registry to execute the selected tool; that nested
+// registry must not rediscover the outer delegate and recurse into itself.
+func WithoutToolDelegate(ctx context.Context) context.Context {
+	return context.WithValue(ctx, toolDelegateKey{}, noToolDelegate{})
 }
 
 // ToolDelegateFrom returns the full-invocation delegate on ctx, or nil.

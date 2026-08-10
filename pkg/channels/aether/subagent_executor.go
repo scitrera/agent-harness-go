@@ -14,6 +14,7 @@ import (
 
 	"github.com/scitrera/agent-harness-go/pkg/subagent"
 	"github.com/scitrera/agent-harness-go/pkg/tools"
+	workspacepkg "github.com/scitrera/agent-harness-go/pkg/workspace"
 )
 
 const defaultSubagentExecutorConcurrency = 4
@@ -27,21 +28,34 @@ type SubagentExecutorConfig struct {
 	// Resolver replaces the static Runner/Catalog pair for multi-workspace
 	// hosts. It is invoked with the validated logical workspace and the typed
 	// assignment authority installed on ctx.
-	Resolver       subagent.AssignedExecutionResolver
-	MaxConcurrency int
-	Timeout        time.Duration
+	Resolver             subagent.AssignedExecutionResolver
+	ExecutionScopeBinder AssignedExecutionScopeBinder
+	MaxConcurrency       int
+	Timeout              time.Duration
+}
+
+// AssignedExecutionScopeBinder validates an exact inherited view before task
+// claim, decorates execution with the corresponding tool delegate, and returns
+// a release hook. A bound envelope without this seam is rejected fail-closed.
+type AssignedExecutionScopeBinder interface {
+	BindAssignedExecutionScope(
+		ctx context.Context,
+		taskID string,
+		scope workspacepkg.ExecutionScope,
+	) (context.Context, func(), error)
 }
 
 // AssignedSubagentExecutor claims and executes targeted child tasks delivered
 // to one Aether agent. It is deliberately at-most-once within a process and
 // never replays a task already observed as running after a delivery gap.
 type AssignedSubagentExecutor struct {
-	backend    *SubagentTaskBackend
-	runner     subagent.AssignedRunner
-	catalog    subagent.Catalog
-	resolver   subagent.AssignedExecutionResolver
-	assignedTo string
-	slots      chan struct{}
+	backend     *SubagentTaskBackend
+	runner      subagent.AssignedRunner
+	catalog     subagent.Catalog
+	resolver    subagent.AssignedExecutionResolver
+	scopeBinder AssignedExecutionScopeBinder
+	assignedTo  string
+	slots       chan struct{}
 
 	mu       sync.Mutex
 	inflight map[string]struct{}
@@ -70,13 +84,14 @@ func NewAssignedSubagentExecutor(tasks TaskOperations, assignedTo string, cfg Su
 		cfg.Timeout = defaultTaskTimeout
 	}
 	return &AssignedSubagentExecutor{
-		backend:    &SubagentTaskBackend{tasks: tasks, timeout: cfg.Timeout},
-		runner:     cfg.Runner,
-		catalog:    cfg.Catalog,
-		resolver:   cfg.Resolver,
-		assignedTo: assignedTo,
-		slots:      make(chan struct{}, cfg.MaxConcurrency),
-		inflight:   make(map[string]struct{}),
+		backend:     &SubagentTaskBackend{tasks: tasks, timeout: cfg.Timeout},
+		runner:      cfg.Runner,
+		catalog:     cfg.Catalog,
+		resolver:    cfg.Resolver,
+		scopeBinder: cfg.ExecutionScopeBinder,
+		assignedTo:  assignedTo,
+		slots:       make(chan struct{}, cfg.MaxConcurrency),
+		inflight:    make(map[string]struct{}),
 	}, nil
 }
 
@@ -154,6 +169,20 @@ func (e *AssignedSubagentExecutor) HandleAssignment(ctx context.Context, assignm
 	if err != nil {
 		return e.reject(ctx, taskID, err)
 	}
+	releaseScope := func() {}
+	if envelope.ExecutionScope != nil {
+		if e.scopeBinder == nil {
+			return e.reject(ctx, taskID, errors.New("aether: assigned subagent execution scope binder is not configured"))
+		}
+		authCtx, releaseScope, err = e.scopeBinder.BindAssignedExecutionScope(authCtx, taskID, *envelope.ExecutionScope)
+		if err != nil {
+			return e.reject(ctx, taskID, fmt.Errorf("aether: bind assigned subagent execution scope: %w", err))
+		}
+		if releaseScope == nil {
+			releaseScope = func() {}
+		}
+	}
+	defer releaseScope()
 
 	if err := e.backend.Start(ctx, taskID); err != nil {
 		return fmt.Errorf("aether: claim assigned subagent task: %w", err)
@@ -240,6 +269,14 @@ func validateAssignedExecutionMetadata(metadata map[string]string, envelope suba
 		"scitrera.agent_name":        agentName,
 		"scitrera.agent_kind":        envelope.Policy.AgentType,
 		"scitrera.model":             envelope.Policy.Model,
+	}
+	if scope := envelope.ExecutionScope; scope != nil {
+		want["scitrera.execution_scope_digest"] = envelope.ExecutionScopeDigest()
+		want["scitrera.view_id"] = scope.Binding.ViewID
+		want["scitrera.tool_host_id"] = scope.Binding.ToolHostID
+		want["scitrera.execution_site"] = string(scope.Binding.ExecutionSite)
+		want["scitrera.view_write_access"] = string(scope.Policy.WriteAccess)
+		want["scitrera.view_revision"] = scope.Binding.Revision
 	}
 	for key, expected := range want {
 		if actual := metadata[key]; actual != expected {

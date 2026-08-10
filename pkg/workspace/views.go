@@ -80,6 +80,7 @@ type Principal struct {
 // or workspace-member policy. OSS uses the strict same-window policy.
 type ExecutionBindingAuthorizationRequest struct {
 	Binding     spec.ExecutionBinding
+	ViewPolicy  ExecutionViewPolicy
 	SourceTopic string
 	// RequestUserID is an application-level claim from the message address. It
 	// is useful for audit/correlation but MUST NOT be treated as authenticated

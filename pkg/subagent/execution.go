@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
+	workspacepkg "github.com/scitrera/agent-harness-go/pkg/workspace"
 )
 
 const (
@@ -21,8 +22,10 @@ const (
 	// carried by a durable task backend. It is an execution-plane contract, not
 	// part of the ecosystem session-message protocol.
 	ExecutionEnvelopeSchema = "agent-harness.subagent.execution"
-	// ExecutionEnvelopeSchemaRevision is the only revision currently accepted.
-	ExecutionEnvelopeSchemaRevision = 1
+	// Revision 2 adds an exact workspace execution scope. Revision 1 remains
+	// readable for already-admitted unbound tasks during rolling upgrades.
+	ExecutionEnvelopeSchemaRevision       = 2
+	executionEnvelopeLegacySchemaRevision = 1
 
 	ExecutionBackendHistory        = "history"
 	ExecutionBackendTaskCheckpoint = "task_checkpoint"
@@ -84,22 +87,23 @@ type ExecutionOwnership struct {
 // instructions, or authority credentials. A backend may carry the encoded
 // envelope as its task payload while retaining ordinary metadata for indexing.
 type ExecutionEnvelope struct {
-	SchemaRevision  uint32               `json:"schema_revision"`
-	Schema          string               `json:"schema"`
-	ExecutionID     string               `json:"execution_id"`
-	WorkspaceID     string               `json:"workspace_id"`
-	ParentSessionID string               `json:"parent_session_id"`
-	ChildSessionID  string               `json:"child_session_id"`
-	ParentTaskID    string               `json:"parent_task_id,omitempty"`
-	ParentMessageID string               `json:"parent_message_id,omitempty"`
-	InvocationID    string               `json:"invocation_id,omitempty"`
-	Depth           int                  `json:"depth"`
-	Background      bool                 `json:"background,omitempty"`
-	Input           ExecutionArtifactRef `json:"input"`
-	Result          ExecutionArtifactRef `json:"result"`
-	Checkpoint      ExecutionArtifactRef `json:"checkpoint"`
-	Policy          ExecutionPolicy      `json:"policy"`
-	Ownership       ExecutionOwnership   `json:"ownership"`
+	SchemaRevision  uint32                       `json:"schema_revision"`
+	Schema          string                       `json:"schema"`
+	ExecutionID     string                       `json:"execution_id"`
+	WorkspaceID     string                       `json:"workspace_id"`
+	ParentSessionID string                       `json:"parent_session_id"`
+	ChildSessionID  string                       `json:"child_session_id"`
+	ParentTaskID    string                       `json:"parent_task_id,omitempty"`
+	ParentMessageID string                       `json:"parent_message_id,omitempty"`
+	InvocationID    string                       `json:"invocation_id,omitempty"`
+	Depth           int                          `json:"depth"`
+	Background      bool                         `json:"background,omitempty"`
+	ExecutionScope  *workspacepkg.ExecutionScope `json:"execution_scope,omitempty"`
+	Input           ExecutionArtifactRef         `json:"input"`
+	Result          ExecutionArtifactRef         `json:"result"`
+	Checkpoint      ExecutionArtifactRef         `json:"checkpoint"`
+	Policy          ExecutionPolicy              `json:"policy"`
+	Ownership       ExecutionOwnership           `json:"ownership"`
 }
 
 // NewExecutionEnvelope builds the immutable descriptor used by both the local
@@ -107,7 +111,7 @@ type ExecutionEnvelope struct {
 func NewExecutionEnvelope(req Request, workspaceID, childSessionID string, background bool) (ExecutionEnvelope, error) {
 	workspaceID = strings.TrimSpace(workspaceID)
 	childSessionID = strings.TrimSpace(childSessionID)
-	executionID := "ahx-v1-" + hashExecutionIdentity(
+	executionID := "ahx-v2-" + hashExecutionIdentity(
 		workspaceID,
 		req.Parent.ThreadID,
 		childSessionID,
@@ -116,6 +120,7 @@ func NewExecutionEnvelope(req Request, workspaceID, childSessionID string, backg
 		req.InvocationID,
 		strconv.Itoa(req.Depth),
 		strconv.FormatBool(background),
+		digestExecutionScope(req.ExecutionScope),
 	)
 	policy := executionPolicy(req)
 	envelope := ExecutionEnvelope{
@@ -130,6 +135,7 @@ func NewExecutionEnvelope(req Request, workspaceID, childSessionID string, backg
 		InvocationID:    strings.TrimSpace(req.InvocationID),
 		Depth:           req.Depth,
 		Background:      background,
+		ExecutionScope:  cloneExecutionScope(req.ExecutionScope),
 		Input: ExecutionArtifactRef{
 			Backend:     ExecutionBackendHistory,
 			Kind:        ExecutionArtifactMessage,
@@ -148,7 +154,7 @@ func NewExecutionEnvelope(req Request, workspaceID, childSessionID string, backg
 		Checkpoint: ExecutionArtifactRef{
 			Backend:  ExecutionBackendTaskCheckpoint,
 			Kind:     ExecutionArtifactCheckpoint,
-			RecordID: "agent-harness/subagent/" + executionID + "/v1",
+			RecordID: "agent-harness/subagent/" + executionID + "/v2",
 		},
 		Policy: policy,
 		Ownership: ExecutionOwnership{
@@ -173,12 +179,13 @@ func (e ExecutionEnvelope) Validate() error {
 	switch {
 	case e.Schema != ExecutionEnvelopeSchema:
 		return fmt.Errorf("subagent: unsupported execution schema %q", e.Schema)
-	case e.SchemaRevision != ExecutionEnvelopeSchemaRevision:
+	case e.SchemaRevision != executionEnvelopeLegacySchemaRevision && e.SchemaRevision != ExecutionEnvelopeSchemaRevision:
 		return fmt.Errorf("subagent: unsupported execution schema revision %d", e.SchemaRevision)
 	case e.Depth < 0:
 		return errors.New("subagent: execution depth must not be negative")
 	}
-	wantExecutionID := "ahx-v1-" + hashExecutionIdentity(
+	prefix := "ahx-v1-"
+	identity := []string{
 		e.WorkspaceID,
 		e.ParentSessionID,
 		e.ChildSessionID,
@@ -187,7 +194,14 @@ func (e ExecutionEnvelope) Validate() error {
 		e.InvocationID,
 		strconv.Itoa(e.Depth),
 		strconv.FormatBool(e.Background),
-	)
+	}
+	if e.SchemaRevision == ExecutionEnvelopeSchemaRevision {
+		prefix = "ahx-v2-"
+		identity = append(identity, digestExecutionScope(e.ExecutionScope))
+	} else if e.ExecutionScope != nil {
+		return errors.New("subagent: revision 1 execution cannot carry an execution scope")
+	}
+	wantExecutionID := prefix + hashExecutionIdentity(identity...)
 	if e.ExecutionID != wantExecutionID {
 		return errors.New("subagent: invalid execution id")
 	}
@@ -234,7 +248,7 @@ func (e ExecutionEnvelope) Validate() error {
 	if e.Checkpoint.Backend != ExecutionBackendTaskCheckpoint || e.Checkpoint.Kind != ExecutionArtifactCheckpoint {
 		return errors.New("subagent: invalid execution checkpoint backend or kind")
 	}
-	if e.Checkpoint.RecordID != "agent-harness/subagent/"+e.ExecutionID+"/v1" {
+	if e.Checkpoint.RecordID != fmt.Sprintf("agent-harness/subagent/%s/v%d", e.ExecutionID, e.SchemaRevision) {
 		return errors.New("subagent: execution checkpoint does not match execution id")
 	}
 	if err := validateExecutionIdentifier("checkpoint record id", e.Checkpoint.RecordID); err != nil {
@@ -242,6 +256,14 @@ func (e ExecutionEnvelope) Validate() error {
 	}
 	if e.Checkpoint.WorkspaceID != "" || e.Checkpoint.SessionID != "" || e.Checkpoint.Digest != "" {
 		return errors.New("subagent: task checkpoint must not carry history identity")
+	}
+	if e.ExecutionScope != nil {
+		if err := e.ExecutionScope.Validate(); err != nil {
+			return fmt.Errorf("subagent: invalid workspace execution scope: %w", err)
+		}
+		if e.ExecutionScope.Binding.WorkspaceID != e.WorkspaceID {
+			return errors.New("subagent: execution scope workspace mismatch")
+		}
 	}
 	if e.Policy.MaxTurns < 0 {
 		return errors.New("subagent: execution max turns must not be negative")
@@ -278,6 +300,9 @@ func (e ExecutionEnvelope) VerifyPolicy(req Request) error {
 	}
 	if !bytes.Equal(gotJSON, wantJSON) {
 		return errors.New("subagent: execution policy snapshot mismatch")
+	}
+	if !workspacepkg.ExecutionScopesEqual(e.ExecutionScope, req.ExecutionScope) {
+		return errors.New("subagent: workspace execution scope snapshot mismatch")
 	}
 	return nil
 }
@@ -341,7 +366,7 @@ func (e ExecutionEnvelope) ResolveResult(messages []protocol.ChatMessage) (proto
 	}
 	for i := inputIndex + 1; i < len(messages); i++ {
 		message := messages[i]
-		if message.Role == protocol.RoleUser && strings.HasPrefix(message.ID, "ahx-v1-") && strings.HasSuffix(message.ID, "-input") {
+		if message.Role == protocol.RoleUser && isExecutionInputID(message.ID) {
 			break
 		}
 		if message.Role != protocol.RoleAssistant || message.Addr.WorkspaceID != e.Result.WorkspaceID || message.Addr.ThreadID != e.Result.SessionID {
@@ -368,6 +393,12 @@ func MarshalExecutionEnvelope(envelope ExecutionEnvelope) ([]byte, error) {
 		return nil, err
 	}
 	return json.Marshal(envelope)
+}
+
+// ExecutionScopeDigest is a stable, credential-free correlation value for task
+// metadata. The complete scope remains in the versioned payload.
+func (e ExecutionEnvelope) ExecutionScopeDigest() string {
+	return digestExecutionScope(e.ExecutionScope)
 }
 
 // ParseExecutionEnvelope strictly decodes one descriptor. Unknown fields and
@@ -434,6 +465,36 @@ func digestExecutionPolicy(req Request) string {
 func digestExecutionText(text string) string {
 	sum := sha256.Sum256([]byte(text))
 	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+func digestExecutionScope(scope *workspacepkg.ExecutionScope) string {
+	if scope == nil {
+		return ""
+	}
+	data, err := json.Marshal(scope)
+	if err != nil {
+		return "invalid"
+	}
+	return digestExecutionText(string(data))
+}
+
+func cloneExecutionScope(scope *workspacepkg.ExecutionScope) *workspacepkg.ExecutionScope {
+	if scope == nil {
+		return nil
+	}
+	copyScope := *scope
+	if scope.Binding.Extra != nil {
+		copyScope.Binding.Extra = make(map[string]json.RawMessage, len(scope.Binding.Extra))
+		for key, value := range scope.Binding.Extra {
+			copyScope.Binding.Extra[key] = append(json.RawMessage(nil), value...)
+		}
+	}
+	return &copyScope
+}
+
+func isExecutionInputID(id string) bool {
+	return strings.HasSuffix(id, "-input") &&
+		(strings.HasPrefix(id, "ahx-v1-") || strings.HasPrefix(id, "ahx-v2-"))
 }
 
 func hashExecutionIdentity(parts ...string) string {

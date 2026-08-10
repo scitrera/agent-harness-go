@@ -16,6 +16,7 @@ import (
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 	"github.com/scitrera/agent-harness-go/pkg/provider"
 	"github.com/scitrera/agent-harness-go/pkg/subagent"
+	workspacepkg "github.com/scitrera/agent-harness-go/pkg/workspace"
 )
 
 // captureEnqueuer records inbound turns pushed by a background sub-agent's
@@ -76,10 +77,18 @@ func Test_Runner_StartBackground_pushes_completion_notice_to_parent(t *testing.T
 		t.Fatalf("runner: %v", err)
 	}
 
-	threadID, err := r.StartBackground(context.Background(), subagent.Request{
+	binding := spec.NewExecutionBinding("project-a", "view-a", "window-a", spec.ExecutionSiteClient)
+	scope, err := workspacepkg.NewExecutionScope(binding, workspacepkg.ExecutionViewPolicy{
+		WriteAccess: workspacepkg.ViewWriteAccessReadOnly,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := workspacepkg.WithExecutionScope(context.Background(), scope)
+	threadID, err := r.StartBackground(ctx, subagent.Request{
 		Task:        "do it in the background",
 		Depth:       1,
-		Parent:      protocol.MessageAddress{ThreadID: "parent-1"},
+		Parent:      protocol.MessageAddress{WorkspaceID: "project-a", ThreadID: "parent-1"},
 		SubjectType: "user",
 		SubjectID:   "u9",
 	})
@@ -110,6 +119,10 @@ func Test_Runner_StartBackground_pushes_completion_notice_to_parent(t *testing.T
 		}
 		if sp.ThreadID != threadID {
 			t.Fatalf("notice thread handle = %q, want %q", sp.ThreadID, threadID)
+		}
+		noticeScope, scopeErr := workspacepkg.GetExecutionScope(in.Message)
+		if scopeErr != nil || !workspacepkg.ExecutionScopesEqual(&scope, noticeScope) {
+			t.Fatalf("notice execution scope = %+v err=%v", noticeScope, scopeErr)
 		}
 		// The OBO is handed off as an opaque single-use token, NOT a credential on
 		// the message; resolving it yields the parent subject, and it is consumed.

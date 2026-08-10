@@ -31,7 +31,8 @@ func enableAetherSubagentExecutor(ch *aetherchan.Channel, runner *turn.Runner, c
 		return fmt.Errorf("external subagents require MemoryLayer shared history")
 	}
 	_, err := ch.EnableSubagentExecutor(aetherchan.SubagentExecutorConfig{
-		Runner: runner, Catalog: catalog, MaxConcurrency: cfg.subagentExecutorConcurrency,
+		Runner: runner, Catalog: catalog, ExecutionScopeBinder: ch,
+		MaxConcurrency: cfg.subagentExecutorConcurrency,
 	})
 	return err
 }

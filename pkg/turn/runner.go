@@ -209,6 +209,7 @@ type Runner struct {
 	subagentObserver          subagent.LifecycleObserver
 	subagentDefaultWorkspace  string
 	subagentTasks             subagent.TaskBackend
+	subagentScopeAuthorizer   subagent.ExecutionScopeAuthorizer
 	turnJournal               turnjournal.Store
 	turnOwnerIdentity         string
 
@@ -479,6 +480,10 @@ type Config struct {
 	// reconciliation. The lifecycle observer remains the session snapshot
 	// projection. Nil preserves the independently useful local runner.
 	SubagentTasks subagent.TaskBackend
+	// SubagentExecutionScopeAuthorizer is called only for a requested binding
+	// change or write-access expansion. Nil keeps OSS fail-closed while exact
+	// inheritance and read-only narrowing remain independently useful.
+	SubagentExecutionScopeAuthorizer subagent.ExecutionScopeAuthorizer
 	// TurnJournal durably checkpoints parent model/tool execution. It is optional
 	// so embedders retain the prior in-memory behavior; when set, OwnerIdentity is
 	// required and active records are scoped to that stable runtime identity.
@@ -631,6 +636,7 @@ func NewRunner(cfg Config) (*Runner, error) {
 		subagentObserver:          cfg.SubagentObserver,
 		subagentDefaultWorkspace:  strings.TrimSpace(cfg.SubagentDefaultWorkspace),
 		subagentTasks:             cfg.SubagentTasks,
+		subagentScopeAuthorizer:   cfg.SubagentExecutionScopeAuthorizer,
 		turnJournal:               cfg.TurnJournal,
 		turnOwnerIdentity:         strings.TrimSpace(cfg.TurnOwnerIdentity),
 		rubric:                    cfg.Rubric,

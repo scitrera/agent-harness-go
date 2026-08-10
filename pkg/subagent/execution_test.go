@@ -7,7 +7,10 @@ import (
 	"strings"
 	"testing"
 
+	spec "github.com/scitrera/ecosystem-messaging-spec/go"
+
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
+	workspacepkg "github.com/scitrera/agent-harness-go/pkg/workspace"
 )
 
 type executionCatalog struct {
@@ -26,6 +29,11 @@ func (c executionCatalog) Get(_ context.Context, typ AgentType) (Definition, err
 }
 
 func executionTestRequest() Request {
+	binding := spec.NewExecutionBinding("project-a", "view-a", "worker-a", spec.ExecutionSiteWorker)
+	binding.Revision = "0123456789abcdef"
+	scope, _ := workspacepkg.NewExecutionScope(binding, workspacepkg.ExecutionViewPolicy{
+		WriteAccess: workspacepkg.ViewWriteAccessReadOnly,
+	})
 	return Request{
 		Task:  "inspect the private design and summarize it",
 		Depth: 2,
@@ -39,6 +47,7 @@ func executionTestRequest() Request {
 		GrantID:         "secret-grant",
 		SubjectType:     "user",
 		SubjectID:       "secret-user",
+		ExecutionScope:  &scope,
 		AgentName:       "reviewer",
 		AgentType:       "review",
 		Instructions:    "PRIVATE CATALOG INSTRUCTIONS",
@@ -74,6 +83,10 @@ func TestExecutionEnvelopeRoundTripOmitsPromptInstructionsAndCredentials(t *test
 	}
 	if decoded.ExecutionID != envelope.ExecutionID || decoded.Input.RecordID != envelope.ExecutionID+"-input" {
 		t.Fatalf("decoded envelope = %+v", decoded)
+	}
+	if decoded.SchemaRevision != ExecutionEnvelopeSchemaRevision ||
+		!workspacepkg.ExecutionScopesEqual(decoded.ExecutionScope, req.ExecutionScope) {
+		t.Fatalf("decoded execution scope = %+v", decoded.ExecutionScope)
 	}
 	if strings.Join(decoded.Policy.AllowedTools, ",") != "inspect,read_file" {
 		t.Fatalf("normalized allowed tools = %#v", decoded.Policy.AllowedTools)
@@ -177,6 +190,41 @@ func TestExecutionEnvelopePolicySnapshotFailsClosedOnCatalogDrift(t *testing.T) 
 	if err := first.VerifyPolicy(changed); err == nil || !strings.Contains(err.Error(), "snapshot mismatch") {
 		t.Fatalf("error = %v", err)
 	}
+	tampered := first
+	tampered.ExecutionScope = cloneExecutionScope(first.ExecutionScope)
+	tampered.ExecutionScope.Policy.WriteAccess = workspacepkg.ViewWriteAccessReadWrite
+	if err := tampered.Validate(); err == nil || !strings.Contains(err.Error(), "execution id") {
+		t.Fatalf("scope tamper error = %v", err)
+	}
+}
+
+func TestExecutionEnvelopeRevisionOneCompatibilityIsUnbound(t *testing.T) {
+	req := executionTestRequest()
+	req.ExecutionScope = nil
+	envelope, err := NewExecutionEnvelope(req, "project-a", "child-session", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope.SchemaRevision = executionEnvelopeLegacySchemaRevision
+	envelope.ExecutionID = "ahx-v1-" + hashExecutionIdentity(
+		envelope.WorkspaceID, envelope.ParentSessionID, envelope.ChildSessionID,
+		envelope.ParentTaskID, envelope.ParentMessageID, envelope.InvocationID,
+		"2", "false",
+	)
+	envelope.Input.RecordID = envelope.ExecutionID + "-input"
+	envelope.Result.RecordID = envelope.ExecutionID
+	envelope.Checkpoint.RecordID = "agent-harness/subagent/" + envelope.ExecutionID + "/v1"
+	data, err := MarshalExecutionEnvelope(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := ParseExecutionEnvelope(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.SchemaRevision != 1 || decoded.ExecutionScope != nil {
+		t.Fatalf("legacy envelope = %+v", decoded)
+	}
 }
 
 func TestReconstructExecutionRequestUsesCatalogAndTaskAuthority(t *testing.T) {
@@ -198,6 +246,9 @@ func TestReconstructExecutionRequestUsesCatalogAndTaskAuthority(t *testing.T) {
 	}
 	if reconstructed.GrantID != "task-grant" || reconstructed.SubjectType != "user" || reconstructed.SubjectID != "alice" {
 		t.Fatalf("reconstructed authority = %+v", reconstructed)
+	}
+	if !workspacepkg.ExecutionScopesEqual(reconstructed.ExecutionScope, req.ExecutionScope) {
+		t.Fatalf("reconstructed scope = %+v", reconstructed.ExecutionScope)
 	}
 
 	drifted := executionCatalog{definition: Definition{

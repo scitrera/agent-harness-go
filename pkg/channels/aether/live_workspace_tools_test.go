@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -204,6 +205,9 @@ func TestLiveAetherScheduledWorkerView(t *testing.T) {
 		t.Fatal(err)
 	}
 	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "identity.txt"), []byte("scheduled worker view"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	host, err := aetherchan.NewWorkerToolHost(ctx, aetherchan.WorkerToolHostConfig{
 		WorkspaceID: logicalWorkspace, WorkspaceRoot: root, StateDir: t.TempDir(),
 		ToolHostID: worker.Topic(), Publisher: publisher,
@@ -237,6 +241,30 @@ func TestLiveAetherScheduledWorkerView(t *testing.T) {
 	if err != nil || gotBinding == nil || gotBinding.ViewID != binding.ViewID ||
 		gotBinding.ToolHostID != worker.Topic() || gotBinding.ExecutionSite != spec.ExecutionSiteWorker {
 		t.Fatalf("scheduled binding = %+v err=%v", gotBinding, err)
+	}
+	fallback, err := localtools.NewWorkspace(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := tools.NewRegistry()
+	if err := tools.RegisterLocal(registry, tools.LocalConfig{Workspace: fallback}); err != nil {
+		t.Fatal(err)
+	}
+	turnCtx := worker.TurnContext(ctx, inbound.Addr)
+	readResult, err := registry.Invoke(turnCtx, tools.Request{
+		CallID: "scheduled-read", Name: "read_file", Arguments: json.RawMessage(`{"path":"identity.txt"}`), Addr: inbound.Addr,
+	})
+	if err != nil || !strings.Contains(string(readResult.Payload), "scheduled worker view") {
+		t.Fatalf("scheduled exact-view read = %s err=%v", readResult.Payload, err)
+	}
+	if _, err := registry.Invoke(turnCtx, tools.Request{
+		CallID: "scheduled-write", Name: "write_file",
+		Arguments: json.RawMessage(`{"path":"forbidden.txt","content":"no"}`), Addr: inbound.Addr,
+	}); err == nil || !strings.Contains(err.Error(), "requires write admission") {
+		t.Fatalf("scheduled read-only write error = %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(root, "forbidden.txt")); !os.IsNotExist(statErr) {
+		t.Fatalf("scheduled write escaped policy: %v", statErr)
 	}
 	if err := worker.FailTask(context.Background(), inbound.Addr.TaskID, "E2E inspection complete"); err != nil {
 		t.Fatal(err)

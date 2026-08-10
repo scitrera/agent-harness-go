@@ -160,11 +160,12 @@ and dirty worktrees are rejected unless the declaration opts in with
 to `fire_once`; supported schedule types are `cron`, `interval`, and `once`.
 
 That workspace policy is rechecked when the task is admitted and before every
-tool call. A schedule that intentionally modifies its checkout must therefore
-set `allow_dirty_view: true`; otherwise its next tool call fails closed after
-the first write makes the view dirty. The registration remains pinned to the
-revision selected at worker startup. If the checkout moves to another revision,
-later fires fail closed until the worker is restarted or the declaration is
+tool call. `allow_dirty_view: false` also makes the execution scope read-only,
+so `write_file`, `edit_file`, `shell`, and `python` are denied before their first
+mutation. A schedule that intentionally modifies its checkout must explicitly
+set `allow_dirty_view: true`. The registration remains pinned to the revision
+selected at worker startup. If the checkout moves to another revision, later
+fires fail closed until the worker is restarted or the declaration is
 reconciled against a newly published view.
 
 Editing a declaration changes its digest. Already queued work with an older

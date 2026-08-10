@@ -24,6 +24,7 @@ import (
 	"github.com/scitrera/agent-harness-go/pkg/subagent"
 	"github.com/scitrera/agent-harness-go/pkg/telemetry"
 	"github.com/scitrera/agent-harness-go/pkg/tools"
+	workspacepkg "github.com/scitrera/agent-harness-go/pkg/workspace"
 )
 
 // subagentSeq is a process-wide monotonic counter that makes each subagent
@@ -98,6 +99,11 @@ func (r *Runner) admitSubagent(ctx context.Context, req subagent.Request, childT
 	if strings.TrimSpace(req.InvocationID) == "" {
 		req.InvocationID = fmt.Sprintf("local-execution-%d", nextSubagentExecutionSeq())
 	}
+	var err error
+	req, err = r.resolveSubagentExecutionScope(ctx, req, "parent_inheritance")
+	if err != nil {
+		return subagentExecution{}, err
+	}
 	workspaceID := r.subagentWorkspace(req)
 	envelope, err := subagent.NewExecutionEnvelope(req, workspaceID, childThreadID, background)
 	if err != nil {
@@ -167,6 +173,17 @@ func (r *Runner) prepareSubagentInput(ctx context.Context, execution *subagentEx
 	if err != nil {
 		return fmt.Errorf("subagent prepare session: %w", err)
 	}
+	if resume {
+		previous, found, scopeErr := latestSubagentExecutionScope(session.History())
+		if scopeErr != nil {
+			return fmt.Errorf("subagent resume execution scope: %w", scopeErr)
+		}
+		if found {
+			if scopeErr := r.authorizeSubagentScopeTransition(ctx, previous, req.ExecutionScope, req, "resume"); scopeErr != nil {
+				return scopeErr
+			}
+		}
+	}
 	taskPart, err := protocol.NewTextPart(req.Task)
 	if err != nil {
 		return fmt.Errorf("subagent prepare input: %w", err)
@@ -174,6 +191,11 @@ func (r *Runner) prepareSubagentInput(ctx context.Context, execution *subagentEx
 	userMsg := protocol.ChatMessage{
 		ID: execution.envelope.Input.RecordID, Role: protocol.RoleUser, Addr: addr,
 		Content: []protocol.ContentPart{taskPart},
+	}
+	if req.ExecutionScope != nil {
+		if err := workspacepkg.PutExecutionScope(&userMsg, *req.ExecutionScope); err != nil {
+			return fmt.Errorf("subagent persist execution scope: %w", err)
+		}
 	}
 	if !resume {
 		userMsg.Ref = &protocol.MessageRef{ParentThreadID: req.Parent.ThreadID, ParentMessageID: req.ParentMessageID}
@@ -334,6 +356,13 @@ func (r *Runner) ExecuteAssignedSubagent(ctx context.Context, taskID string, env
 	if err := envelope.VerifyPolicy(req); err != nil {
 		return subagent.Result{}, err
 	}
+	activeScope, active := workspacepkg.ExecutionScopeFrom(ctx)
+	if req.ExecutionScope != nil && (!active || !workspacepkg.ExecutionScopesEqual(req.ExecutionScope, &activeScope)) {
+		return subagent.Result{}, errors.New("subagent: assigned execution scope is not bound on executor context")
+	}
+	if req.ExecutionScope == nil && active {
+		return subagent.Result{}, errors.New("subagent: unbound assigned execution received a bound executor context")
+	}
 	auth := tools.MemoryAuthority{GrantID: req.GrantID, SubjectType: req.SubjectType, SubjectID: req.SubjectID}
 	addr := req.Parent
 	addr.WorkspaceID = envelope.WorkspaceID
@@ -404,6 +433,12 @@ func (r *Runner) resolveSubagentThread(ctx context.Context, req subagent.Request
 // and the durable commit of task+assistant. The optional thread registrar has
 // already resolved the canonical id before this function is called.
 func (r *Runner) runSubagentOn(ctx context.Context, req subagent.Request, childThreadID string, publisher channel.Publisher, execution *subagentExecution) (result subagent.Result, err error) {
+	if req.ExecutionScope != nil {
+		ctx = workspacepkg.WithExecutionScope(ctx, *req.ExecutionScope)
+	}
+	if req.PermissionMode == subagent.PermissionModeReadOnly {
+		ctx = tools.WithViewWriteAccess(ctx, workspacepkg.ViewWriteAccessReadOnly)
+	}
 	ctx = withWorkingDirectoryPrompt(ctx)
 	addr := req.Parent
 	addr.ThreadID = childThreadID
@@ -589,6 +624,97 @@ func (r *Runner) subagentWorkspace(req subagent.Request) string {
 	return "default"
 }
 
+func (r *Runner) resolveSubagentExecutionScope(
+	ctx context.Context,
+	req subagent.Request,
+	reason string,
+) (subagent.Request, error) {
+	var parent *workspacepkg.ExecutionScope
+	if scope, ok := workspacepkg.ExecutionScopeFrom(ctx); ok {
+		parent = copyExecutionScope(&scope)
+	}
+	requested := copyExecutionScope(req.ExecutionScope)
+	if requested == nil && parent != nil {
+		requested = copyExecutionScope(parent)
+	}
+	if requested != nil && req.PermissionMode == subagent.PermissionModeReadOnly {
+		narrowed := requested.ReadOnly()
+		requested = &narrowed
+	}
+	if err := r.authorizeSubagentScopeTransition(ctx, parent, requested, req, reason); err != nil {
+		return subagent.Request{}, err
+	}
+	req.ExecutionScope = requested
+	return req, nil
+}
+
+func (r *Runner) authorizeSubagentScopeTransition(
+	ctx context.Context,
+	parent, requested *workspacepkg.ExecutionScope,
+	req subagent.Request,
+	reason string,
+) error {
+	if parent != nil {
+		if err := parent.Validate(); err != nil {
+			return fmt.Errorf("subagent: invalid parent execution scope: %w", err)
+		}
+	}
+	if requested != nil {
+		if err := requested.Validate(); err != nil {
+			return fmt.Errorf("subagent: invalid requested execution scope: %w", err)
+		}
+		if requested.Binding.WorkspaceID != r.subagentWorkspace(req) {
+			return errors.New("subagent: requested execution scope workspace mismatch")
+		}
+	}
+	if workspacepkg.IsMonotonicScopeNarrowing(parent, requested) {
+		return nil
+	}
+	if r.subagentScopeAuthorizer == nil {
+		return errors.New("subagent: execution scope override is not authorized")
+	}
+	request := subagent.ExecutionScopeAuthorizationRequest{
+		Parent: copyExecutionScope(parent), Requested: copyExecutionScope(requested), Request: req, Reason: reason,
+	}
+	request.Request.ExecutionScope = copyExecutionScope(requested)
+	if err := r.subagentScopeAuthorizer.AuthorizeSubagentExecutionScope(ctx, request); err != nil {
+		return fmt.Errorf("subagent: execution scope override denied: %w", err)
+	}
+	return nil
+}
+
+func latestSubagentExecutionScope(messages []protocol.ChatMessage) (*workspacepkg.ExecutionScope, bool, error) {
+	var latest *workspacepkg.ExecutionScope
+	found := false
+	for _, message := range messages {
+		if message.Role != protocol.RoleUser || !strings.HasSuffix(message.ID, "-input") ||
+			(!strings.HasPrefix(message.ID, "ahx-v1-") && !strings.HasPrefix(message.ID, "ahx-v2-")) {
+			continue
+		}
+		scope, err := workspacepkg.GetExecutionScope(message)
+		if err != nil {
+			return nil, false, err
+		}
+		latest = copyExecutionScope(scope)
+		found = true
+	}
+	return latest, found, nil
+}
+
+func copyExecutionScope(scope *workspacepkg.ExecutionScope) *workspacepkg.ExecutionScope {
+	if scope == nil {
+		return nil
+	}
+	copyScope := *scope
+	if scope.Binding.Extra != nil {
+		copyScope.Binding.Extra = make(map[string]json.RawMessage, len(scope.Binding.Extra))
+		for key, value := range scope.Binding.Extra {
+			copyScope.Binding.Extra[key] = append(json.RawMessage(nil), value...)
+		}
+	}
+	return &copyScope
+}
+
 func sessionUsageProjection(message protocol.ChatMessage) map[string]json.RawMessage {
 	raw := message.Meta[compaction.MetaUsage]
 	if len(raw) == 0 {
@@ -645,6 +771,12 @@ func (r *Runner) notifySubagentComplete(ctx context.Context, req subagent.Reques
 		content = append(content, sp)
 	}
 	msg := protocol.ChatMessage{Role: protocol.RoleUser, Addr: addr, Content: content}
+	if req.ExecutionScope != nil {
+		if err := workspacepkg.PutExecutionScope(&msg, *req.ExecutionScope); err != nil {
+			slog.WarnContext(ctx, "subagent: stamp completion execution scope failed", slog.Any("err", err))
+			return
+		}
+	}
 	msg = authhandoff.StampMessage(msg, r.authHandoff.Put(parentAuth))
 
 	if err := r.notifier.Enqueue(ctx, channel.Inbound{Addr: addr, Message: msg}); err != nil {
@@ -724,14 +856,27 @@ func subagentBootstrap(files []bootstrap.File, req subagent.Request) []bootstrap
 }
 
 func subagentApprovers(req subagent.Request) []hooks.ToolApprover {
-	if len(req.AllowedTools) == 0 && len(req.DeniedTools) == 0 {
-		return nil
+	var approvers []hooks.ToolApprover
+	if len(req.AllowedTools) != 0 || len(req.DeniedTools) != 0 {
+		approvers = append(approvers, subagentToolPolicy{req: req})
 	}
-	return []hooks.ToolApprover{subagentToolPolicy{req: req}}
+	if subagentExecutionReadOnly(req) {
+		approvers = append(approvers, subagentViewWritePolicy{})
+	}
+	return approvers
 }
 
 type subagentToolPolicy struct {
 	req subagent.Request
+}
+
+type subagentViewWritePolicy struct{}
+
+func (subagentViewWritePolicy) ApproveTool(_ context.Context, call hooks.ToolCall) hooks.Decision {
+	if tools.ViewMutatingTool(call.Name) {
+		return hooks.Deny("subagent execution view is read-only")
+	}
+	return hooks.Allow()
 }
 
 func (p subagentToolPolicy) ApproveTool(_ context.Context, call hooks.ToolCall) hooks.Decision {
@@ -742,12 +887,16 @@ func (p subagentToolPolicy) ApproveTool(_ context.Context, call hooks.ToolCall) 
 }
 
 func filterSubagentTools(tt turnTools, req subagent.Request) turnTools {
-	if len(req.AllowedTools) == 0 && len(req.DeniedTools) == 0 {
+	readOnly := subagentExecutionReadOnly(req)
+	if len(req.AllowedTools) == 0 && len(req.DeniedTools) == 0 && !readOnly {
 		return tt
 	}
 	specs := make([]provider.ToolSpec, 0, len(tt.specs))
 	route := make(map[string]ToolProvider, len(tt.providerByTool))
 	for _, spec := range tt.specs {
+		if readOnly && tools.ViewMutatingTool(spec.Name) {
+			continue
+		}
 		if err := req.AllowsTool(spec.Name); err != nil {
 			continue
 		}
@@ -761,4 +910,9 @@ func filterSubagentTools(tt turnTools, req subagent.Request) turnTools {
 		filtered.providerByTool = route
 	}
 	return filtered
+}
+
+func subagentExecutionReadOnly(req subagent.Request) bool {
+	return req.PermissionMode == subagent.PermissionModeReadOnly ||
+		(req.ExecutionScope != nil && req.ExecutionScope.Policy.WriteAccess == workspacepkg.ViewWriteAccessReadOnly)
 }

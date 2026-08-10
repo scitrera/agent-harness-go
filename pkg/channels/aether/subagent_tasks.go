@@ -161,6 +161,14 @@ func (b *SubagentTaskBackend) Admit(ctx context.Context, admission subagent.Task
 	addTaskMetadata(metadata, "scitrera.agent_name", admission.Name)
 	addTaskMetadata(metadata, "scitrera.agent_kind", admission.Kind)
 	addTaskMetadata(metadata, "scitrera.model", admission.Model)
+	if scope := admission.Execution.ExecutionScope; scope != nil {
+		metadata["scitrera.execution_scope_digest"] = admission.Execution.ExecutionScopeDigest()
+		metadata["scitrera.view_id"] = scope.Binding.ViewID
+		metadata["scitrera.tool_host_id"] = scope.Binding.ToolHostID
+		metadata["scitrera.execution_site"] = string(scope.Binding.ExecutionSite)
+		metadata["scitrera.view_write_access"] = string(scope.Policy.WriteAccess)
+		addTaskMetadata(metadata, "scitrera.view_revision", scope.Binding.Revision)
+	}
 
 	taskClass := pb.TaskClass_TASK_CLASS_INTERACTIVE
 	if admission.Background {

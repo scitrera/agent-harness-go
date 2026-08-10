@@ -8,6 +8,7 @@ import (
 
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 	"github.com/scitrera/agent-harness-go/pkg/subagent"
+	workspacepkg "github.com/scitrera/agent-harness-go/pkg/workspace"
 )
 
 // SubagentToolName is the registry name of the spawn_subagent tool. Exported so a
@@ -98,6 +99,9 @@ func RegisterSubagentWithConfig(reg *Registry, cfg SubagentConfig) error {
 		}
 		if selected {
 			applyDefinition(&subReq, def)
+		}
+		if scope, ok := workspacepkg.ExecutionScopeFrom(ctx); ok {
+			subReq.ExecutionScope = &scope
 		}
 		name := subagentPartName(selected, def, args.Agent, args.Type)
 		// Background spawn: return a handle immediately and deliver the result later

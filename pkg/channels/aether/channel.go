@@ -15,6 +15,7 @@ package aether
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -151,7 +152,7 @@ type Channel struct {
 	executionBindings map[string]spec.ExecutionBinding
 	executionPolicies map[string]ScheduledViewPolicy
 	executionAccess   map[string]workspacepkg.ExecutionBindingAuthorizationRequest
-	pendingToolCalls  map[string]chan toolCallResponse
+	pendingToolCalls  map[string]*pendingToolCall
 
 	sessionMu          sync.Mutex
 	sessionService     SessionService
@@ -230,7 +231,7 @@ func New(cfg Config) (*Channel, error) {
 		executionBindings:      map[string]spec.ExecutionBinding{},
 		executionPolicies:      map[string]ScheduledViewPolicy{},
 		executionAccess:        map[string]workspacepkg.ExecutionBindingAuthorizationRequest{},
-		pendingToolCalls:       map[string]chan toolCallResponse{},
+		pendingToolCalls:       map[string]*pendingToolCall{},
 		sessionSubscribers:     map[string]map[string]*sessionSubscriber{},
 		assignmentRouter:       NewTaskAssignmentRouter(),
 	}
@@ -573,10 +574,44 @@ func (c *Channel) FetchTask(ctx context.Context) (channel.Inbound, error) {
 // trip through the gateway. Used for background pushes (a detached sub-agent
 // notifying its parent thread), which originate inside this process.
 func (c *Channel) Enqueue(ctx context.Context, in channel.Inbound) error {
+	scope, err := workspacepkg.GetExecutionScope(in.Message)
+	if err != nil {
+		return fmt.Errorf("aether: invalid internal execution scope: %w", err)
+	}
+	bound := scope != nil
+	if bound {
+		if in.Addr.TaskID == "" || in.Message.Addr.TaskID != in.Addr.TaskID ||
+			in.Addr.WorkspaceID != scope.Binding.WorkspaceID || in.Message.Addr.WorkspaceID != scope.Binding.WorkspaceID {
+			return errors.New("aether: internal execution scope identity mismatch")
+		}
+		policy := ScheduledViewPolicy{
+			WriteAccess:      scope.Policy.WriteAccess,
+			AllowMutableView: scope.Policy.AllowMutableView,
+			AllowDirtyView:   scope.Policy.AllowDirtyView,
+		}
+		c.mu.Lock()
+		if _, exists := c.executionBindings[in.Addr.TaskID]; exists {
+			c.mu.Unlock()
+			return fmt.Errorf("aether: task %q already has an execution binding", in.Addr.TaskID)
+		}
+		c.executionBindings[in.Addr.TaskID] = scope.Binding
+		c.executionPolicies[in.Addr.TaskID] = policy
+		c.executionAccess[in.Addr.TaskID] = workspacepkg.ExecutionBindingAuthorizationRequest{
+			Binding: scope.Binding, ViewPolicy: scope.Policy, SourceTopic: scope.Binding.ToolHostID,
+		}
+		c.mu.Unlock()
+	}
 	select {
 	case c.tasks <- in:
 		return nil
 	case <-ctx.Done():
+		if bound {
+			c.mu.Lock()
+			delete(c.executionBindings, in.Addr.TaskID)
+			delete(c.executionPolicies, in.Addr.TaskID)
+			delete(c.executionAccess, in.Addr.TaskID)
+			c.mu.Unlock()
+		}
 		return ctx.Err()
 	}
 }

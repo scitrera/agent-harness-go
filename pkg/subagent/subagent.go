@@ -13,6 +13,7 @@ import (
 	spec "github.com/scitrera/ecosystem-messaging-spec/go"
 
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
+	workspacepkg "github.com/scitrera/agent-harness-go/pkg/workspace"
 )
 
 // ErrNoRunner is returned when a sub-agent is requested but no runner is wired.
@@ -39,6 +40,10 @@ type Request struct {
 	GrantID      string
 	SubjectType  string
 	SubjectID    string
+	// ExecutionScope pins the child to the parent's exact workspace view and
+	// write ceiling. The spawn tool supplies it from trusted turn context; it is
+	// never accepted as a model-authored absolute path or bearer grant.
+	ExecutionScope *workspacepkg.ExecutionScope
 	// Model optionally pins the sub-agent to a specific model (validated against
 	// the registry by the runner; empty → the runner's normal per-turn selection).
 	Model string
@@ -96,6 +101,24 @@ type Runner interface {
 type BackgroundRunner interface {
 	Runner
 	StartBackground(ctx context.Context, req Request) (threadID string, err error)
+}
+
+// ExecutionScopeAuthorizationRequest is emitted only when a child attempts to
+// select a different view, broaden write access, or resume a thread under a
+// scope that is not a monotonic narrowing of its previous scope. Exact
+// inheritance and read-only narrowing require no adapter.
+type ExecutionScopeAuthorizationRequest struct {
+	Parent    *workspacepkg.ExecutionScope
+	Requested *workspacepkg.ExecutionScope
+	Request   Request
+	Reason    string
+}
+
+// ExecutionScopeAuthorizer is the enterprise/embedding seam for explicit view
+// overrides. Nil is fail-closed: only exact inheritance and read-only narrowing
+// are accepted.
+type ExecutionScopeAuthorizer interface {
+	AuthorizeSubagentExecutionScope(context.Context, ExecutionScopeAuthorizationRequest) error
 }
 
 // LifecycleEvent is an authoritative child-session registry update. The record

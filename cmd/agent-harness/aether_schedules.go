@@ -132,6 +132,10 @@ func prepareScheduledTurnRegistrations(
 		if missPolicy == "" {
 			missPolicy = "fire_once"
 		}
+		writeAccess := workspacepkg.ViewWriteAccessReadOnly
+		if declaration.AllowDirtyView {
+			writeAccess = workspacepkg.ViewWriteAccessReadWrite
+		}
 		registration := aetherchan.ScheduledTurnRegistration{
 			ID: declaration.ID, Name: name, Enabled: enabled,
 			ScheduleType:       strings.ToLower(strings.TrimSpace(declaration.Schedule.Type)),
@@ -139,6 +143,7 @@ func prepareScheduledTurnRegistrations(
 			MissPolicy:         missPolicy, ThreadID: threadID,
 			Prompt: strings.TrimSpace(declaration.Prompt), Binding: binding,
 			ViewPolicy: aetherchan.ScheduledViewPolicy{
+				WriteAccess:      writeAccess,
 				AllowMutableView: declaration.AllowMutableView,
 				AllowDirtyView:   declaration.AllowDirtyView,
 			},

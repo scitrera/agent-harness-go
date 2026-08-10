@@ -103,6 +103,13 @@ func (r *Registry) Invoke(ctx context.Context, req Request) (Result, error) {
 		r.emitToolEvent(ctx, event)
 		return Result{}, err
 	}
+	// An exact view's write ceiling is a hard execution-authority boundary. It
+	// runs after ordinary policy/audit but cannot be bypassed by a one-shot tool
+	// approval: approval may admit a tool, never broaden the selected view.
+	if err = authorizeExecutionScope(ctx, req); err != nil {
+		r.emitToolEvent(ctx, finishedToolEvent(req, started, Result{}, err))
+		return Result{}, err
+	}
 	var result Result
 	if delegate := ToolDelegateFrom(ctx); delegate != nil && delegate.HandlesTool(req.Name) {
 		result, err = delegate.InvokeTool(ctx, req)

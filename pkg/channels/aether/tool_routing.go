@@ -20,9 +20,16 @@ type toolCallResponse struct {
 	source string
 }
 
+type pendingToolCall struct {
+	response chan toolCallResponse
+	binding  spec.ExecutionBinding
+}
+
 type remoteToolDelegate struct {
 	channel *Channel
 	binding spec.ExecutionBinding
+	policy  workspacepkg.ExecutionViewPolicy
+	access  workspacepkg.ExecutionBindingAuthorizationRequest
 }
 
 func (d remoteToolDelegate) HandlesTool(name string) bool {
@@ -46,7 +53,7 @@ func (d workerToolDelegate) InvokeTool(ctx context.Context, req tools.Request) (
 }
 
 func (d remoteToolDelegate) InvokeTool(ctx context.Context, req tools.Request) (tools.Result, error) {
-	return d.channel.invokeClientTool(ctx, d.binding, req)
+	return d.channel.invokeClientToolWithAccess(ctx, d.binding, d.policy, d.access, req)
 }
 
 // TurnContext binds the turn's built-in workspace tools to the exact client
@@ -55,10 +62,20 @@ func (d remoteToolDelegate) InvokeTool(ctx context.Context, req tools.Request) (
 func (c *Channel) TurnContext(ctx context.Context, addr protocol.MessageAddress) context.Context {
 	c.mu.Lock()
 	binding, ok := c.executionBindings[addr.TaskID]
-	policy := c.executionPolicies[addr.TaskID]
+	policy, hasPolicy := c.executionPolicies[addr.TaskID]
+	access := c.executionAccess[addr.TaskID]
 	c.mu.Unlock()
 	if !ok {
 		return ctx
+	}
+	viewPolicy := policy.executionViewPolicy()
+	if !hasPolicy {
+		viewPolicy.WriteAccess = workspacepkg.ViewWriteAccessReadWrite
+		policy.WriteAccess = workspacepkg.ViewWriteAccessReadWrite
+	}
+	scope, err := workspacepkg.NewExecutionScope(binding, viewPolicy)
+	if err == nil {
+		ctx = workspacepkg.WithExecutionScope(ctx, scope)
 	}
 	if binding.ExecutionSite == spec.ExecutionSiteWorker {
 		c.sessionMu.Lock()
@@ -66,12 +83,99 @@ func (c *Channel) TurnContext(ctx context.Context, addr protocol.MessageAddress)
 		c.sessionMu.Unlock()
 		return tools.WithToolDelegate(ctx, workerToolDelegate{host: host, binding: binding, policy: policy})
 	}
-	return tools.WithToolDelegate(ctx, remoteToolDelegate{channel: c, binding: binding})
+	return tools.WithToolDelegate(ctx, remoteToolDelegate{channel: c, binding: binding, policy: viewPolicy, access: access})
+}
+
+// BindAssignedExecutionScope reconstructs the exact tool authority carried by
+// a durable child task. Validation happens before claim. Worker views must be
+// local to this exact agent; client views require both durable binding policy
+// and an OBO provider because the executor is necessarily a different topic.
+func (c *Channel) BindAssignedExecutionScope(
+	ctx context.Context,
+	taskID string,
+	scope workspacepkg.ExecutionScope,
+) (context.Context, func(), error) {
+	if taskID == "" {
+		return ctx, nil, errors.New("assigned execution scope requires a task id")
+	}
+	if err := scope.Validate(); err != nil {
+		return ctx, nil, err
+	}
+	policy := ScheduledViewPolicy{
+		WriteAccess:      scope.Policy.WriteAccess,
+		AllowMutableView: scope.Policy.AllowMutableView,
+		AllowDirtyView:   scope.Policy.AllowDirtyView,
+	}
+	ctx = workspacepkg.WithExecutionScope(ctx, scope)
+	switch scope.Binding.ExecutionSite {
+	case spec.ExecutionSiteWorker:
+		c.sessionMu.Lock()
+		host := c.workerToolHost
+		c.sessionMu.Unlock()
+		if scope.Binding.ToolHostID != c.Topic() {
+			return ctx, nil, errors.New("worker execution scope targets another tool host")
+		}
+		if host == nil {
+			return ctx, nil, errors.New("worker workspace tool host is not configured")
+		}
+		if err := host.validateScheduledBinding(ctx, scope.Binding, policy); err != nil {
+			return ctx, nil, err
+		}
+		return tools.WithToolDelegate(ctx, workerToolDelegate{
+			host: host, binding: scope.Binding, policy: policy,
+		}), func() {}, nil
+	case spec.ExecutionSiteClient:
+		c.sessionMu.Lock()
+		authorizer := c.executionBindingAuthorizer
+		provider := c.toolCallAuthorizationProvider
+		c.sessionMu.Unlock()
+		if authorizer == nil || provider == nil {
+			return ctx, nil, errors.New("client execution scope requires binding and OBO providers")
+		}
+		authority, _ := tools.MemoryAuthorityFrom(ctx)
+		if authority.GrantID == "" || authority.SubjectType == "" || authority.SubjectID == "" {
+			return ctx, nil, errors.New("client execution scope requires typed on-behalf-of task authority")
+		}
+		access := workspacepkg.ExecutionBindingAuthorizationRequest{
+			Binding: scope.Binding, ViewPolicy: scope.Policy, SourceTopic: c.Topic(),
+			OnBehalfOf: workspacepkg.Principal{Type: authority.SubjectType, ID: authority.SubjectID},
+		}
+		if err := authorizer.AuthorizeExecutionBinding(ctx, access); err != nil {
+			return ctx, nil, err
+		}
+		return tools.WithToolDelegate(ctx, remoteToolDelegate{
+			channel: c, binding: scope.Binding, policy: scope.Policy, access: access,
+		}), func() {}, nil
+	default:
+		return ctx, nil, fmt.Errorf("unsupported assigned execution site %q", scope.Binding.ExecutionSite)
+	}
 }
 
 func (c *Channel) invokeClientTool(
 	ctx context.Context,
 	binding spec.ExecutionBinding,
+	req tools.Request,
+) (tools.Result, error) {
+	c.mu.Lock()
+	current, bound := c.executionBindings[req.Addr.TaskID]
+	routePolicy, hasPolicy := c.executionPolicies[req.Addr.TaskID]
+	access := c.executionAccess[req.Addr.TaskID]
+	c.mu.Unlock()
+	if !bound || current.ToolHostID != binding.ToolHostID || current.ViewID != binding.ViewID {
+		return tools.Result{}, fmt.Errorf("aether: client execution binding is no longer active")
+	}
+	policy := routePolicy.executionViewPolicy()
+	if !hasPolicy {
+		policy.WriteAccess = workspacepkg.ViewWriteAccessReadWrite
+	}
+	return c.invokeClientToolWithAccess(ctx, binding, policy, access, req)
+}
+
+func (c *Channel) invokeClientToolWithAccess(
+	ctx context.Context,
+	binding spec.ExecutionBinding,
+	policy workspacepkg.ExecutionViewPolicy,
+	access workspacepkg.ExecutionBindingAuthorizationRequest,
 	req tools.Request,
 ) (tools.Result, error) {
 	if req.Addr.TaskID == "" {
@@ -80,9 +184,15 @@ func (c *Channel) invokeClientTool(
 	if req.Addr.WorkspaceID != binding.WorkspaceID {
 		return tools.Result{}, fmt.Errorf("aether: client tool invocation workspace changed after binding")
 	}
+	access.Binding = binding
+	access.ViewPolicy = policy
 	bindingJSON, err := json.Marshal(binding)
 	if err != nil {
 		return tools.Result{}, fmt.Errorf("aether: encode execution binding: %w", err)
+	}
+	policyJSON, err := workspacepkg.EncodeExecutionViewPolicy(policy)
+	if err != nil {
+		return tools.Result{}, fmt.Errorf("aether: encode execution view policy: %w", err)
 	}
 	envelope := spec.ToolInvokeEnvelope{
 		SchemaVersion: spec.ToolsSchemaVersion,
@@ -91,7 +201,8 @@ func (c *Channel) invokeClientTool(
 		Args:          protocol.RawToArgs(req.Arguments),
 		Addr:          req.Addr,
 		Meta: map[string]json.RawMessage{
-			spec.ExecutionBindingMetaKey: bindingJSON,
+			spec.ExecutionBindingMetaKey:            bindingJSON,
+			workspacepkg.ExecutionViewPolicyMetaKey: policyJSON,
 		},
 	}
 	payload, err := json.Marshal(envelope)
@@ -100,14 +211,9 @@ func (c *Channel) invokeClientTool(
 	}
 	key := toolCallKey(req.Addr.TaskID, req.CallID)
 	response := make(chan toolCallResponse, 1)
+	pending := &pendingToolCall{response: response, binding: binding}
 	c.mu.Lock()
-	current, bound := c.executionBindings[req.Addr.TaskID]
-	access := c.executionAccess[req.Addr.TaskID]
 	topic := binding.ToolHostID
-	if !bound || current.ToolHostID != binding.ToolHostID || current.ViewID != binding.ViewID {
-		c.mu.Unlock()
-		return tools.Result{}, fmt.Errorf("aether: client execution binding is no longer active")
-	}
 	if topic == "" {
 		c.mu.Unlock()
 		return tools.Result{}, fmt.Errorf("aether: bound client tool host is not routable")
@@ -116,11 +222,11 @@ func (c *Channel) invokeClientTool(
 		c.mu.Unlock()
 		return tools.Result{}, fmt.Errorf("aether: duplicate pending client tool call %q", req.CallID)
 	}
-	c.pendingToolCalls[key] = response
+	c.pendingToolCalls[key] = pending
 	c.mu.Unlock()
 	defer func() {
 		c.mu.Lock()
-		if c.pendingToolCalls[key] == response {
+		if c.pendingToolCalls[key] == pending {
 			delete(c.pendingToolCalls, key)
 		}
 		c.mu.Unlock()
@@ -206,13 +312,12 @@ func (c *Channel) onToolCallMessage(_ context.Context, msg *sdk.Message) error {
 	key := toolCallKey(taskID, body.CallID)
 	c.mu.Lock()
 	pending := c.pendingToolCalls[key]
-	binding, bound := c.executionBindings[taskID]
 	c.mu.Unlock()
-	if pending == nil || !bound || msg.SourceTopic != binding.ToolHostID {
+	if pending == nil || msg.SourceTopic != pending.binding.ToolHostID {
 		return nil
 	}
 	select {
-	case pending <- toolCallResponse{body: body, source: msg.SourceTopic}:
+	case pending.response <- toolCallResponse{body: body, source: msg.SourceTopic}:
 	default:
 	}
 	return nil

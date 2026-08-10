@@ -8,26 +8,53 @@ import (
 
 	pb "github.com/scitrera/aether/api/proto"
 	sdk "github.com/scitrera/aether/sdk/go/aether"
+	spec "github.com/scitrera/ecosystem-messaging-spec/go"
 
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 	"github.com/scitrera/agent-harness-go/pkg/subagent"
 	"github.com/scitrera/agent-harness-go/pkg/tools"
+	workspacepkg "github.com/scitrera/agent-harness-go/pkg/workspace"
 )
 
 type recordingAssignedRunner struct {
-	calls    int
-	taskID   string
-	envelope subagent.ExecutionEnvelope
-	req      subagent.Request
-	err      error
+	calls      int
+	taskID     string
+	envelope   subagent.ExecutionEnvelope
+	req        subagent.Request
+	err        error
+	boundScope *workspacepkg.ExecutionScope
 }
 
-func (r *recordingAssignedRunner) ExecuteAssignedSubagent(_ context.Context, taskID string, envelope subagent.ExecutionEnvelope, req subagent.Request) (subagent.Result, error) {
+func (r *recordingAssignedRunner) ExecuteAssignedSubagent(ctx context.Context, taskID string, envelope subagent.ExecutionEnvelope, req subagent.Request) (subagent.Result, error) {
 	r.calls++
 	r.taskID = taskID
 	r.envelope = envelope
 	r.req = req
+	if scope, ok := workspacepkg.ExecutionScopeFrom(ctx); ok {
+		r.boundScope = &scope
+	}
 	return subagent.Result{Text: "done", ThreadID: envelope.ChildSessionID}, r.err
+}
+
+type recordingScopeBinder struct {
+	calls  int
+	taskID string
+	scope  workspacepkg.ExecutionScope
+	err    error
+}
+
+func (b *recordingScopeBinder) BindAssignedExecutionScope(
+	ctx context.Context,
+	taskID string,
+	scope workspacepkg.ExecutionScope,
+) (context.Context, func(), error) {
+	b.calls++
+	b.taskID = taskID
+	b.scope = scope
+	if b.err != nil {
+		return ctx, nil, b.err
+	}
+	return workspacepkg.WithExecutionScope(ctx, scope), func() {}, nil
 }
 
 type staticCatalog struct {
@@ -136,6 +163,54 @@ func TestAssignedSubagentExecutorClaimsRunsAndCompletesWithTypedAuthority(t *tes
 	if runner.req.GrantID != "task-grant" || runner.req.SubjectType != "user" || runner.req.SubjectID != "alice" || runner.req.Depth != 2 {
 		t.Fatalf("assigned authority/depth = %+v", runner.req)
 	}
+}
+
+func TestAssignedSubagentExecutorBindsExactScopeBeforeClaim(t *testing.T) {
+	req := genericExternalRequest()
+	binding := spec.NewExecutionBinding("project-a", "view-a", "ag::routing::agent-harness::worker", spec.ExecutionSiteWorker)
+	scope, err := workspacepkg.NewExecutionScope(binding, workspacepkg.ExecutionViewPolicy{
+		WriteAccess: workspacepkg.ViewWriteAccessReadOnly,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.ExecutionScope = &scope
+	assignment := externalAssignmentFixture(t, req)
+
+	newOperations := func() *fakeTaskOperations {
+		return &fakeTaskOperations{
+			queryResponses: []*sdk.TaskQueryResponse{{Success: true, Task: &sdk.TaskInfo{Status: pb.TaskStatus_TASK_STATUS_QUEUED.String()}}},
+			claimResponse:  &sdk.TaskOperationResponse{Success: true}, completeResponse: &sdk.TaskOperationResponse{Success: true},
+			failResponse: &sdk.TaskOperationResponse{Success: true},
+		}
+	}
+	t.Run("missing binder", func(t *testing.T) {
+		operations := newOperations()
+		runner := &recordingAssignedRunner{}
+		executor, _ := NewAssignedSubagentExecutor(operations, assignment.AssignedTo, SubagentExecutorConfig{Runner: runner})
+		err := executor.HandleAssignment(context.Background(), assignment)
+		if err == nil || !strings.Contains(err.Error(), "scope binder is not configured") {
+			t.Fatalf("error = %v", err)
+		}
+		if operations.claimCalls != 0 || runner.calls != 0 || operations.failCalls != 1 {
+			t.Fatalf("claim=%d runner=%d fail=%d", operations.claimCalls, runner.calls, operations.failCalls)
+		}
+	})
+	t.Run("bound", func(t *testing.T) {
+		operations := newOperations()
+		runner := &recordingAssignedRunner{}
+		binder := &recordingScopeBinder{}
+		executor, _ := NewAssignedSubagentExecutor(operations, assignment.AssignedTo, SubagentExecutorConfig{
+			Runner: runner, ExecutionScopeBinder: binder,
+		})
+		if err := executor.HandleAssignment(context.Background(), assignment); err != nil {
+			t.Fatal(err)
+		}
+		if binder.calls != 1 || binder.taskID != assignment.TaskID || operations.claimCalls != 1 || runner.calls != 1 ||
+			!workspacepkg.ExecutionScopesEqual(&binder.scope, runner.boundScope) {
+			t.Fatalf("binder=%+v claim=%d runner=%d bound=%+v", binder, operations.claimCalls, runner.calls, runner.boundScope)
+		}
+	})
 }
 
 func TestAssignedSubagentExecutorResolvesRunnerByValidatedWorkspace(t *testing.T) {
