@@ -462,7 +462,17 @@ func messageText(m protocol.ChatMessage) string {
 
 func (c *OpenAICompatClient) endpoint() string {
 	endpoint := *c.baseURL
-	endpoint.Path = strings.TrimRight(endpoint.Path, "/") + c.chatPath
+	basePath := strings.TrimRight(endpoint.Path, "/")
+	chatPath := c.chatPath
+	// OpenAI-compatible providers commonly publish their base URL with a
+	// trailing /v1, while the harness's default chat path also begins with /v1.
+	// Treat those as one version segment instead of producing
+	// /v1/v1/chat/completions. Custom base prefixes and custom ChatPath values
+	// still compose exactly as configured.
+	if strings.HasSuffix(basePath, "/v1") && strings.HasPrefix(chatPath, "/v1/") {
+		chatPath = strings.TrimPrefix(chatPath, "/v1")
+	}
+	endpoint.Path = basePath + chatPath
 	return endpoint.String()
 }
 

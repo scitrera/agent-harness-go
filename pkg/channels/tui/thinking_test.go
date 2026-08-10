@@ -2,9 +2,11 @@ package tui
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/scitrera/agent-harness-go/pkg/channel"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
@@ -44,6 +46,9 @@ func TestThinkingPlaceholderAnimatesUntilFirstResponseContent(t *testing.T) {
 		t.Fatalf("pending turn rows = %+v", updated.rows)
 	}
 	initial := updated.rows[1].Text
+	if !strings.Contains(initial, "Press Esc to Cancel") {
+		t.Fatalf("thinking placeholder = %q, want cancel hint", initial)
+	}
 
 	sendResult := sendCmd().(sendResultMsg)
 	next, tickCmd := updated.Update(sendResult)
@@ -73,6 +78,48 @@ func TestThinkingPlaceholderAnimatesUntilFirstResponseContent(t *testing.T) {
 	}
 	if updated.rows[1].Text != "hello back" {
 		t.Fatalf("assistant text = %q", updated.rows[1].Text)
+	}
+}
+
+type recordingCanceller struct {
+	taskID string
+	ok     bool
+}
+
+func (c *recordingCanceller) Cancel(taskID string) bool {
+	c.taskID = taskID
+	return c.ok
+}
+
+func TestEscapeCancelsActiveTurn(t *testing.T) {
+	canceller := &recordingCanceller{ok: true}
+	m := model{
+		threadID:   "thread-1",
+		lastTaskID: "task-1",
+		turns: map[string]turnActivity{
+			"task-1": {ThreadID: "thread-1", Phase: "thinking"},
+		},
+		canceller: canceller,
+		viewport:  viewport.New(),
+	}
+	m.addThinking("task-1")
+
+	next, cmd := m.updateKey(tea.KeyPressMsg(tea.Key{Code: tea.KeyEscape}))
+	if cmd != nil {
+		t.Fatal("escape cancellation should be synchronous")
+	}
+	updated := next.(model)
+	if canceller.taskID != "task-1" {
+		t.Fatalf("cancelled task = %q, want task-1", canceller.taskID)
+	}
+	if _, ok := updated.turns["task-1"]; ok {
+		t.Fatal("cancelled turn remained active")
+	}
+	if updated.hasThinking() {
+		t.Fatal("cancelled turn retained thinking placeholder")
+	}
+	if len(updated.rows) != 1 || !strings.Contains(updated.rows[0].Text, "cancelled task-1") {
+		t.Fatalf("rows after cancel = %+v", updated.rows)
 	}
 }
 

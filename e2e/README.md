@@ -41,6 +41,9 @@ SAHARA_LLM_FORMAT=openai
 `SAHARA_LLM_BASE_URL` is resolved inside the agent container. For a model server
 on the host, keep `host.docker.internal` and make sure the server listens on an
 address reachable from Docker, not only `127.0.0.1`.
+Both host-only bases and versioned bases ending in `/v1` are accepted; the
+harness normalizes the default chat-completions path without duplicating the
+version segment.
 
 Single-model operation needs nothing else. To exercise model selection, install
 the example registry and replace all three placeholder IDs with model IDs the
@@ -144,10 +147,14 @@ In a second terminal, from the OSS repository root (`oss/`):
   --tui \
   --workspace ./e2e/workspace \
   --aether 127.0.0.1:50051 \
+  --aether-specifier e2e \
   --memorylayer http://127.0.0.1:61001
 ```
 
 The host process is only the client; the containerized worker performs turns.
+The specifier must match `AETHER_SPECIFIER` in `.env` (Compose defaults it to
+`e2e`); otherwise the client targets a different Aether agent and waits for a
+worker that is not running. The TUI's startup target should end in `::e2e`.
 Starting a second TUI with the same command demonstrates that multiple clients
 can attach to the same Aether session and read the MemoryLayer-backed history.
 
@@ -260,3 +267,7 @@ is a development stack, not a deployment template.
 - Wipe Aether/MemoryLayer data with `docker compose down -v`. This is destructive
   to this E2E stack's named volumes but does not remove `workspace/`.
 - Validate the rendered Compose configuration with `docker compose config`.
+- If every turn waits indefinitely, confirm the startup target ends in the same
+  specifier as the agent's `--aether-specifier` setting (default `::e2e`).
+- Provider failures are rendered as `Turn failed: ...` in the TUI and remain in
+  history. Inspect `docker compose logs agent` for the corresponding worker log.

@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -75,7 +76,7 @@ func messageText(message protocol.ChatMessage) string {
 }
 
 func assistantRowsForMessage(message protocol.ChatMessage) []chatRow {
-	rows := make([]chatRow, 0, len(message.Content))
+	rows := make([]chatRow, 0, len(message.Content)+1)
 	for i, part := range message.Content {
 		if text, ok := part.AsText(); ok {
 			if strings.TrimSpace(text.Text) != "" {
@@ -87,14 +88,58 @@ func assistantRowsForMessage(message protocol.ChatMessage) []chatRow {
 			rows = appendOrReplaceToolRow(rows, row)
 		}
 	}
-	if len(rows) > 0 {
-		return rows
+	if len(rows) == 0 {
+		if text := messageText(message); text != "" {
+			rows = append(rows, chatRow{Kind: rowAssistant, ID: message.ID, TaskID: message.Addr.TaskID, Text: text})
+		}
 	}
-	text := messageText(message)
+	if status := terminalStatusText(message); status != "" {
+		rows = append(rows, chatRow{Kind: rowSystem, ID: terminalStatusRowID(message), TaskID: message.Addr.TaskID, Text: status})
+	}
+	return rows
+}
+
+func terminalStatusRowID(message protocol.ChatMessage) string {
+	id := message.ID
+	if id == "" {
+		id = "assistant"
+	}
+	return id + ":terminal"
+}
+
+func terminalStatusText(message protocol.ChatMessage) string {
+	if raw := message.Meta["error"]; len(raw) > 0 {
+		var reason string
+		if err := json.Unmarshal(raw, &reason); err != nil {
+			reason = strings.Trim(strings.TrimSpace(string(raw)), `"`)
+		}
+		if reason == "" {
+			reason = "unknown error"
+		}
+		return "Turn failed: " + reason
+	}
+	if raw := message.Meta["cancelled"]; len(raw) > 0 {
+		var cancelled bool
+		if err := json.Unmarshal(raw, &cancelled); err == nil && cancelled {
+			return "Turn cancelled."
+		}
+	}
+	return ""
+}
+
+func (m *model) upsertTerminalStatus(message protocol.ChatMessage) {
+	text := terminalStatusText(message)
 	if text == "" {
-		return nil
+		return
 	}
-	return []chatRow{{Kind: rowAssistant, ID: message.ID, TaskID: message.Addr.TaskID, Text: text}}
+	id := terminalStatusRowID(message)
+	for i := range m.rows {
+		if m.rows[i].Kind == rowSystem && m.rows[i].ID == id {
+			m.rows[i].Text = text
+			return
+		}
+	}
+	m.rows = append(m.rows, chatRow{Kind: rowSystem, ID: id, TaskID: message.Addr.TaskID, Text: text})
 }
 
 func toolRowsForMessage(message protocol.ChatMessage) []chatRow {

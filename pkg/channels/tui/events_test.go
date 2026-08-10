@@ -49,6 +49,39 @@ func TestRenderToolEventIncludesSafeFailureReason(t *testing.T) {
 	}
 }
 
+func TestFinalFailureMessageSurfacesReason(t *testing.T) {
+	message := protocol.ChatMessage{
+		ID:   "assistant-1",
+		Role: protocol.RoleAssistant,
+		Addr: protocol.MessageAddress{ThreadID: "t1", TaskID: "task-1"},
+		Meta: map[string]json.RawMessage{"error": json.RawMessage(`"provider returned 404"`)},
+	}
+
+	m := model{threadID: "t1", turns: map[string]turnActivity{"task-1": {ThreadID: "t1"}}, viewport: viewport.New()}
+	m.applyEvent(channel.Event{Type: channel.EventMessageFinal, Addr: message.Addr, Message: &message})
+
+	if len(m.rows) != 1 || m.rows[0].Kind != rowSystem || m.rows[0].Text != "Turn failed: provider returned 404" {
+		t.Fatalf("failure rows = %+v", m.rows)
+	}
+	if _, ok := m.turns["task-1"]; ok {
+		t.Fatal("failed turn remained active")
+	}
+}
+
+func TestRowsFromHistorySurfacesCancelledTurn(t *testing.T) {
+	message := protocol.ChatMessage{
+		ID:   "assistant-1",
+		Role: protocol.RoleAssistant,
+		Addr: protocol.MessageAddress{ThreadID: "t1", TaskID: "task-1"},
+		Meta: map[string]json.RawMessage{"cancelled": json.RawMessage("true")},
+	}
+
+	rows := rowsFromHistory([]protocol.ChatMessage{message})
+	if len(rows) != 1 || rows[0].Kind != rowSystem || rows[0].Text != "Turn cancelled." {
+		t.Fatalf("cancelled history rows = %+v", rows)
+	}
+}
+
 func TestModelApplyPartUpdated_whenApprovalResolves(t *testing.T) {
 	// Given
 	m := model{threadID: "t1", pendingApprovals: map[string]approvalRequest{"call-1": {RequestID: "call-1", TaskID: "task-1", Tool: "shell", Status: "pending"}}, viewport: viewport.New()}

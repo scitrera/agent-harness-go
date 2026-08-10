@@ -9,11 +9,13 @@ import (
 
 const thinkingInterval = 350 * time.Millisecond
 
+const thinkingCancelHint = " (Press Esc to Cancel)"
+
 var thinkingFrames = [...]string{
-	"Thinking ·",
-	"Thinking ··",
-	"Thinking ···",
-	"Thinking",
+	"Thinking ·" + thinkingCancelHint,
+	"Thinking ··" + thinkingCancelHint,
+	"Thinking ···" + thinkingCancelHint,
+	"Thinking" + thinkingCancelHint,
 }
 
 func thinkingRowID(taskID string) string {

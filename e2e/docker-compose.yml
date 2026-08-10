@@ -4,7 +4,7 @@
 #   ./build.sh          # build the images (see IMAGES below)
 #   cp .env.example .env && $EDITOR .env   # point at your LLM endpoint
 #   docker compose up -d
-#   agent-harness --tui --aether 127.0.0.1:50051 --memorylayer http://127.0.0.1:61001
+#   agent-harness --tui --aether 127.0.0.1:50051 --aether-specifier e2e --memorylayer http://127.0.0.1:61001
 #
 # The terminal UI runs on the HOST and attaches over Aether — that is the point
 # of the split, and it means the UI needs no container of its own. Several can

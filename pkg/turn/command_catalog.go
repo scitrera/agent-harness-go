@@ -13,7 +13,7 @@ func (r *Runner) AvailableCommands() []commands.Command {
 	out := make([]commands.Command, 0, len(commands.ReservedNames)+r.commands.Len())
 	for name, description := range commands.ReservedNames {
 		hint := ""
-		if name == "model" {
+		if name == "model" || name == "models" {
 			hint = "[list|switch <name>]"
 		}
 		out = append(out, commands.Command{

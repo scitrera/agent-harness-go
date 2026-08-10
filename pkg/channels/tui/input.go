@@ -155,6 +155,10 @@ func (m model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "enter":
 		return m.sendCurrent()
 	case "esc":
+		if m.canCancelActive() {
+			m.cancelActive()
+			return m, nil
+		}
 		m.drawer = drawerNone
 		m.drawerContent = ""
 		m.reflowSurfaces()

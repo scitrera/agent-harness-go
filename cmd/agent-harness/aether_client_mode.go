@@ -28,6 +28,18 @@ func runTUIClient(cfg appConfig) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// A remote client cannot query the worker synchronously for its status-line
+	// label, but it may share the same workspace checkout (the OSS E2E layout
+	// does). Prefer that registry's default over the unrelated CLI fallback. A
+	// malformed or unavailable client-side registry must not prevent attachment;
+	// /model remains the authoritative remote view.
+	statusModel := cfg.model
+	if registry, registryErr := loadAppModelRegistry(cfg.workspaceRoot); registryErr != nil {
+		fmt.Fprintln(os.Stderr, "warning: client model status registry:", registryErr)
+	} else {
+		statusModel = resolveAppModel(statusModel, registry)
+	}
+
 	client, err := aetherchan.NewClient(aetherchan.ClientConfig{
 		ServerAddr:            cfg.aetherAddr,
 		Workspace:             cfg.aetherWorkspace,
@@ -72,9 +84,10 @@ func runTUIClient(cfg appConfig) error {
 		Index:     st.threads,
 		Approvals: client,
 		Canceller: client,
-		// No local runner to ask, so the status line shows the configured model
-		// and the command palette offers only the UI's own commands.
-		ModelStatus:     remoteModelStatus{model: cfg.model},
+		// No local runner to ask, so the status line shows the best local
+		// configuration estimate and the command palette offers only the UI's own
+		// commands. /model remains the worker-authoritative view.
+		ModelStatus:     remoteModelStatus{model: statusModel},
 		TaskStore:       store.NewTaskStateStore(modeStateDir),
 		TeamStore:       team.NewFileGraphStore(filepath.Join(modeStateDir, "team", "graph.json")),
 		AgentCatalog:    st.agentCatalog,

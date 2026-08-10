@@ -33,6 +33,8 @@ func (m model) handleSlash(input string) (tea.Model, tea.Cmd) {
 	case "/status":
 		m.addSystem(m.statusSummary())
 		return m, nil
+	case "/model", "/models":
+		return m.enqueueMetaCommand(input)
 	case "/pwd", "/cd":
 		updated, err := m.handleWorkingDirectory(fields)
 		if err != nil {
@@ -71,6 +73,32 @@ func (m model) handleSlash(input string) (tea.Model, tea.Cmd) {
 	return m.enqueueCommand(input)
 }
 
+// enqueueMetaCommand sends a runner-owned command without presenting it as a
+// conversational user turn. Remote TUIs still need to round-trip through the
+// worker that owns model state, but commands such as /model should not rename
+// the thread or display a misleading model-generation placeholder.
+func (m model) enqueueMetaCommand(text string) (tea.Model, tea.Cmd) {
+	taskID, err := threadindex.NewID("task-")
+	if err != nil {
+		m.addSystem("could not create task id: " + err.Error())
+		return m, nil
+	}
+	if strings.HasPrefix(text, "/models") {
+		text = "/model" + strings.TrimPrefix(text, "/models")
+	}
+	part, err := protocol.NewTextPart(text)
+	if err != nil {
+		m.addSystem("could not create command message: " + err.Error())
+		return m, nil
+	}
+	addr := protocol.MessageAddress{ThreadID: m.threadID, TaskID: taskID}
+	message := protocol.ChatMessage{ID: "user-" + taskID, Role: protocol.RoleUser, Addr: addr, Content: []protocol.ContentPart{part}}
+	m.lastTaskID = taskID
+	m.markTurn(taskID, m.threadID, "queued")
+	m.refreshViewport()
+	return m, sendMetaCommandCmd(m.ctx, m.channel, addr, message)
+}
+
 func (m model) enqueueCommand(text string) (tea.Model, tea.Cmd) {
 	taskID, err := threadindex.NewID("task-")
 	if err != nil {
@@ -93,7 +121,7 @@ func (m model) enqueueCommand(text string) (tea.Model, tea.Cmd) {
 }
 
 func (m *model) cancelActive() {
-	if m.lastTaskID == "" || m.canceller == nil {
+	if !m.canCancelActive() {
 		m.addSystem("no active task to cancel")
 		return
 	}
@@ -104,6 +132,14 @@ func (m *model) cancelActive() {
 		return
 	}
 	m.addSystem("task not cancellable: " + m.lastTaskID)
+}
+
+func (m model) canCancelActive() bool {
+	if m.lastTaskID == "" || m.canceller == nil {
+		return false
+	}
+	activity, ok := m.turns[m.lastTaskID]
+	return ok && m.activityOnCurrentThread(activity)
 }
 
 func (m *model) resolveApproval(fields []string, granted bool) {
@@ -178,5 +214,14 @@ func sendMessageCmd(
 			return sendResultMsg{TaskID: addr.TaskID, Err: fmt.Errorf("enqueue: %w", err)}
 		}
 		return sendResultMsg{Session: threadindex.Session{ID: addr.ThreadID}, TaskID: addr.TaskID}
+	}
+}
+
+func sendMetaCommandCmd(ctx context.Context, ch ChannelSurface, addr protocol.MessageAddress, message protocol.ChatMessage) tea.Cmd {
+	return func() tea.Msg {
+		if err := ch.Enqueue(ctx, channel.Inbound{Addr: addr, Message: message}); err != nil {
+			return sendResultMsg{TaskID: addr.TaskID, Err: fmt.Errorf("enqueue: %w", err)}
+		}
+		return sendResultMsg{TaskID: addr.TaskID}
 	}
 }

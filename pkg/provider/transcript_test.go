@@ -88,6 +88,18 @@ func TestSanitizeTranscriptStripsUnansweredToolCall(t *testing.T) {
 	}
 }
 
+func TestSanitizeTranscriptDropsContentlessTerminalMarker(t *testing.T) {
+	in := []protocol.ChatMessage{
+		textMsg(t, protocol.RoleUser, "hi"),
+		{ID: "turn-terminal", Role: protocol.RoleAssistant},
+		textMsg(t, protocol.RoleUser, "continue"),
+	}
+	out := sanitizeTranscript(in)
+	if len(out) != 2 || out[0].ID == "turn-terminal" || out[1].ID == "turn-terminal" {
+		t.Fatalf("contentless terminal marker reached provider transcript: %#v", out)
+	}
+}
+
 // A tool-result message that ALSO carries an extra subagent reference part must
 // lower to exactly the same single OpenAI "tool" message as a plain tool-result
 // message: the extra part is ignored (lowerMessage has no case for it) and never

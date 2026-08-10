@@ -12,8 +12,10 @@ import "github.com/scitrera/agent-harness-go/pkg/protocol"
 //     e.g. the result turn was trimmed).
 //
 // It drops orphan tool_result parts and strips unanswered tool_call parts, then
-// drops any message left with no content. Valid transcripts pass through
-// unchanged (a fresh slice is only built when a repair is needed).
+// drops any message left with no content. Contentless terminal-marker messages
+// are also removed: their metadata is useful to history UIs but has no valid
+// OpenAI chat representation. Valid transcripts pass through unchanged (a
+// fresh slice is only built when a repair is needed).
 func sanitizeTranscript(messages []protocol.ChatMessage) []protocol.ChatMessage {
 	answered := map[string]bool{} // tool_call ids that have a matching tool_result
 	called := map[string]bool{}   // tool_call ids that were issued
@@ -61,6 +63,9 @@ func sanitizeTranscript(messages []protocol.ChatMessage) []protocol.ChatMessage 
 
 func needsRepair(messages []protocol.ChatMessage, answered, called map[string]bool) bool {
 	for _, m := range messages {
+		if len(m.Content) == 0 {
+			return true
+		}
 		for _, p := range m.Content {
 			switch p.Type() {
 			case protocol.ContentToolCall:

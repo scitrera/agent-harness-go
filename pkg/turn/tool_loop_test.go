@@ -510,9 +510,16 @@ func Test_Runner_Run_failed_turn_finalizes_with_reason(t *testing.T) {
 	if _, ok := final.Message.Meta[metaErrorKey]; !ok {
 		t.Fatalf("message_final must carry meta.error, meta=%v", final.Message.Meta)
 	}
-	// The partial turn was committed to history (so the failure persists on reload).
+	// The terminal marker was committed to history (so the failure persists on reload).
 	if len(store.messages) == 0 {
 		t.Fatal("expected the failed turn to be committed to the store")
+	}
+	terminal := store.messages[len(store.messages)-1]
+	if terminal.ID != finalized.ID+"-terminal" {
+		t.Fatalf("terminal history id = %q, want %q", terminal.ID, finalized.ID+"-terminal")
+	}
+	if _, ok := terminal.Meta[metaErrorKey]; !ok {
+		t.Fatalf("terminal history marker missing meta.error: %#v", terminal.Meta)
 	}
 }
 

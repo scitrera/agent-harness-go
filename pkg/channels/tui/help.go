@@ -9,7 +9,7 @@ Ctrl+Left/Right jump by word
 Mouse wheel or Up/Down scroll history
 PgUp/PgDn scroll | Ctrl+PgUp/PgDn ends
 Tab/Enter complete | ↑/↓ select | / filter
-Esc close/cancel | Ctrl+C/Ctrl+D twice to quit
+Esc close/cancel active turn | Ctrl+C/Ctrl+D twice to quit
 /cd /pwd /threads /tools /approvals /attach
 Type / for commands or @ to reference workspace paths`
 )

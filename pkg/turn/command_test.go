@@ -45,6 +45,22 @@ func Test_Runner_Run_builtin_help_bypasses_model(t *testing.T) {
 	}
 }
 
+func Test_Runner_Run_builtin_models_alias_bypasses_model(t *testing.T) {
+	provider := &fakeProvider{}
+	r := newCommandRunner(t, provider, &fakeStore{}, commands.New(nil))
+
+	reply, err := r.Run(context.Background(), protocol.MessageAddress{ThreadID: "t1"}, userMessage(t, "/models"))
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if provider.request.Model != "" {
+		t.Fatalf("provider should not have been called for /models, got model %q", provider.request.Model)
+	}
+	if text := assistantPlainText(reply); !strings.Contains(text, "Active model: base-model") {
+		t.Fatalf("models alias reply = %q", text)
+	}
+}
+
 func Test_Runner_Run_builtin_clear_wipes_history(t *testing.T) {
 	store := &fakeStore{messages: []protocol.ChatMessage{{ID: "old", Role: protocol.RoleUser}}}
 	provider := &fakeProvider{}

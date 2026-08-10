@@ -56,7 +56,7 @@ func (r *Runner) runBuiltin(ctx context.Context, addr protocol.MessageAddress, n
 			return protocol.ChatMessage{}, fmt.Errorf("clear history: %w", err)
 		}
 		return r.emitReply(ctx, addr, "Thread history cleared.")
-	case "model":
+	case "model", "models":
 		return r.runModelCommand(ctx, addr, args)
 	default:
 		return r.emitReply(ctx, addr, "Unknown command.")
@@ -70,7 +70,8 @@ func (r *Runner) helpText() string {
 	b.WriteString("  /help          List available commands.\n")
 	b.WriteString("  /commands      List available commands.\n")
 	b.WriteString("  /clear         Clear this thread's history.\n")
-	b.WriteString("  /model         List models, or /model <name> to switch.")
+	b.WriteString("  /model         List models, or /model MODEL_NAME to switch.")
+	b.WriteString("\n  /models        List models (alias for /model).")
 	for _, c := range r.commands.List() {
 		b.WriteString("\n  /")
 		b.WriteString(c.Name)

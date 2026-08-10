@@ -10,6 +10,7 @@ var localSlashCommandSuggestions = []selectionItem{
 	{Value: "/help", Label: "/help", Description: "List commands"},
 	{Value: "/commands", Label: "/commands", Description: "List commands"},
 	{Value: "/model", Label: "/model", Description: "List or switch models"},
+	{Value: "/models", Label: "/models", Description: "List models"},
 	{Value: "/thread", Label: "/thread", Description: "Manage threads"},
 	{Value: "/threads", Label: "/threads", Description: "Select a thread"},
 	{Value: "/status", Label: "/status", Description: "Show status"},
@@ -43,6 +44,9 @@ var slashSubcommands = map[string][]selectionItem{
 	"model": {
 		{Value: "list", Label: "list", Description: "List available models"},
 		{Value: "switch", Label: "switch", Description: "Switch model"},
+	},
+	"models": {
+		{Value: "list", Label: "list", Description: "List available models"},
 	},
 	"thread": {
 		{Value: "list", Label: "list", Description: "Select a thread"},

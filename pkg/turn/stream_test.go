@@ -216,3 +216,35 @@ func TestTurnStreamer_NoCoalesceWhenDisabled(t *testing.T) {
 		t.Fatalf("flushInterval=0 should emit each delta; want 3, got %d (%v)", len(got), got)
 	}
 }
+
+func TestTerminalHistoryMessageKeepsOnlyNovelPartialContent(t *testing.T) {
+	already, err := protocol.NewTextPart("already persisted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	partial, err := protocol.NewTextPart("partial response")
+	if err != nil {
+		t.Fatal(err)
+	}
+	finalized := protocol.ChatMessage{
+		ID:      "task-1-assistant",
+		Role:    protocol.RoleAssistant,
+		Content: []protocol.ContentPart{already, partial},
+		Meta:    map[string]json.RawMessage{metaCancelledKey: json.RawMessage("true")},
+	}
+
+	terminal := terminalHistoryMessage(finalized, []protocol.ChatMessage{{Role: protocol.RoleAssistant, Content: []protocol.ContentPart{already}}})
+	if terminal.ID != "task-1-assistant-terminal" {
+		t.Fatalf("terminal id = %q", terminal.ID)
+	}
+	if len(terminal.Content) != 1 {
+		t.Fatalf("terminal content = %#v, want only novel part", terminal.Content)
+	}
+	text, ok := terminal.Content[0].AsText()
+	if !ok || text.Text != "partial response" {
+		t.Fatalf("terminal partial = %#v", terminal.Content[0])
+	}
+	if string(terminal.Meta[metaCancelledKey]) != "true" {
+		t.Fatalf("terminal meta = %#v", terminal.Meta)
+	}
+}

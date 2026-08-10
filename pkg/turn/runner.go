@@ -1091,7 +1091,7 @@ func (r *Runner) Run(ctx context.Context, addr protocol.MessageAddress, user pro
 		// detached from the cancelled turn ctx so the message_finalized publish +
 		// memory commit aren't themselves immediately aborted.
 		if ctx.Err() != nil {
-			finalized, ok := r.finalizePartialTurn(ctx, addr, user, auth, streamer, emitter,
+			finalized, ok := r.finalizePartialTurn(ctx, session, addr, user, auth, streamer, emitter,
 				map[string]json.RawMessage{metaCancelledKey: json.RawMessage("true")})
 			if !ok {
 				return protocol.ChatMessage{}, errors.Join(turncancel.ErrTurnCancelled, err)
@@ -1112,7 +1112,7 @@ func (r *Runner) Run(ctx context.Context, addr protocol.MessageAddress, user pro
 		// FAILED are different layers — both fire). Detached ctx so the finalize +
 		// commit aren't aborted if the turn ctx is on the edge of a deadline.
 		reason, _ := json.Marshal(err.Error())
-		finalized, ok := r.finalizePartialTurn(ctx, addr, user, auth, streamer, emitter,
+		finalized, ok := r.finalizePartialTurn(ctx, session, addr, user, auth, streamer, emitter,
 			map[string]json.RawMessage{metaErrorKey: reason})
 		if !ok {
 			return protocol.ChatMessage{}, err
@@ -1455,7 +1455,7 @@ func (r *Runner) dailyNotesMessage(ctx context.Context, addr protocol.MessageAdd
 // finalize failed. Shared by the cancel and failure wrap-ups so their terminal
 // publish+commit can't drift; each caller supplies its own meta key and decides
 // the log level + the error to surface.
-func (r *Runner) finalizePartialTurn(ctx context.Context, addr protocol.MessageAddress, user protocol.ChatMessage, auth tools.MemoryAuthority, streamer *turnStreamer, emitter *turnPartEmitter, meta map[string]json.RawMessage) (protocol.ChatMessage, bool) {
+func (r *Runner) finalizePartialTurn(ctx context.Context, session *harness.Session, addr protocol.MessageAddress, user protocol.ChatMessage, auth tools.MemoryAuthority, streamer *turnStreamer, emitter *turnPartEmitter, meta map[string]json.RawMessage) (protocol.ChatMessage, bool) {
 	detached := context.WithoutCancel(ctx)
 	partial := protocol.ChatMessage{Role: protocol.RoleAssistant, Addr: addr, Meta: meta}
 	partial.Content = append(partial.Content, emitter.durableParts()...)
@@ -1465,8 +1465,43 @@ func (r *Runner) finalizePartialTurn(ctx context.Context, addr protocol.MessageA
 			slog.String("thread", addr.ThreadID), slog.Any("err", err))
 		return protocol.ChatMessage{}, false
 	}
+	// The normal provider loop appends every completed assistant/tool message to
+	// the authoritative HistoryStore as it goes. A cancellation or provider
+	// failure can occur while the next response is only a stream, however, so its
+	// terminal marker (and any novel partial content) has not passed through the
+	// session yet. Persist a uniquely identified terminal message here. This is
+	// intentionally separate from MemoryAutoCommit: OSS disables that path when
+	// MemoryLayer already is the HistoryStore, and dual-writing would be wrong.
+	// Parts already present in session history are omitted so the aggregate
+	// stream reconstruction does not duplicate earlier tool rounds on reload.
+	if session != nil {
+		terminal := terminalHistoryMessage(finalized, session.History())
+		if appendErr := session.Append(detached, terminal); appendErr != nil {
+			slog.WarnContext(detached, "persist terminal turn marker failed",
+				slog.String("thread", addr.ThreadID), slog.Any("err", appendErr))
+		}
+	}
 	r.commitToMemory(detached, auth, addr, user, finalized)
 	return finalized, true
+}
+
+func terminalHistoryMessage(finalized protocol.ChatMessage, history []protocol.ChatMessage) protocol.ChatMessage {
+	existing := make([]protocol.ContentPart, 0)
+	for _, message := range history {
+		existing = append(existing, message.Content...)
+	}
+	novel := make([]protocol.ContentPart, 0, len(finalized.Content))
+	for _, part := range finalized.Content {
+		if containsEquivalentPart(existing, part) {
+			continue
+		}
+		novel = append(novel, part)
+		existing = append(existing, part)
+	}
+	terminal := finalized
+	terminal.ID = finalized.ID + "-terminal"
+	terminal.Content = novel
+	return terminal
 }
 
 // commitToMemory appends the turn to the thread — user + assistant, or

@@ -262,6 +262,7 @@ func (m *model) applyFinalMessage(message protocol.ChatMessage) {
 			m.applySubagentPart(message.Addr.TaskID, sub)
 		}
 	}
+	m.upsertTerminalStatus(message)
 }
 
 func renderToolEvent(event tools.ToolEvent) string {

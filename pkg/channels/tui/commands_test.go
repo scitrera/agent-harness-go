@@ -52,6 +52,56 @@ func TestModelResolveApproval_whenRequestPending(t *testing.T) {
 	}
 }
 
+func TestModelCommandsRoundTripWithoutConversationPlaceholder(t *testing.T) {
+	for _, tt := range []struct {
+		input string
+		want  string
+	}{
+		{input: "/model", want: "/model"},
+		{input: "/models", want: "/model"},
+	} {
+		t.Run(tt.input, func(t *testing.T) {
+			ctx := context.Background()
+			ch := NewChannel()
+			index, err := threadindex.NewIndex(t.TempDir(), nil)
+			if err != nil {
+				t.Fatalf("new index: %v", err)
+			}
+			if err := index.Touch("thread-1", "existing thread"); err != nil {
+				t.Fatalf("touch thread: %v", err)
+			}
+			m := model{
+				ctx:      ctx,
+				channel:  ch,
+				index:    index,
+				threadID: "thread-1",
+				turns:    map[string]turnActivity{},
+				viewport: viewport.New(),
+			}
+
+			next, cmd := m.handleSlash(tt.input)
+			if cmd == nil {
+				t.Fatal("model command should be sent to the remote runner")
+			}
+			updated := next.(model)
+			if len(updated.rows) != 0 || updated.hasThinking() {
+				t.Fatalf("model command rendered as a conversation turn: %+v", updated.rows)
+			}
+			result, ok := cmd().(sendResultMsg)
+			if !ok || result.Err != nil {
+				t.Fatalf("send result = %#v", result)
+			}
+			in, err := ch.FetchTask(ctx)
+			if err != nil {
+				t.Fatalf("fetch command: %v", err)
+			}
+			if got := messageText(in.Message); got != tt.want {
+				t.Fatalf("command payload = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestModelHandlePermissions_approveAliasResolvesRequest(t *testing.T) {
 	// Given
 	resolver := &fakeApprovalResolver{ok: true}

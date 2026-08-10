@@ -123,8 +123,9 @@ func Test_Runner_Run_cancel_finalizes_partial_turn(t *testing.T) {
 		t.Fatalf("register: %v", err)
 	}
 	pub := &fakePublisher{}
+	store := &fakeStore{}
 	r, err := NewRunner(Config{
-		Store:     &fakeStore{},
+		Store:     store,
 		Loader:    fakeLoader{},
 		Provider:  &callToolThenText{toolName: "cancel_me"},
 		Publisher: pub,
@@ -166,6 +167,13 @@ func Test_Runner_Run_cancel_finalizes_partial_turn(t *testing.T) {
 	}
 	if string(final.Message.Meta[metaCancelledKey]) != "true" {
 		t.Fatalf("expected finalized event marked cancelled, got meta=%v", final.Message.Meta)
+	}
+	if len(store.messages) == 0 {
+		t.Fatal("cancelled turn was not persisted")
+	}
+	terminal := store.messages[len(store.messages)-1]
+	if terminal.ID != msg.ID+"-terminal" || string(terminal.Meta[metaCancelledKey]) != "true" {
+		t.Fatalf("persisted cancellation marker = %#v", terminal)
 	}
 }
 
