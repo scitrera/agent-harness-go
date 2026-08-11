@@ -16,12 +16,27 @@ import (
 	"github.com/scitrera/agent-harness-go/pkg/refinement"
 )
 
-const maxLocalRefinementOperations = 512
+const (
+	// The local editor keeps complete accepted results in the same atomic file as
+	// the resource heads. At the high-water mark it discards the oldest receipts
+	// down to the low-water mark before accepting the next mutation. Exact result
+	// replay is therefore bounded; resource CAS and retained key tombstones remain
+	// the safety floor after an old receipt expires.
+	maxLocalRefinementOperations      = 512
+	retainedLocalRefinementOperations = 384
+	localOperationJournalPolicy       = 1
+)
 
 type fileOperation struct {
 	OperationID string              `json:"operation_id"`
 	RequestHash string              `json:"request_hash"`
 	Mutation    refinement.Mutation `json:"mutation"`
+}
+
+type fileOperationJournal struct {
+	PolicyVersion       int    `json:"policy_version"`
+	Generation          uint64 `json:"generation"`
+	CompactedOperations uint64 `json:"compacted_operations"`
 }
 
 // FileEditor adds idempotent CAS mutations to the same workspace-isolated
@@ -80,15 +95,7 @@ func (e *FileEditor) Apply(ctx context.Context, workspaceID, operationID string,
 		seenIDs[note.ID] = struct{}{}
 		seenKeys[note.Key] = struct{}{}
 	}
-	seenOperations := make(map[string]struct{}, len(document.Operations))
 	for _, operation := range document.Operations {
-		if operation.OperationID == "" || operation.RequestHash == "" {
-			return refinement.Mutation{}, fmt.Errorf("%w: prompt-note authority contains an invalid refinement operation", refinement.ErrInvalid)
-		}
-		if _, duplicate := seenOperations[operation.OperationID]; duplicate {
-			return refinement.Mutation{}, fmt.Errorf("%w: prompt-note authority contains duplicate operation %q", refinement.ErrInvalid, operation.OperationID)
-		}
-		seenOperations[operation.OperationID] = struct{}{}
 		if operation.OperationID == operationID {
 			if operation.RequestHash != requestHash {
 				return refinement.Mutation{}, fmt.Errorf("%w: operation id %q was used for a different prompt-note edit", refinement.ErrConflict, operationID)
@@ -98,19 +105,70 @@ func (e *FileEditor) Apply(ctx context.Context, workspaceID, operationID string,
 			return mutation, nil
 		}
 	}
-	if len(document.Operations) >= maxLocalRefinementOperations {
-		return refinement.Mutation{}, fmt.Errorf("%w: local prompt-note operation retention limit reached", refinement.ErrConflict)
-	}
 
 	mutation, err := applyFileEdit(workspaceID, &document, edit)
 	if err != nil {
 		return refinement.Mutation{}, err
 	}
+	compactFileOperationJournal(&document)
 	document.Operations = append(document.Operations, fileOperation{OperationID: operationID, RequestHash: requestHash, Mutation: cloneMutation(mutation)})
 	if err := e.persist(document); err != nil {
 		return refinement.Mutation{}, err
 	}
 	return cloneMutation(mutation), nil
+}
+
+func validateFileOperationJournal(document fileDocument) error {
+	if len(document.Operations) > maxLocalRefinementOperations {
+		return fmt.Errorf("%w: prompt-note operation journal retains %d results, maximum is %d", refinement.ErrInvalid, len(document.Operations), maxLocalRefinementOperations)
+	}
+	if document.OperationJournal != nil {
+		compactionWidth := uint64(maxLocalRefinementOperations - retainedLocalRefinementOperations)
+		if document.OperationJournal.PolicyVersion != localOperationJournalPolicy ||
+			document.OperationJournal.Generation == 0 ||
+			document.OperationJournal.CompactedOperations == 0 ||
+			document.OperationJournal.CompactedOperations%compactionWidth != 0 ||
+			document.OperationJournal.CompactedOperations/compactionWidth != document.OperationJournal.Generation ||
+			len(document.Operations) < retainedLocalRefinementOperations+1 {
+			return fmt.Errorf("%w: prompt-note authority contains invalid operation-journal compaction metadata", refinement.ErrInvalid)
+		}
+	}
+
+	seenOperations := make(map[string]struct{}, len(document.Operations))
+	for _, operation := range document.Operations {
+		if strings.TrimSpace(operation.OperationID) == "" || len(operation.OperationID) > 200 || !validLocalHash(operation.RequestHash) || operation.Mutation.After == nil {
+			return fmt.Errorf("%w: prompt-note authority contains an invalid refinement operation", refinement.ErrInvalid)
+		}
+		if operation.Mutation.After.ResourceID == "" || strings.TrimSpace(operation.Mutation.After.ResourceKey) == "" || operation.Mutation.After.ETag == "" {
+			return fmt.Errorf("%w: prompt-note authority contains an incomplete refinement result", refinement.ErrInvalid)
+		}
+		if _, duplicate := seenOperations[operation.OperationID]; duplicate {
+			return fmt.Errorf("%w: prompt-note authority contains duplicate operation %q", refinement.ErrInvalid, operation.OperationID)
+		}
+		seenOperations[operation.OperationID] = struct{}{}
+	}
+	return nil
+}
+
+func compactFileOperationJournal(document *fileDocument) {
+	if len(document.Operations) < maxLocalRefinementOperations {
+		return
+	}
+	drop := len(document.Operations) - retainedLocalRefinementOperations
+	document.Operations = append([]fileOperation(nil), document.Operations[drop:]...)
+	if document.OperationJournal == nil {
+		document.OperationJournal = &fileOperationJournal{PolicyVersion: localOperationJournalPolicy}
+	}
+	document.OperationJournal.Generation++
+	document.OperationJournal.CompactedOperations += uint64(drop)
+}
+
+func validLocalHash(value string) bool {
+	if len(value) != sha256.Size*2 {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
 }
 
 func applyFileEdit(workspaceID string, document *fileDocument, edit refinement.Edit) (refinement.Mutation, error) {

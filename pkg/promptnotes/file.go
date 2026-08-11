@@ -36,10 +36,11 @@ func (p *FileProvider) Path(workspaceID string) string {
 }
 
 type fileDocument struct {
-	SchemaVersion int             `json:"schema_version"`
-	WorkspaceID   string          `json:"workspace_id,omitempty"`
-	Notes         []fileNote      `json:"notes"`
-	Operations    []fileOperation `json:"refinement_operations,omitempty"`
+	SchemaVersion    int                   `json:"schema_version"`
+	WorkspaceID      string                `json:"workspace_id,omitempty"`
+	Notes            []fileNote            `json:"notes"`
+	Operations       []fileOperation       `json:"refinement_operations,omitempty"`
+	OperationJournal *fileOperationJournal `json:"refinement_operation_journal,omitempty"`
 }
 
 type fileNote struct {
@@ -124,6 +125,9 @@ func (p *FileProvider) loadDocument(ctx context.Context, workspaceID string) (fi
 	}
 	if document.WorkspaceID == "" {
 		document.WorkspaceID = workspaceID
+	}
+	if err := validateFileOperationJournal(document); err != nil {
+		return fileDocument{}, false, fmt.Errorf("promptnotes: validate %s: %w", path, err)
 	}
 	return document, true, nil
 }

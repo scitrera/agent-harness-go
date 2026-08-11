@@ -426,6 +426,18 @@ visible workspaces, and an explicit `--memorylayer-workspace` remaps only the
 selected logical default. This resource protocol remains a MemoryLayer API and
 does not add a session-message type to the ecosystem messaging spec.
 
+Local refinement mutations keep their accepted idempotency results in the same
+atomically replaced `prompt-notes.json` document as the note heads. Exact replay
+is count-bounded: when 512 receipts are retained, the next successful mutation
+compacts the oldest receipts down to 384 and records the policy version,
+generation, and total compacted count in `refinement_operation_journal` before
+adding its result. A retained operation ID returns its original result and a
+conflicting reuse is rejected. Once a receipt has expired, exact replay and
+operation-ID conflict detection are no longer promised; current ETags, stable
+keys, and retained delete tombstones still fail closed against stale mutations.
+Operation IDs must never be intentionally reused. This file authority remains
+single-writer; use MemoryLayer for durable multi-process mutation authority.
+
 ### Reusable agent specifications
 
 Named `spawn_subagent(agent=...)` definitions use one explicit authority. The
