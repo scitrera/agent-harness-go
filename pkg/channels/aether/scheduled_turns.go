@@ -176,6 +176,7 @@ func scheduledTurnMetadata(envelope scheduledTurnEnvelope) map[string]string {
 		"scitrera.schedule_digest":      envelope.DeclarationDigest,
 		"scitrera.schedule_miss_policy": envelope.MissPolicy,
 		"scitrera.logical_workspace":    envelope.Binding.WorkspaceID,
+		"scitrera.thread_id":            envelope.ThreadID,
 		"scitrera.view_id":              envelope.Binding.ViewID,
 		"scitrera.view_revision":        envelope.Binding.Revision,
 		"scitrera.execution_tool_host":  envelope.Binding.ToolHostID,

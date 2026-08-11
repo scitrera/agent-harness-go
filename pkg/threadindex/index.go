@@ -57,6 +57,13 @@ type WorkspaceStore interface {
 	DeleteWorkspaceThread(workspaceID, id string) error
 }
 
+// WorkspaceLookup is the read-through thread metadata surface used by
+// operational projections. Unlike WorkspaceStore.ListWorkspace, it may perform
+// backend I/O and distinguishes a missing thread from a backend failure.
+type WorkspaceLookup interface {
+	LookupWorkspaceThread(ctx context.Context, workspaceID, id string) (Session, bool, error)
+}
+
 // Index is a JSON-file-backed registry of chat sessions.
 type Index struct {
 	path string

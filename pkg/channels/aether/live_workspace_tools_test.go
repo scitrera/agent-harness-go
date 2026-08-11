@@ -309,6 +309,7 @@ func TestLiveAetherScheduledWorkerView(t *testing.T) {
 	if info.Metadata["aether.schedule.id"] == "" ||
 		info.Metadata["aether.schedule.miss_policy"] != aetherchan.ScheduledMissPolicyFireOnce ||
 		info.Metadata["scitrera.schedule_miss_policy"] != aetherchan.ScheduledMissPolicyFireOnce ||
+		info.Metadata["scitrera.thread_id"] != registration.ThreadID ||
 		scheduledErr != nil || dispatchedErr != nil || dispatchedAt.Before(scheduledFor) {
 		t.Fatalf("scheduled occurrence metadata = %#v scheduled_err=%v dispatched_err=%v", info.Metadata, scheduledErr, dispatchedErr)
 	}

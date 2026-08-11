@@ -129,6 +129,9 @@ func TestScheduledWorkflowDataTargetsExactWorkerWithJSONEnvelope(t *testing.T) {
 	if err := json.Unmarshal(data, &definition); err != nil {
 		t.Fatal(err)
 	}
+	if definition.Action.Metadata["scitrera.thread_id"] != registration.ThreadID {
+		t.Fatalf("thread metadata = %q", definition.Action.Metadata["scitrera.thread_id"])
+	}
 	if definition.ID == "" || definition.MissPolicy != ScheduledMissPolicyFireOnce || definition.MaxConcurrent != 0 {
 		t.Fatalf("schedule definition = %+v", definition)
 	}

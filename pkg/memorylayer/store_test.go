@@ -83,6 +83,16 @@ func (f *fakeServer) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"threads": list})
 
+	case len(segments) == 2 && segments[0] == "threads" && r.Method == http.MethodGet:
+		key := fakeThreadKey(r.URL.Query().Get("workspace_id"), segments[1])
+		thread, ok := f.threads[key]
+		if !ok {
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]any{"detail": "Not Found"})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"thread": thread})
+
 	case len(segments) == 2 && segments[0] == "threads" && r.Method == http.MethodPut:
 		key := fakeThreadKey(r.URL.Query().Get("workspace_id"), segments[1])
 		thread, ok := f.threads[key]
@@ -485,6 +495,31 @@ func TestRefreshPicksUpRemoteThreads(t *testing.T) {
 	listed := s.List()
 	if len(listed) != 1 || listed[0].ID != "thread-remote" {
 		t.Fatalf("List = %+v, want the remotely-created thread", listed)
+	}
+}
+
+func TestLookupWorkspaceThreadReadsThroughAndCaches(t *testing.T) {
+	s, fake := newTestStore(t)
+	fake.threads[fakeThreadKey("project-a", "scheduled-thread")] = map[string]any{
+		"id": "scheduled-thread", "title": "Nightly review",
+		"workspace_id": "project-a",
+		"created_at":   "2026-08-07T10:00:00Z", "updated_at": "2026-08-07T11:00:00Z",
+	}
+
+	got, found, err := s.LookupWorkspaceThread(context.Background(), "project-a", "scheduled-thread")
+	if err != nil || !found {
+		t.Fatalf("lookup = %+v found=%v err=%v", got, found, err)
+	}
+	if got.ID != "scheduled-thread" || got.Title != "Nightly review" {
+		t.Fatalf("lookup = %+v", got)
+	}
+	if listed := s.ListWorkspace("project-a"); len(listed) != 1 || listed[0] != got {
+		t.Fatalf("cached threads = %+v", listed)
+	}
+
+	missing, found, err := s.LookupWorkspaceThread(context.Background(), "project-a", "not-created-yet")
+	if err != nil || found || missing.ID != "" {
+		t.Fatalf("missing lookup = %+v found=%v err=%v", missing, found, err)
 	}
 }
 

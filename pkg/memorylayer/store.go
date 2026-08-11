@@ -22,6 +22,7 @@ const defaultTitle = "New chat"
 var (
 	_ harness.WorkspaceHistoryStore = (*Store)(nil)
 	_ threadindex.WorkspaceStore    = (*Store)(nil)
+	_ threadindex.WorkspaceLookup   = (*Store)(nil)
 )
 
 // Store keeps chat threads and transcripts in MemoryLayer. It satisfies both
@@ -275,6 +276,33 @@ func (s *Store) ListWorkspace(workspaceID string) []threadindex.Session {
 		return out[i].ID < out[j].ID
 	})
 	return out
+}
+
+// LookupWorkspaceThread reads one thread directly from MemoryLayer and updates
+// the local list cache when it exists. A missing thread is not an error: a
+// scheduled task can be durable in Aether before its first transcript write has
+// caused MemoryLayer to create the addressed thread.
+func (s *Store) LookupWorkspaceThread(ctx context.Context, workspaceID, id string) (threadindex.Session, bool, error) {
+	workspaceID = s.client.resolveWorkspace(workspaceID)
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return threadindex.Session{}, false, errors.New("memorylayer: thread id is required")
+	}
+	remote, err := s.client.getThread(ctx, workspaceID, id)
+	if err != nil {
+		if errors.Is(err, errNotFound) {
+			return threadindex.Session{}, false, nil
+		}
+		return threadindex.Session{}, false, err
+	}
+	if remote.ID != id {
+		return threadindex.Session{}, false, errors.New("memorylayer: thread lookup returned a different id")
+	}
+	session := sessionFromThread(remote)
+	s.mu.Lock()
+	s.workspaceThreadsLocked(workspaceID)[session.ID] = session
+	s.mu.Unlock()
+	return session, true, nil
 }
 
 // Create makes a new thread. The id comes from the server, which mints its own
