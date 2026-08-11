@@ -34,18 +34,15 @@ services:
   #
   # Dev mode accepts unauthenticated connections, which is what makes the stack
   # zero-setup: no token minting before the first turn. It is also exactly why
-  # this compose binds to loopback and is not a deployment template.
+  # this compose binds to loopback and is not a deployment template. The dev
+  # image owns those security defaults; Compose supplies only stack-specific
+  # configuration.
   aether:
-    image: ${AETHERLITE_IMAGE:-scitrera/aetherlite:local}
-    entrypoint: ["aetherlite"]
+    image: ${AETHERLITE_IMAGE:-scitrera/aetherlite:dev-local}
     command:
       - --config=/etc/aether/aetherlite.yaml
       - --data-dir=/data
-      - --dev
-      - --insecure-admin
       - --workflow=true
-    environment:
-      AETHER_ALLOW_DEV_MODE: "true"
     volumes:
       - ./config/aetherlite.yaml:/etc/aether/aetherlite.yaml:ro
       - aether-data:/data

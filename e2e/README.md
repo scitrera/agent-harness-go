@@ -304,7 +304,8 @@ across a deliberately interrupted scheduled turn.
 ## Local images and future releases
 
 None of the OSS images are published yet, so `build.sh` builds all of them from
-sibling checkouts and tags them `:local`:
+sibling checkouts. Aether is layered locally as `aether:local` →
+`aetherlite:local` → `aetherlite:dev-local`; the other images use `:local`:
 
 ```
 <root>/scitrera-app-monorepo2/agent-harness/oss   <- this repo
@@ -319,10 +320,15 @@ Every image reference in `docker-compose.yml` is a variable, so when the images
 ship this stops being a build step and becomes an `.env` edit:
 
 ```bash
-AETHERLITE_IMAGE=scitrera/aetherlite:0.2.3
+AETHERLITE_IMAGE=scitrera/aetherlite:dev-0.2.3
 MEMORYLAYER_IMAGE=scitrera/memorylayer-server:0.2.0
 AGENT_HARNESS_IMAGE=scitrera/agent-harness:0.1.0
 ```
+
+The AetherLite development tag owns the `aetherlite` entrypoint and enables
+`AETHER_DEV`, `AETHER_INSECURE_ADMIN`, and their explicit safety opt-in. Keep it
+on loopback; use the normal AetherLite tag with production configuration for a
+real deployment.
 
 ## Embeddings
 
