@@ -9,6 +9,7 @@ import (
 
 	"github.com/scitrera/agent-harness-go/pkg/casblob"
 	"github.com/scitrera/agent-harness-go/pkg/catalog"
+	"github.com/scitrera/agent-harness-go/pkg/executionledger"
 	"github.com/scitrera/agent-harness-go/pkg/goal"
 	"github.com/scitrera/agent-harness-go/pkg/harness"
 	"github.com/scitrera/agent-harness-go/pkg/memorylayer"
@@ -60,6 +61,10 @@ type stores struct {
 	// ledger with CAS alongside the lifecycle projections.
 	continuations goal.ContinuationLedger
 	turns         turnjournal.Store
+	// executionLedger is a bounded operational/provenance projection. It is
+	// local-file backed by default and moves to Aether KV with the other live
+	// execution stores; transcript/resource authorities remain unchanged.
+	executionLedger *executionledger.Service
 	// workspaceViews publishes client/worker-observed local checkout identities
 	// to MemoryLayer when it is the configured authority. nil preserves the
 	// standalone, local-only path.
@@ -95,6 +100,11 @@ func withCASLifecycle(st stores, blobs casblob.Store) (stores, error) {
 		return stores{}, err
 	}
 	st.turns = turns
+	ledgerStore, err := executionledger.NewCASStore(executionledger.CASStoreConfig{Blobs: blobs})
+	if err != nil {
+		return stores{}, err
+	}
+	st.executionLedger = &executionledger.Service{Store: ledgerStore, Authority: "aether-kv"}
 	return st, nil
 }
 
@@ -377,6 +387,11 @@ func openStores(ctx context.Context, cfg appConfig) (stores, error) {
 	if err != nil {
 		return stores{}, err
 	}
+	ledgerStore, err := executionledger.NewFileStore(executionledger.FileStoreConfig{StateDir: cfg.stateDir})
+	if err != nil {
+		return stores{}, err
+	}
+	executionLedger := &executionledger.Service{Store: ledgerStore, Authority: "local files"}
 	if ml == nil {
 		var index threadindex.Store
 		var err error
@@ -389,17 +404,18 @@ func openStores(ctx context.Context, cfg appConfig) (stores, error) {
 			return stores{}, fmt.Errorf("threads: %w", err)
 		}
 		return stores{
-			history:        bindHistory(files, cfg.workspaceID),
-			threads:        index,
-			files:          files,
-			promptNotes:    promptNoteProvider,
-			agentCatalog:   agentCatalog,
-			refinements:    refinements,
-			subagents:      subagents,
-			goals:          goals,
-			continuations:  continuations,
-			turns:          turns,
-			historyBackend: "local files",
+			history:         bindHistory(files, cfg.workspaceID),
+			threads:         index,
+			files:           files,
+			promptNotes:     promptNoteProvider,
+			agentCatalog:    agentCatalog,
+			refinements:     refinements,
+			subagents:       subagents,
+			goals:           goals,
+			continuations:   continuations,
+			turns:           turns,
+			executionLedger: executionLedger,
+			historyBackend:  "local files",
 		}, nil
 	}
 
@@ -416,21 +432,22 @@ func openStores(ctx context.Context, cfg appConfig) (stores, error) {
 		return stores{}, err
 	}
 	return stores{
-		history:        bindHistoryBackend(ml, cfg.workspaceID, cfg.memorylayerWorkspace),
-		threads:        bindThreads(ml, cfg.workspaceID, cfg.memorylayerWorkspace),
-		files:          files,
-		memory:         bindMemory(recaller, cfg.workspaceID, cfg.memorylayerWorkspace),
-		catalogs:       catalog.BindWorkspaceProvider(catalogProvider, cfg.workspaceID, cfg.memorylayerWorkspace),
-		promptNotes:    promptNoteProvider,
-		agentCatalog:   agentCatalog,
-		refinements:    refinements,
-		subagents:      subagents,
-		goals:          goals,
-		continuations:  continuations,
-		turns:          turns,
-		workspaceViews: workspaceViews,
-		remote:         true,
-		historyBackend: "memorylayer " + memoryLayerLocation(cfg),
+		history:         bindHistoryBackend(ml, cfg.workspaceID, cfg.memorylayerWorkspace),
+		threads:         bindThreads(ml, cfg.workspaceID, cfg.memorylayerWorkspace),
+		files:           files,
+		memory:          bindMemory(recaller, cfg.workspaceID, cfg.memorylayerWorkspace),
+		catalogs:        catalog.BindWorkspaceProvider(catalogProvider, cfg.workspaceID, cfg.memorylayerWorkspace),
+		promptNotes:     promptNoteProvider,
+		agentCatalog:    agentCatalog,
+		refinements:     refinements,
+		subagents:       subagents,
+		goals:           goals,
+		continuations:   continuations,
+		turns:           turns,
+		executionLedger: executionLedger,
+		workspaceViews:  workspaceViews,
+		remote:          true,
+		historyBackend:  "memorylayer " + memoryLayerLocation(cfg),
 	}, nil
 }
 

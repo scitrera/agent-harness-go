@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
+	"github.com/scitrera/agent-harness-go/pkg/tools"
 )
 
 // TurnPhase identifies a point in a turn's lifecycle. It is the discriminator for
@@ -12,12 +13,14 @@ import (
 type TurnPhase string
 
 const (
-	PhaseTurnStarted       TurnPhase = "turn_started"
-	PhaseUserPromptSubmit  TurnPhase = "user_prompt_submit"
-	PhaseModelCallStarted  TurnPhase = "model_call_started"
-	PhaseModelCallFinished TurnPhase = "model_call_finished"
-	PhaseCompacted         TurnPhase = "compacted"
-	PhaseTurnFinished      TurnPhase = "turn_finished"
+	PhaseTurnStarted        TurnPhase = "turn_started"
+	PhaseUserPromptSubmit   TurnPhase = "user_prompt_submit"
+	PhaseModelCallStarted   TurnPhase = "model_call_started"
+	PhaseModelCallFinished  TurnPhase = "model_call_finished"
+	PhaseCompacted          TurnPhase = "compacted"
+	PhaseResourceReferenced TurnPhase = "resource_referenced"
+	PhaseRecoveryStarted    TurnPhase = "recovery_started"
+	PhaseTurnFinished       TurnPhase = "turn_finished"
 )
 
 // TurnEvent is a turn-lifecycle signal delivered to TurnObservers. It carries
@@ -30,6 +33,39 @@ type TurnEvent struct {
 	Iteration int    // tool-loop round: 0 before the first model call
 	Model     string // model in use for this step, when known
 	Err       error  // set on model_call_finished / turn_finished on error
+	MessageID string // stable transcript message reference, when known
+	// OperationID distinguishes repeated reference/recovery events within one
+	// branch. Reference points at an authority-owned record without copying it.
+	OperationID string
+	Reference   *tools.ResultReference
+}
+
+type executionBranchKey struct{}
+type executionLedgerDisabledKey struct{}
+
+// WithExecutionBranchID installs the stable branch selected for one turn.
+func WithExecutionBranchID(ctx context.Context, branchID string) context.Context {
+	if branchID == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, executionBranchKey{}, branchID)
+}
+
+// ExecutionBranchIDFrom returns the turn branch carried on ctx.
+func ExecutionBranchIDFrom(ctx context.Context) (string, bool) {
+	value, ok := ctx.Value(executionBranchKey{}).(string)
+	return value, ok && value != ""
+}
+
+// WithoutExecutionLedger marks an ephemeral turn whose observer signals must
+// not be written to durable operational history.
+func WithoutExecutionLedger(ctx context.Context) context.Context {
+	return context.WithValue(ctx, executionLedgerDisabledKey{}, true)
+}
+
+func ExecutionLedgerDisabled(ctx context.Context) bool {
+	disabled, _ := ctx.Value(executionLedgerDisabledKey{}).(bool)
+	return disabled
 }
 
 // TurnObserver observes the turn lifecycle without a veto — audit, telemetry,
@@ -86,10 +122,11 @@ func turnPhaseToEvent(p TurnPhase) (EventName, bool) {
 
 func turnEventInput(ev TurnEvent) json.RawMessage {
 	env := map[string]any{
-		"phase":     string(ev.Phase),
-		"addr":      ev.Addr,
-		"iteration": ev.Iteration,
-		"model":     ev.Model,
+		"phase":      string(ev.Phase),
+		"addr":       ev.Addr,
+		"iteration":  ev.Iteration,
+		"model":      ev.Model,
+		"message_id": ev.MessageID,
 	}
 	if ev.Err != nil {
 		env["error"] = ev.Err.Error()

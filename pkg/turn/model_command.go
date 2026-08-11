@@ -36,6 +36,25 @@ func (r *Runner) setStickyModel(addr protocol.MessageAddress, name string) {
 	r.threadModels[key] = name
 }
 
+func (r *Runner) hydrateStickyModel(ctx context.Context, addr protocol.MessageAddress) error {
+	if r.executionLedger == nil || addr.WorkspaceID == "" || addr.ThreadID == "" {
+		return nil
+	}
+	name, err := r.executionLedger.PinnedModel(ctx, addr)
+	if err != nil {
+		return err
+	}
+	if name != "" {
+		if r.modelRegistry != nil {
+			if _, exists := r.modelRegistry.Get(name); !exists {
+				return nil
+			}
+		}
+		r.setStickyModel(addr, name)
+	}
+	return nil
+}
+
 // activeModelName reports the thread's currently-selected model for display: the
 // pinned model if set, else the configured default.
 func (r *Runner) activeModelName(addr protocol.MessageAddress) string {
@@ -67,6 +86,11 @@ func (r *Runner) runModelCommand(ctx context.Context, addr protocol.MessageAddre
 	}
 	if _, ok := r.modelRegistry.Get(name); !ok {
 		return r.emitReply(ctx, addr, fmt.Sprintf("Unknown model: %q.\n\n%s", name, r.modelListText(addr)))
+	}
+	if r.executionLedger != nil {
+		if err := r.executionLedger.PinModel(ctx, addr, name); err != nil {
+			return protocol.ChatMessage{}, fmt.Errorf("persist model pin: %w", err)
+		}
 	}
 	r.setStickyModel(addr, name)
 	return r.emitReply(ctx, addr, fmt.Sprintf("Switched to model %q for this thread.", name))

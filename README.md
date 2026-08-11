@@ -482,6 +482,41 @@ The store intentionally does not execute edits or represent a task's live
 lifecycle. Hosts keep approval, proposal application, recovery, and operational
 CAS with their execution authority (Aether in distributed deployments).
 
+### Branch-aware execution ledger
+
+`pkg/executionledger` keeps a bounded operational record separate from streamed
+chat events and transcript history. Events have stable IDs, optional parent IDs,
+and a per-turn branch ID. Concurrent turns therefore share the last terminal
+ancestor while each model-call, compaction, authority reference, recovery
+marker, and terminal outcome remains on its own immutable chain. Token deltas do
+not consume this retention budget.
+
+Standalone OSS modes persist the ledger atomically under
+`<state-dir>/execution-ledger/`. Aether worker modes use the same contract over
+Aether KV CAS. MemoryLayer continues to own chat history and the authoritative
+goal/refinement records; ledger events carry only stable references such as a
+goal ID, refinement record ID, or exact turn-journal revision. There is no dual
+write of those records.
+
+Operators can inspect one newest-first bounded page without invoking a model:
+
+```text
+/ledger --limit 20
+/ledger --type recovery_marker,context_compacted
+/ledger --task task-123
+/ledger --reference ref-123
+```
+
+Use `/ledger --help` for the complete filter and opaque-cursor shape. `/model
+MODEL_NAME` pins are stored in the same operational authority and survive a
+runner restart. Removing that model from the configured registry makes the
+runner ignore the stale pin and use normal selection; the immutable event
+remains available for audit.
+
+This ledger is a private harness execution-plane contract. It does not change
+the ecosystem session protocol: a future spec revision is warranted only if
+branch attach/replay becomes a portable, client-negotiated capability.
+
 With MemoryLayer wired, each turn also gets the memories it has distilled from
 past conversations that are relevant to the current message (`--memory-recall`,
 on by default). The harness does not write memories itself — it stores the

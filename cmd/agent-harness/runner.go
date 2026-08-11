@@ -14,6 +14,7 @@ import (
 	"github.com/scitrera/agent-harness-go/pkg/compaction"
 	"github.com/scitrera/agent-harness-go/pkg/contextpack"
 	"github.com/scitrera/agent-harness-go/pkg/goal"
+	"github.com/scitrera/agent-harness-go/pkg/hooks"
 	"github.com/scitrera/agent-harness-go/pkg/localtools"
 	modelpkg "github.com/scitrera/agent-harness-go/pkg/model"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
@@ -158,6 +159,10 @@ func buildRunner(cfg appConfig, st stores, pub channel.Publisher, approvals appr
 		}
 		recorder = fr
 	}
+	var turnObservers []hooks.TurnObserver
+	if st.executionLedger != nil {
+		turnObservers = append(turnObservers, st.executionLedger)
+	}
 
 	runner, err := turn.NewRunner(turn.Config{
 		// Transcripts may live remotely (MemoryLayer); workspace bootstrap
@@ -208,6 +213,8 @@ func buildRunner(cfg appConfig, st stores, pub channel.Publisher, approvals appr
 		Commands:            commands.New(cmdSpecs),
 		ScheduledOperations: scheduledOperations,
 		RefinementAudit:     st.refinements,
+		ExecutionLedger:     st.executionLedger,
+		TurnObservers:       turnObservers,
 		Now:                 time.Now,
 		Approvals:           approvals,
 		ToolProviders:       toolProviders,

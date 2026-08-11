@@ -485,6 +485,60 @@ func TestLiveAetherRefinementAudit(t *testing.T) {
 	}
 }
 
+// TestLiveAetherExecutionLedger proves the deployed worker persists operational
+// state in Aether KV: a model pin made by one task is visible through the
+// bounded, model-free branch-aware ledger command on the next task.
+func TestLiveAetherExecutionLedger(t *testing.T) {
+	serverAddr := os.Getenv("AETHER_E2E_ADDR")
+	if serverAddr == "" {
+		t.Skip("set AETHER_E2E_ADDR to run the live execution-ledger test")
+	}
+	aetherWorkspace := os.Getenv("AETHER_E2E_WORKSPACE")
+	if aetherWorkspace == "" {
+		aetherWorkspace = "default"
+	}
+	specifier := os.Getenv("AETHER_E2E_SPECIFIER")
+	if specifier == "" {
+		specifier = "e2e"
+	}
+	suffix := strconv.FormatInt(time.Now().UnixNano(), 36)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	client, err := aetherchan.NewClient(aetherchan.ClientConfig{
+		ServerAddr: serverAddr, Workspace: aetherWorkspace, SessionWorkspace: "default",
+		AgentSpecifier: specifier, UserID: "ledger-e2e", WindowID: "ledger-" + suffix,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close() }()
+
+	list := runLiveMetaCommand(t, ctx, client, "default", "model-list-"+suffix, "/model")
+	marker := "\n\nActive: "
+	index := strings.Index(list, marker)
+	if index < 0 {
+		t.Fatalf("deployed /model reply lacks active model: %q", list)
+	}
+	activeLine := strings.SplitN(list[index+len(marker):], "\n", 2)[0]
+	modelName := strings.TrimSpace(strings.TrimSuffix(activeLine, ". Switch with /model MODEL_NAME."))
+	if modelName == "" {
+		t.Fatalf("deployed /model active model is empty: %q", list)
+	}
+	pinTask := "model-pin-" + suffix
+	pinned := runLiveMetaCommand(t, ctx, client, "default", pinTask, "/model "+modelName)
+	if !strings.Contains(pinned, "Switched to model") || strings.Contains(pinned, "Thinking") {
+		t.Fatalf("deployed model pin reply = %q", pinned)
+	}
+	ledger := runLiveMetaCommand(t, ctx, client, "default", "ledger-read-"+suffix, "/ledger --type model_pinned --task "+pinTask+" --limit 1")
+	if !strings.Contains(ledger, "source: aether-kv authoritative") || !strings.Contains(ledger, "model_pinned") ||
+		!strings.Contains(ledger, "task="+pinTask) || !strings.Contains(ledger, "model="+modelName) || strings.Contains(ledger, "Thinking") {
+		t.Fatalf("deployed /ledger reply = %q", ledger)
+	}
+}
+
 func runLiveMetaCommand(t *testing.T, ctx context.Context, client *aetherchan.Client, workspaceID, taskID, text string) string {
 	t.Helper()
 	part, err := protocol.NewTextPart(text)

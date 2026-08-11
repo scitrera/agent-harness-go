@@ -149,5 +149,9 @@ func goalToolResult(req tools.Request, record *spec.SessionGoalRecord) (tools.Re
 	if err != nil {
 		return tools.Result{}, err
 	}
-	return tools.NewJSONResult(req.CallID, req.Name, payload)
+	result, err := tools.NewJSONResult(req.CallID, req.Name, payload)
+	if err == nil && record != nil && record.ID != "" {
+		result.Metadata.References = []tools.ResultReference{{System: "goal-store", Kind: "goal", ID: record.ID}}
+	}
+	return result, err
 }

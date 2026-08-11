@@ -76,6 +76,15 @@ func (r *Runner) runBuiltin(ctx context.Context, addr protocol.MessageAddress, u
 			return protocol.ChatMessage{}, fmt.Errorf("/refinements: %w", err)
 		}
 		return r.emitReply(ctx, addr, text)
+	case "ledger":
+		if r.executionLedger == nil {
+			return r.emitReply(ctx, addr, "Execution ledger browsing is unavailable: this runtime has no execution ledger configured.")
+		}
+		text, err := r.executionLedger.RunExecutionLedgerCommand(ctx, addr, user, args)
+		if err != nil {
+			return protocol.ChatMessage{}, fmt.Errorf("/ledger: %w", err)
+		}
+		return r.emitReply(ctx, addr, text)
 	default:
 		return r.emitReply(ctx, addr, "Unknown command.")
 	}
@@ -96,6 +105,9 @@ func (r *Runner) helpText() string {
 	}
 	if r.refinementAudit != nil {
 		b.WriteString("\n  /refinements   Browse the bounded authoritative refinement audit.")
+	}
+	if r.executionLedger != nil {
+		b.WriteString("\n  /ledger        Browse bounded branch-aware execution events.")
 	}
 	for _, c := range r.commands.List() {
 		b.WriteString("\n  /")

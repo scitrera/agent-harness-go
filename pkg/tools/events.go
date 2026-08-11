@@ -49,6 +49,16 @@ type ResultMetadata struct {
 	OutputTruncated bool         `json:"output_truncated,omitempty"`
 	PID             int          `json:"pid,omitempty"`
 	FileChanges     []FileChange `json:"file_changes,omitempty"`
+	// References are stable pointers returned by a tool to an authoritative
+	// record. They let execution observers retain provenance without copying the
+	// record payload into an operational ledger.
+	References []ResultReference `json:"references,omitempty"`
+}
+
+type ResultReference struct {
+	System string `json:"system"`
+	Kind   string `json:"kind"`
+	ID     string `json:"id"`
 }
 
 type FileChange struct {

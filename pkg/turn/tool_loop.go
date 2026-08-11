@@ -211,6 +211,16 @@ func (r *Runner) runProviderLoop(ctx context.Context, session *harness.Session, 
 			r.notifyToolStarted(toolCtx, hc)
 			result, err := r.invokeTool(toolCtx, session, addr, call, tt)
 			r.notifyToolFinished(toolCtx, hc, err != nil, err)
+			if err == nil && !result.IsError {
+				messageID, _ := tools.MessageIDFrom(toolCtx)
+				for index := range result.Metadata.References {
+					reference := result.Metadata.References[index]
+					r.notifyTurn(toolCtx, hooks.TurnEvent{
+						Phase: hooks.PhaseResourceReferenced, Addr: addr, Iteration: toolIterations, MessageID: messageID,
+						OperationID: fmt.Sprintf("tool-reference-%s-%d", call.CallID, index), Reference: &reference,
+					})
+				}
+			}
 			telemetry.AnnotateToolResult(toolSpan, result.Payload, result.IsError || err != nil)
 			telemetry.FinishErr(toolSpan, err)
 			r.publishToolEvent(toolCtx, finishToolEvent(call, toolStart, result, err))

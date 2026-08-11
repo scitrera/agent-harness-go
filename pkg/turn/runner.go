@@ -167,6 +167,7 @@ type Runner struct {
 	commands            *commands.Registry
 	scheduledOperations ScheduledOperationsCommandProvider
 	refinementAudit     RefinementAuditCommandProvider
+	executionLedger     ExecutionLedger
 	approvers           []hooks.ToolApprover
 	observers           []hooks.ToolObserver
 	turnObservers       []hooks.TurnObserver
@@ -263,6 +264,21 @@ type RefinementAuditCommandProvider interface {
 		user protocol.ChatMessage,
 		args string,
 	) (string, error)
+}
+
+// ExecutionLedger is the runner-facing composition seam for branch-aware
+// operational history. Turn lifecycle writes arrive separately through the
+// ordinary hooks.TurnObserver interface; this surface owns operator reads and
+// restart-stable per-thread model pins.
+type ExecutionLedger interface {
+	RunExecutionLedgerCommand(
+		ctx context.Context,
+		addr protocol.MessageAddress,
+		user protocol.ChatMessage,
+		args string,
+	) (string, error)
+	PinnedModel(ctx context.Context, addr protocol.MessageAddress) (string, error)
+	PinModel(ctx context.Context, addr protocol.MessageAddress, model string) error
 }
 
 // AuthorityFunc derives a turn's OBO authority from the inbound address+message.
@@ -409,6 +425,11 @@ type Config struct {
 	// RefinementAudit serves the reserved /refinements built-in. It is optional;
 	// local and MemoryLayer-backed stores implement the same bounded query shape.
 	RefinementAudit RefinementAuditCommandProvider
+
+	// ExecutionLedger is the optional branch-aware operational audit. It also
+	// persists /model pins and serves the model-free /ledger command. Local OSS
+	// and distributed Aether compositions implement the same neutral contract.
+	ExecutionLedger ExecutionLedger
 
 	// Approvers gate tool calls (first denial wins); Observers watch the tool
 	// lifecycle (no veto). Both are in-process today but the interfaces are
@@ -654,6 +675,7 @@ func NewRunner(cfg Config) (*Runner, error) {
 		commands:                  cfg.Commands,
 		scheduledOperations:       cfg.ScheduledOperations,
 		refinementAudit:           cfg.RefinementAudit,
+		executionLedger:           cfg.ExecutionLedger,
 		approvers:                 cfg.Approvers,
 		observers:                 cfg.Observers,
 		turnObservers:             cfg.TurnObservers,
@@ -911,6 +933,19 @@ func (r *Runner) Run(ctx context.Context, addr protocol.MessageAddress, user pro
 			addr.ThreadID = r.resolveNewThreadID(ctx, auth, addr, user)
 		}
 	}
+	branchID := strings.TrimSpace(addr.TaskID)
+	if branchID == "" {
+		branchID = strings.TrimSpace(user.ID)
+	}
+	if branchID == "" {
+		branchID, _ = ids.New("branch-")
+	}
+	ctx = hooks.WithExecutionBranchID(ctx, branchID)
+	if ephemeral {
+		ctx = hooks.WithoutExecutionLedger(ctx)
+	} else if err := r.hydrateStickyModel(ctx, addr); err != nil {
+		return protocol.ChatMessage{}, fmt.Errorf("execution ledger: load model pin: %w", err)
+	}
 	// Open the per-turn span with the resolved address.
 	ctx, span := telemetry.StartTurn(ctx, addr)
 	defer telemetry.Finish(span, &err)
@@ -926,7 +961,17 @@ func (r *Runner) Run(ctx context.Context, addr protocol.MessageAddress, user pro
 	// Turn-lifecycle observers (checkpoint/sync, audit, external hooks). TurnStarted
 	// fires now that the address is resolved; TurnFinished fires on every exit path
 	// (the deferred closure reads the final addr + named return err).
-	r.notifyTurn(ctx, hooks.TurnEvent{Phase: hooks.PhaseTurnStarted, Addr: addr})
+	r.notifyTurn(ctx, hooks.TurnEvent{Phase: hooks.PhaseTurnStarted, Addr: addr, MessageID: user.ID})
+	if recovering {
+		reference := &tools.ResultReference{
+			System: "turnjournal", Kind: string(recoveryRecord.Phase),
+			ID: fmt.Sprintf("%s@%d", recoveryRecord.TaskID, recoveryRecord.Revision),
+		}
+		r.notifyTurn(ctx, hooks.TurnEvent{
+			Phase: hooks.PhaseRecoveryStarted, Addr: addr, Iteration: int(recoveryRecord.Iteration),
+			OperationID: fmt.Sprintf("recovery-%s-%d", recoveryRecord.TaskID, recoveryRecord.Revision), Reference: reference,
+		})
+	}
 	defer func() {
 		r.notifyTurn(ctx, hooks.TurnEvent{Phase: hooks.PhaseTurnFinished, Addr: addr, Err: err})
 	}()
@@ -954,7 +999,7 @@ func (r *Runner) Run(ctx context.Context, addr protocol.MessageAddress, user pro
 	ctx = withWorkingDirectoryPrompt(ctx)
 	// The effective user prompt for this turn is now resolved (command rewrites
 	// applied). Fire UserPromptSubmit before any model call.
-	r.notifyTurn(ctx, hooks.TurnEvent{Phase: hooks.PhaseUserPromptSubmit, Addr: addr})
+	r.notifyTurn(ctx, hooks.TurnEvent{Phase: hooks.PhaseUserPromptSubmit, Addr: addr, MessageID: user.ID})
 	// Log inbound multimodal sources at turn entry. Attachments arrive on the user
 	// message as image/file parts carrying a vfs_ref, uri, or inline data_uri; the
 	// harness has no VFS resolver, so a vfs_ref-only attachment never reaches the

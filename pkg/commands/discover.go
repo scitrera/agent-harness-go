@@ -27,6 +27,7 @@ var ReservedNames = map[string]string{
 	"schedules":   "Inspect authoritative scheduled-turn definitions.",
 	"runs":        "Inspect authoritative scheduled-turn runs.",
 	"refinements": "Browse the authoritative continual-refinement audit.",
+	"ledger":      "Browse branch-aware execution events.",
 }
 
 // Discover scans each dir (relative to workspaceRoot) for "<name>.md" command

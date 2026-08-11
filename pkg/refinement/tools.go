@@ -215,5 +215,33 @@ func refinementToolResult(request tools.Request, value any) (tools.Result, error
 	if err != nil {
 		return tools.Result{}, err
 	}
-	return tools.NewJSONResult(request.CallID, request.Name, payload)
+	result, err := tools.NewJSONResult(request.CallID, request.Name, payload)
+	if err != nil {
+		return tools.Result{}, err
+	}
+	for _, record := range refinementRecords(value) {
+		if record.ID != "" {
+			result.Metadata.References = append(result.Metadata.References, tools.ResultReference{System: "refinement-store", Kind: "refinement_record", ID: record.ID})
+		}
+	}
+	return result, nil
+}
+
+func refinementRecords(value any) []Record {
+	switch typed := value.(type) {
+	case Record:
+		return []Record{typed}
+	case ProposalResult:
+		return []Record{typed.Record}
+	case ApplyResult:
+		records := []Record{typed.Decision}
+		if typed.Application != nil {
+			records = append(records, *typed.Application)
+		}
+		return records
+	case Page:
+		return typed.Records
+	default:
+		return nil
+	}
 }
