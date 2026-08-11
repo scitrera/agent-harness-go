@@ -19,6 +19,7 @@ import (
 	"github.com/scitrera/agent-harness-go/pkg/localtools"
 	"github.com/scitrera/agent-harness-go/pkg/memorylayer"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
+	"github.com/scitrera/agent-harness-go/pkg/refinement"
 	"github.com/scitrera/agent-harness-go/pkg/tools"
 	"github.com/scitrera/agent-harness-go/pkg/turnjournal"
 	workspacepkg "github.com/scitrera/agent-harness-go/pkg/workspace"
@@ -419,6 +420,68 @@ func TestLiveAetherScheduledWorkerView(t *testing.T) {
 	if !strings.Contains(runsText, "Scheduled runs") || !strings.Contains(runsText, "task=failed") ||
 		!strings.Contains(runsText, "disposition=ordinary") || strings.Contains(runsText, "Thinking") {
 		t.Fatalf("deployed /runs reply = %q", runsText)
+	}
+}
+
+// TestLiveAetherRefinementAudit proves that the deployed worker reads the
+// MemoryLayer-authoritative audit through sv::memorylayer and serves a bounded
+// model-free operator command.
+func TestLiveAetherRefinementAudit(t *testing.T) {
+	serverAddr := os.Getenv("AETHER_E2E_ADDR")
+	if serverAddr == "" {
+		t.Skip("set AETHER_E2E_ADDR to run the live refinement-audit test")
+	}
+	aetherWorkspace := os.Getenv("AETHER_E2E_WORKSPACE")
+	if aetherWorkspace == "" {
+		aetherWorkspace = "default"
+	}
+	specifier := os.Getenv("AETHER_E2E_SPECIFIER")
+	if specifier == "" {
+		specifier = "e2e"
+	}
+	memoryLayerTarget := os.Getenv("MEMORYLAYER_E2E_TARGET")
+	if memoryLayerTarget == "" {
+		memoryLayerTarget = "sv::memorylayer"
+	}
+	suffix := strconv.FormatInt(time.Now().UnixNano(), 36)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	client, err := aetherchan.NewClient(aetherchan.ClientConfig{
+		ServerAddr: serverAddr, Workspace: aetherWorkspace, SessionWorkspace: "default",
+		AgentSpecifier: specifier, UserID: "refinement-e2e", WindowID: "refinement-" + suffix,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close() }()
+	store, err := memorylayer.NewRefinementRecordStore(memorylayer.Config{
+		Transport: mlaether.NewTransport(client, mlaether.WithTarget(memoryLayerTarget)), Workspace: "default",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	refinementID := "refinement-e2e-" + suffix
+	created, err := store.Append(ctx, "default", "refinement-e2e-create-"+suffix, refinement.AppendRequest{
+		Key: "refinements/" + refinementID + "/application",
+		Plan: refinement.Plan{
+			RefinementID: refinementID, Trigger: "deterministic live check", Scope: refinement.ScopeWorkspace,
+			Summary: "Inspect a failed MemoryLayer audit record", Rationale: "Prove bounded worker-authoritative browsing",
+			ExpectedOutcome: "The deployed worker returns this exact immutable record",
+			Evidence:        []refinement.Evidence{{Kind: refinement.EvidenceEvaluation, Reference: "live:" + suffix, Description: "model-free E2E fixture"}},
+			Edits:           []refinement.Edit{{Action: refinement.ActionCreate, ResourceKind: refinement.ResourceMemory, ResourceKey: "e2e/" + suffix, Reason: "deterministic failed fixture"}},
+		},
+		Phase: refinement.PhaseApplication, Outcome: refinement.OutcomeFailed, SchemaVersion: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reply := runLiveMetaCommand(t, ctx, client, "default", "refinements-"+suffix, "/refinements --attention --refinement "+refinementID+" --limit 1")
+	if !strings.Contains(reply, "source: memorylayer authoritative") || !strings.Contains(reply, created.Record.ID) ||
+		!strings.Contains(reply, "outcome=failed") || !strings.Contains(reply, "attention=required") || strings.Contains(reply, "Thinking") {
+		t.Fatalf("deployed /refinements reply = %q", reply)
 	}
 }
 

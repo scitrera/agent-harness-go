@@ -86,9 +86,11 @@ type ApplyResult struct {
 // does not own a distributed task lifecycle: TaskRef and approval references
 // point at Aether (or another execution authority) when one is present.
 type Service struct {
-	Store   Store
-	Editors map[ResourceKind]ResourceEditor
-	Policy  Policy
+	Store           Store
+	Editors         map[ResourceKind]ResourceEditor
+	Policy          Policy
+	AuditAuthority  string
+	AuditAuthorizer AuditAuthorizer
 }
 
 func Assess(plan Plan, policy Policy) Assessment {

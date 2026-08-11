@@ -19,13 +19,14 @@ const (
 // files using these names are ignored so built-ins cannot be shadowed. The value
 // is the help-line description.
 var ReservedNames = map[string]string{
-	"help":      "List available commands.",
-	"commands":  "List available commands.",
-	"clear":     "Clear this thread's history.",
-	"model":     "List available models, or switch with /model MODEL_NAME.",
-	"models":    "List available models (alias for /model).",
-	"schedules": "Inspect authoritative scheduled-turn definitions.",
-	"runs":      "Inspect authoritative scheduled-turn runs.",
+	"help":        "List available commands.",
+	"commands":    "List available commands.",
+	"clear":       "Clear this thread's history.",
+	"model":       "List available models, or switch with /model MODEL_NAME.",
+	"models":      "List available models (alias for /model).",
+	"schedules":   "Inspect authoritative scheduled-turn definitions.",
+	"runs":        "Inspect authoritative scheduled-turn runs.",
+	"refinements": "Browse the authoritative continual-refinement audit.",
 }
 
 // Discover scans each dir (relative to workspaceRoot) for "<name>.md" command

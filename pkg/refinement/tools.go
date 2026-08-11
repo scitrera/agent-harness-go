@@ -16,6 +16,7 @@ const (
 	ApplyToolName        = "apply_refinement"
 	PlanRollbackToolName = "plan_refinement_rollback"
 	GetRecordToolName    = "get_refinement_record"
+	QueryRecordsToolName = "query_refinement_records"
 )
 
 func RegisterTools(registry *tools.Registry, service *Service) error {
@@ -47,6 +48,11 @@ func RegisterTools(registry *tools.Registry, service *Service) error {
 			Name:        GetRecordToolName,
 			Description: "Read one immutable refinement proposal, decision, application, or rollback audit record in the current workspace.",
 			Parameters:  json.RawMessage(`{"type":"object","properties":{"record_id":{"type":"string"}},"required":["record_id"]}`),
+		}},
+		{QueryRecordsToolName, tools.HandlerFunc(service.queryRecordsTool), tools.Descriptor{
+			Name:        QueryRecordsToolName,
+			Description: "Search one bounded newest-first page of the authoritative refinement audit. Preserve the returned opaque cursor exactly; use failed or partially_applied outcomes to find immutable records needing operator attention.",
+			Parameters:  json.RawMessage(`{"type":"object","properties":{"phases":{"type":"array","maxItems":16,"items":{"type":"string","enum":["proposal","decision","application","rollback"]}},"outcomes":{"type":"array","maxItems":16,"items":{"type":"string","enum":["proposed","approved","rejected","applied","partially_applied","failed","rolled_back","no_op"]}},"scopes":{"type":"array","maxItems":16,"items":{"type":"string","enum":["session","workspace","user","tenant","global"]}},"resource_kinds":{"type":"array","maxItems":16,"items":{"type":"string","enum":["prompt_note","memory","skill","agent_specification"]}},"refinement_id":{"type":"string","maxLength":200},"text":{"type":"string","maxLength":200},"limit":{"type":"integer","minimum":1,"maximum":100},"cursor":{"type":"string","maxLength":8192}}}`),
 		}},
 	}
 	for _, registration := range registrations {
@@ -152,6 +158,30 @@ func (s *Service) getRecordTool(ctx context.Context, request tools.Request) (too
 		return tools.Result{}, err
 	}
 	return refinementToolResult(request, record)
+}
+
+func (s *Service) queryRecordsTool(ctx context.Context, request tools.Request) (tools.Result, error) {
+	var input struct {
+		Phases        []Phase        `json:"phases"`
+		Outcomes      []Outcome      `json:"outcomes"`
+		Scopes        []Scope        `json:"scopes"`
+		ResourceKinds []ResourceKind `json:"resource_kinds"`
+		RefinementID  string         `json:"refinement_id"`
+		Text          string         `json:"text"`
+		Limit         int            `json:"limit"`
+		Cursor        string         `json:"cursor"`
+	}
+	if err := decodeRefinementToolArgs(request, &input); err != nil {
+		return tools.Result{}, err
+	}
+	page, err := s.Store.Query(ctx, request.Addr.WorkspaceID, Query{
+		Phases: input.Phases, Outcomes: input.Outcomes, Scopes: input.Scopes, ResourceKinds: input.ResourceKinds,
+		RefinementID: input.RefinementID, Text: input.Text, Limit: input.Limit, PageToken: input.Cursor,
+	})
+	if err != nil {
+		return tools.Result{}, err
+	}
+	return refinementToolResult(request, page)
 }
 
 func taskReference(request tools.Request) *ExternalReference {

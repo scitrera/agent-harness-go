@@ -3,15 +3,11 @@ package memorylayer
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	memorylayersdk "github.com/scitrera/memorylayer/memorylayer-sdk-go"
 
 	"github.com/scitrera/agent-harness-go/pkg/refinement"
-)
-
-const (
-	refinementRecordPageSize = 100
-	maxRefinementRecordPages = 20
 )
 
 // RefinementRecordStore adapts the neutral append-only refinement.Store to
@@ -77,7 +73,11 @@ func (s *RefinementRecordStore) Append(ctx context.Context, workspaceID, operati
 	if err != nil {
 		return refinement.AppendResult{}, fmt.Errorf("memorylayer: append refinement record: %w", err)
 	}
-	return refinement.AppendResult{Record: refinementRecord(result.Record), Replayed: result.Replayed}, nil
+	record := refinementRecord(result.Record)
+	if err := validateRefinementRecord(record, workspaceID); err != nil {
+		return refinement.AppendResult{}, err
+	}
+	return refinement.AppendResult{Record: record, Replayed: result.Replayed}, nil
 }
 
 func (s *RefinementRecordStore) Get(ctx context.Context, workspaceID, recordID string) (refinement.Record, error) {
@@ -87,33 +87,67 @@ func (s *RefinementRecordStore) Get(ctx context.Context, workspaceID, recordID s
 	if err != nil {
 		return refinement.Record{}, fmt.Errorf("memorylayer: get refinement record: %w", err)
 	}
-	return refinementRecord(*record), nil
+	projected := refinementRecord(*record)
+	if err := validateRefinementRecord(projected, workspaceID); err != nil {
+		return refinement.Record{}, err
+	}
+	return projected, nil
 }
 
-func (s *RefinementRecordStore) List(ctx context.Context, workspaceID string) ([]refinement.Record, error) {
-	pageToken := ""
-	seenTokens := map[string]struct{}{}
-	var records []refinement.Record
-	for pageNumber := 0; pageNumber < maxRefinementRecordPages; pageNumber++ {
-		page, err := s.client.RefinementRecords.List(ctx, memorylayersdk.RefinementRecordListOptions{
-			WorkspaceID: workspaceID, Limit: refinementRecordPageSize, PageToken: pageToken, Authority: promptNoteAuthority(ctx),
-		})
-		if err != nil {
-			return nil, fmt.Errorf("memorylayer: list refinement records: %w", err)
-		}
-		for _, record := range page.Records {
-			records = append(records, refinementRecord(record))
-		}
-		if page.NextPageToken == "" {
-			return records, nil
-		}
-		if _, repeated := seenTokens[page.NextPageToken]; repeated {
-			return nil, fmt.Errorf("memorylayer: refinement-record cursor cycle at %q", page.NextPageToken)
-		}
-		seenTokens[page.NextPageToken] = struct{}{}
-		pageToken = page.NextPageToken
+func (s *RefinementRecordStore) Query(ctx context.Context, workspaceID string, query refinement.Query) (refinement.Page, error) {
+	query, err := refinement.NormalizeQuery(query)
+	if err != nil {
+		return refinement.Page{}, err
 	}
-	return nil, fmt.Errorf("memorylayer: refinement-record listing exceeds %d pages (%d records maximum)", maxRefinementRecordPages, refinementRecordPageSize*maxRefinementRecordPages)
+	page, err := s.client.RefinementRecords.List(ctx, memorylayersdk.RefinementRecordListOptions{
+		WorkspaceID: workspaceID, Limit: query.Limit, PageToken: query.PageToken,
+		Phases: stringsFor(query.Phases), Outcomes: stringsFor(query.Outcomes), Scopes: stringsFor(query.Scopes),
+		ResourceKinds: stringsFor(query.ResourceKinds), RefinementID: query.RefinementID, Search: query.Text,
+		Authority: promptNoteAuthority(ctx),
+	})
+	if err != nil {
+		return refinement.Page{}, fmt.Errorf("memorylayer: query refinement records: %w", err)
+	}
+	if err := refinement.ValidateQueryCursor(page.NextPageToken); err != nil {
+		return refinement.Page{}, fmt.Errorf("memorylayer: invalid refinement-record next cursor: %w", err)
+	}
+	if page.NextPageToken != "" && page.NextPageToken == query.PageToken {
+		return refinement.Page{}, fmt.Errorf("memorylayer: refinement-record cursor did not advance")
+	}
+	result := refinement.Page{
+		Records: make([]refinement.Record, 0, len(page.Records)), NextPageToken: page.NextPageToken,
+		ScannedCount: page.ScannedCount, ScanTruncated: page.ScanTruncated,
+	}
+	for _, item := range page.Records {
+		record := refinementRecord(item)
+		if err := validateRefinementRecord(record, workspaceID); err != nil {
+			return refinement.Page{}, err
+		}
+		result.Records = append(result.Records, record)
+	}
+	if result.ScannedCount < len(result.Records) {
+		return refinement.Page{}, fmt.Errorf("memorylayer: refinement-record scan count %d is smaller than result count %d", result.ScannedCount, len(result.Records))
+	}
+	return result, nil
+}
+
+func stringsFor[T ~string](values []T) []string {
+	out := make([]string, len(values))
+	for i, value := range values {
+		out[i] = string(value)
+	}
+	return out
+}
+
+func validateRefinementRecord(record refinement.Record, workspaceID string) error {
+	if strings.TrimSpace(record.ID) == "" || record.WorkspaceID != workspaceID || record.Revision != 1 ||
+		strings.TrimSpace(record.ETag) == "" || strings.TrimSpace(record.CreatedAt) == "" {
+		return fmt.Errorf("memorylayer: invalid refinement record projection %q", record.ID)
+	}
+	if err := record.AppendRequest.Validate(); err != nil {
+		return fmt.Errorf("memorylayer: invalid refinement record %q: %w", record.ID, err)
+	}
+	return nil
 }
 
 func refinementCreateInput(request refinement.AppendRequest) memorylayersdk.RefinementRecordCreateInput {

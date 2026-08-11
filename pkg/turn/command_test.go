@@ -10,6 +10,7 @@ import (
 	"github.com/scitrera/agent-harness-go/pkg/contextpack"
 	"github.com/scitrera/agent-harness-go/pkg/harness"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
+	"github.com/scitrera/agent-harness-go/pkg/tools"
 )
 
 type fakeScheduledOperationsCommands struct {
@@ -20,6 +21,25 @@ type fakeScheduledOperationsCommands struct {
 	text  string
 	err   error
 	calls int
+}
+
+type fakeRefinementAuditCommands struct {
+	auth  tools.MemoryAuthority
+	addr  protocol.MessageAddress
+	user  protocol.ChatMessage
+	args  string
+	text  string
+	err   error
+	calls int
+}
+
+func (f *fakeRefinementAuditCommands) RunRefinementAuditCommand(ctx context.Context, addr protocol.MessageAddress, user protocol.ChatMessage, args string) (string, error) {
+	f.calls++
+	f.auth, _ = tools.MemoryAuthorityFrom(ctx)
+	f.addr = addr
+	f.user = user
+	f.args = args
+	return f.text, f.err
 }
 
 func (f *fakeScheduledOperationsCommands) RunScheduledOperationsCommand(_ context.Context, addr protocol.MessageAddress, user protocol.ChatMessage, name, args string) (string, error) {
@@ -120,6 +140,49 @@ func Test_Runner_Run_builtin_scheduledOperationsUnavailableOrFailed(t *testing.T
 	if _, err := r.Run(context.Background(), protocol.MessageAddress{ThreadID: "t1"}, userMessage(t, "/runs")); err == nil ||
 		!strings.Contains(err.Error(), "authority denied") {
 		t.Fatalf("operations failure = %v", err)
+	}
+}
+
+func Test_Runner_Run_builtin_refinementAuditUsesDerivedAuthorityBeforeCommandResolution(t *testing.T) {
+	provider := &fakeProvider{}
+	audit := &fakeRefinementAuditCommands{text: "bounded audit page"}
+	r := newCommandRunner(t, provider, &fakeStore{}, commands.New(nil))
+	r.refinementAudit = audit
+	r.authorityFn = func(protocol.MessageAddress, protocol.ChatMessage) tools.MemoryAuthority {
+		return tools.MemoryAuthority{GrantID: "grant-1", SubjectType: "user", SubjectID: "alice"}
+	}
+	addr := protocol.MessageAddress{WorkspaceID: "project-a", ThreadID: "ops", TaskID: "task-1"}
+	user := userMessage(t, "/refinements --attention --limit 7")
+	user.ID = "audit-user"
+	reply, err := r.Run(context.Background(), addr, user)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if provider.request.Model != "" || audit.calls != 1 || audit.args != "--attention --limit 7" ||
+		audit.addr.WorkspaceID != "project-a" || audit.user.ID != user.ID || audit.auth.GrantID != "grant-1" || audit.auth.SubjectID != "alice" {
+		t.Fatalf("provider=%q audit=%+v", provider.request.Model, audit)
+	}
+	if got := assistantPlainText(reply); got != audit.text {
+		t.Fatalf("audit reply = %q", got)
+	}
+	if !strings.Contains(r.helpText(), "/refinements") {
+		t.Fatalf("configured audit missing from help: %q", r.helpText())
+	}
+}
+
+func Test_Runner_Run_builtin_refinementAuditUnavailableOrFailed(t *testing.T) {
+	r := newCommandRunner(t, &fakeProvider{}, &fakeStore{}, commands.New(nil))
+	reply, err := r.Run(context.Background(), protocol.MessageAddress{ThreadID: "t1"}, userMessage(t, "/refinements"))
+	if err != nil || !strings.Contains(assistantPlainText(reply), "no refinement authority") {
+		t.Fatalf("unavailable reply=%q err=%v", assistantPlainText(reply), err)
+	}
+	if strings.Contains(r.helpText(), "/refinements") {
+		t.Fatalf("unconfigured audit advertised in help: %q", r.helpText())
+	}
+	r.refinementAudit = &fakeRefinementAuditCommands{err: errors.New("denied")}
+	if _, err := r.Run(context.Background(), protocol.MessageAddress{ThreadID: "t1"}, userMessage(t, "/refinements")); err == nil ||
+		!strings.Contains(err.Error(), "denied") {
+		t.Fatalf("audit failure = %v", err)
 	}
 }
 

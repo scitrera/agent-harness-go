@@ -224,7 +224,9 @@ func TestOpenRefinementServiceSelectsAuditAndResourceAuthorities(t *testing.T) {
 		stateDir: t.TempDir(), memorylayerMode: memoryLayerModeHTTP, memorylayerURL: "http://memorylayer", memorylayerWorkspace: "backend",
 		promptNotesAuthority: promptNotesAuthorityMemoryLayer,
 	})
-	if err != nil || remoteResource == nil || remoteResource.Editors[refinement.ResourcePromptNote] == nil || remoteResource.Editors[refinement.ResourceAgentSpecification] != nil {
+	if err != nil || remoteResource == nil || remoteResource.Editors[refinement.ResourcePromptNote] == nil ||
+		remoteResource.Editors[refinement.ResourceAgentSpecification] != nil || remoteResource.Editors[refinement.ResourceMemory] == nil ||
+		remoteResource.Editors[refinement.ResourceSkill] == nil {
 		t.Fatalf("mixed-authority refinement service = %+v, %v", remoteResource, err)
 	}
 }

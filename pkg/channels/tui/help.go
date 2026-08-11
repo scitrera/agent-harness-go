@@ -10,7 +10,7 @@ Mouse wheel or Up/Down scroll history
 PgUp/PgDn scroll | Ctrl+PgUp/PgDn ends
 Tab/Enter complete | ↑/↓ select | / filter
 Esc close/cancel active turn | Ctrl+C/Ctrl+D twice to quit
-/cd /pwd /threads /tools /schedules /runs /approvals /attach
+/cd /pwd /threads /tools /schedules /runs /refinements /approvals /attach
 Type / for commands or @ to reference workspace paths`
 )
 

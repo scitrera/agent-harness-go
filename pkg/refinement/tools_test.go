@@ -84,6 +84,21 @@ func TestRefinementToolsProposeRequireFreshApprovalThenApply(t *testing.T) {
 	if rollback.Record.RollbackOfRecordID != application.Application.ID || rollback.Assessment.Risk != RiskHigh || !rollback.Assessment.RequiresApproval {
 		t.Fatalf("rollback proposal = %+v", rollback)
 	}
+
+	queryArguments, _ := json.Marshal(map[string]any{"outcomes": []string{"applied"}, "resource_kinds": []string{"prompt_note"}, "text": "instruction", "limit": 1})
+	queryResult, err := registry.Invoke(context.Background(), tools.Request{
+		CallID: "query-call", Name: QueryRecordsToolName, Arguments: queryArguments, Addr: address,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var page Page
+	if err := json.Unmarshal(queryResult.Payload, &page); err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Records) != 1 || page.Records[0].ID != application.Application.ID {
+		t.Fatalf("query page = %+v", page)
+	}
 }
 
 func TestRefinementApplyToolCanAutoApplyOptedInLowRiskSessionEdit(t *testing.T) {

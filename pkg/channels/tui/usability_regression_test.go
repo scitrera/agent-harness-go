@@ -173,7 +173,7 @@ func TestSlashSuggestionsExposeFullCommandCatalog(t *testing.T) {
 	if got := len(m.selector.items); got <= maxSelectionRows {
 		t.Fatalf("suggestions were truncated before navigation: got %d, want > %d", got, maxSelectionRows)
 	}
-	for _, want := range []string{"/help", "/commands", "/model", "/schedules", "/runs", "/thread"} {
+	for _, want := range []string{"/help", "/commands", "/model", "/schedules", "/runs", "/refinements", "/thread"} {
 		found := false
 		for _, item := range m.selector.items {
 			if item.Value == want {

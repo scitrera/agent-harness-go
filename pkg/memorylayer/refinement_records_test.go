@@ -57,14 +57,40 @@ func TestRefinementRecordStoreUsesTypedSDKWorkspaceAuthorityAndIdempotency(t *te
 	}
 }
 
-func TestRefinementRecordStoreRejectsCursorCycles(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`{"records":[],"next_page_token":"same"}`))
+func TestRefinementRecordStoreQueriesOneBoundedAuthorityPage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query := r.URL.Query()
+		if r.Header.Get("X-Aether-Grant-ID") != "grant-query" || r.Header.Get("X-Aether-Subject-ID") != "operator" {
+			t.Errorf("authority headers = %#v", r.Header)
+		}
+		if query.Get("workspace_id") != "project" || query.Get("limit") != "7" || query.Get("page_token") != "cursor" ||
+			query.Get("phase") != "application" || query.Get("outcome") != "failed" || query.Get("scope") != "workspace" ||
+			query.Get("resource_kind") != "memory" || query.Get("refinement_id") != "refine-1" || query.Get("search") != "broken" {
+			t.Errorf("query = %s", r.URL.RawQuery)
+		}
+		_, _ = w.Write([]byte(`{"records":[],"next_page_token":"next","scanned_count":31,"scan_truncated":true}`))
 	}))
 	defer server.Close()
 	store, _ := NewRefinementRecordStore(Config{BaseURL: server.URL})
-	if _, err := store.List(context.Background(), "project"); err == nil {
-		t.Fatal("expected cursor cycle error")
+	ctx := tools.WithMemoryAuthority(context.Background(), tools.MemoryAuthority{GrantID: "grant-query", SubjectType: "user", SubjectID: "operator"})
+	page, err := store.Query(ctx, "project", refinement.Query{
+		Phases: []refinement.Phase{refinement.PhaseApplication}, Outcomes: []refinement.Outcome{refinement.OutcomeFailed},
+		Scopes: []refinement.Scope{refinement.ScopeWorkspace}, ResourceKinds: []refinement.ResourceKind{refinement.ResourceMemory},
+		RefinementID: "refine-1", Text: "broken", Limit: 7, PageToken: "cursor",
+	})
+	if err != nil || page.NextPageToken != "next" || page.ScannedCount != 31 || !page.ScanTruncated {
+		t.Fatalf("page=%#v err=%v", page, err)
+	}
+}
+
+func TestRefinementRecordStoreRejectsNonAdvancingCursor(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"records":[],"next_page_token":"same","scanned_count":1}`))
+	}))
+	defer server.Close()
+	store, _ := NewRefinementRecordStore(Config{BaseURL: server.URL})
+	if _, err := store.Query(context.Background(), "project", refinement.Query{PageToken: "same"}); err == nil {
+		t.Fatal("expected non-advancing cursor error")
 	}
 }
 

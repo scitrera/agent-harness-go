@@ -8,8 +8,8 @@ import (
 func TestWorkspaceBindingsMapOnlySelectedLogicalWorkspace(t *testing.T) {
 	store := &capturingStore{}
 	boundStore := BindStore(store, "logical", "backend")
-	_, _ = boundStore.List(context.Background(), "logical")
-	_, _ = boundStore.List(context.Background(), "other")
+	_, _ = boundStore.Query(context.Background(), "logical", Query{})
+	_, _ = boundStore.Query(context.Background(), "other", Query{})
 	if len(store.workspaces) != 2 || store.workspaces[0] != "backend" || store.workspaces[1] != "other" {
 		t.Fatalf("store workspaces = %v", store.workspaces)
 	}
@@ -35,9 +35,9 @@ func (s *capturingStore) Get(_ context.Context, workspaceID, _ string) (Record, 
 	return Record{}, nil
 }
 
-func (s *capturingStore) List(_ context.Context, workspaceID string) ([]Record, error) {
+func (s *capturingStore) Query(_ context.Context, workspaceID string, _ Query) (Page, error) {
 	s.workspaces = append(s.workspaces, workspaceID)
-	return nil, nil
+	return Page{}, nil
 }
 
 type capturingEditor struct{ workspaces []string }

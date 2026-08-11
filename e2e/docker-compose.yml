@@ -125,6 +125,7 @@ services:
       - --aether-specifier=${AETHER_SPECIFIER:-e2e}
       - --aether-task-message-lanes=${AETHER_TASK_MESSAGE_LANES:-false}
       - --memorylayer-workspace=${MEMORYLAYER_WORKSPACE:-default}
+      - --refinement-authority=${SAHARA_REFINEMENT_AUTHORITY:-memorylayer}
       - --workspace=/workspace
     environment:
       # Your model endpoint. The harness talks OpenAI-compatible HTTP.

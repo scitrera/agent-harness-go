@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -19,6 +20,8 @@ import (
 )
 
 const maxAuditLineBytes = 1 << 20
+
+const maxFileQueryScanRecords = 1000
 
 type FileStore struct {
 	stateDir string
@@ -119,21 +122,107 @@ func (s *FileStore) Get(ctx context.Context, workspaceID, recordID string) (Reco
 	return Record{}, fmt.Errorf("%w: %s", ErrNotFound, recordID)
 }
 
-func (s *FileStore) List(ctx context.Context, workspaceID string) ([]Record, error) {
+func (s *FileStore) Query(ctx context.Context, workspaceID string, query Query) (Page, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return Page{}, err
+	}
+	query, err := NormalizeQuery(query)
+	if err != nil {
+		return Page{}, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	entries, err := s.load(workspaceID)
 	if err != nil {
-		return nil, err
+		return Page{}, err
 	}
-	records := make([]Record, len(entries))
-	for i := range entries {
-		records[i] = cloneRecord(entries[len(entries)-1-i].Record)
+	start := len(entries) - 1
+	scope, err := fileQueryScope(workspaceID, query)
+	if err != nil {
+		return Page{}, err
 	}
-	return records, nil
+	if query.PageToken != "" {
+		cursor, err := decodeFileQueryCursor(query.PageToken, scope)
+		if err != nil {
+			return Page{}, err
+		}
+		found := false
+		for i := len(entries) - 1; i >= 0; i-- {
+			if entries[i].Record.ID == cursor.AfterRecordID {
+				start = i - 1
+				found = true
+				break
+			}
+		}
+		if !found {
+			return Page{}, queryCursorError("anchor record is unavailable")
+		}
+	}
+
+	page := Page{Records: make([]Record, 0, query.Limit)}
+	nextIndex := start
+	lastInspectedID := ""
+	for nextIndex >= 0 && page.ScannedCount < maxFileQueryScanRecords {
+		record := entries[nextIndex].Record
+		lastInspectedID = record.ID
+		nextIndex--
+		page.ScannedCount++
+		if matchesQuery(record, query) {
+			page.Records = append(page.Records, cloneRecord(record))
+			if len(page.Records) == query.Limit {
+				break
+			}
+		}
+	}
+	if nextIndex >= 0 {
+		page.NextPageToken, err = encodeFileQueryCursor(fileQueryCursor{Version: 1, Scope: scope, AfterRecordID: lastInspectedID})
+		if err != nil {
+			return Page{}, err
+		}
+		page.ScanTruncated = len(page.Records) < query.Limit && page.ScannedCount == maxFileQueryScanRecords
+	}
+	return page, nil
+}
+
+type fileQueryCursor struct {
+	Version       int    `json:"v"`
+	Scope         string `json:"scope"`
+	AfterRecordID string `json:"after_record_id"`
+}
+
+func fileQueryScope(workspaceID string, query Query) (string, error) {
+	query.PageToken = ""
+	query.Limit = 0
+	query.Text = strings.ToLower(query.Text)
+	encoded, err := json.Marshal(struct {
+		WorkspaceID string `json:"workspace_id"`
+		Query       Query  `json:"query"`
+	}{WorkspaceID: workspaceID, Query: query})
+	if err != nil {
+		return "", fmt.Errorf("refinement: encode query scope: %w", err)
+	}
+	digest := sha256.Sum256(encoded)
+	return hex.EncodeToString(digest[:]), nil
+}
+
+func encodeFileQueryCursor(cursor fileQueryCursor) (string, error) {
+	encoded, err := json.Marshal(cursor)
+	if err != nil {
+		return "", fmt.Errorf("refinement: encode query cursor: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(encoded), nil
+}
+
+func decodeFileQueryCursor(token, scope string) (fileQueryCursor, error) {
+	encoded, err := base64.RawURLEncoding.DecodeString(token)
+	if err != nil {
+		return fileQueryCursor{}, queryCursorError("malformed token")
+	}
+	var cursor fileQueryCursor
+	if err := json.Unmarshal(encoded, &cursor); err != nil || cursor.Version != 1 || cursor.Scope != scope || cursor.AfterRecordID == "" {
+		return fileQueryCursor{}, queryCursorError("scope or payload mismatch")
+	}
+	return cursor, nil
 }
 
 func (s *FileStore) load(workspaceID string) ([]fileEntry, error) {

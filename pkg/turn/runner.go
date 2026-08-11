@@ -166,6 +166,7 @@ type Runner struct {
 
 	commands            *commands.Registry
 	scheduledOperations ScheduledOperationsCommandProvider
+	refinementAudit     RefinementAuditCommandProvider
 	approvers           []hooks.ToolApprover
 	observers           []hooks.ToolObserver
 	turnObservers       []hooks.TurnObserver
@@ -247,6 +248,19 @@ type ScheduledOperationsCommandProvider interface {
 		addr protocol.MessageAddress,
 		user protocol.ChatMessage,
 		name string,
+		args string,
+	) (string, error)
+}
+
+// RefinementAuditCommandProvider is the authority-owned, model-free browsing
+// seam behind /refinements. The full inbound message remains available to a
+// composition policy; authority-aware stores read the OBO context installed by
+// Runner before command resolution.
+type RefinementAuditCommandProvider interface {
+	RunRefinementAuditCommand(
+		ctx context.Context,
+		addr protocol.MessageAddress,
+		user protocol.ChatMessage,
 		args string,
 	) (string, error)
 }
@@ -391,6 +405,10 @@ type Config struct {
 	// ScheduledOperations serves the reserved /schedules and /runs built-ins.
 	// It is optional and normally configured only by an Aether worker host.
 	ScheduledOperations ScheduledOperationsCommandProvider
+
+	// RefinementAudit serves the reserved /refinements built-in. It is optional;
+	// local and MemoryLayer-backed stores implement the same bounded query shape.
+	RefinementAudit RefinementAuditCommandProvider
 
 	// Approvers gate tool calls (first denial wins); Observers watch the tool
 	// lifecycle (no veto). Both are in-process today but the interfaces are
@@ -635,6 +653,7 @@ func NewRunner(cfg Config) (*Runner, error) {
 		newThreadID:               cfg.NewThreadID,
 		commands:                  cfg.Commands,
 		scheduledOperations:       cfg.ScheduledOperations,
+		refinementAudit:           cfg.RefinementAudit,
 		approvers:                 cfg.Approvers,
 		observers:                 cfg.Observers,
 		turnObservers:             cfg.TurnObservers,
@@ -872,6 +891,10 @@ func (r *Runner) Run(ctx context.Context, addr protocol.MessageAddress, user pro
 			auth = derived
 		}
 	}
+	// Commands can read authority-owned state before the model/tool path. Carry
+	// the derived OBO context now so those reads are authorized identically to
+	// later history, context, and tool calls.
+	ctx = tools.WithMemoryAuthority(ctx, auth)
 	// Resolve a missing thread id before anything keys off it: a turn may arrive
 	// with no thread (a new chat from a "dumb" CLI/TUI/web client). Mint one — via
 	// the backend thread registrar (canonical, e.g. MemoryLayer's server-owned id)
@@ -957,11 +980,6 @@ func (r *Runner) Run(ctx context.Context, addr protocol.MessageAddress, user pro
 	if len(allowedTools) > 0 {
 		perTurnApprovers = append(perTurnApprovers, hooks.NewAllowList(allowedTools, "tool not permitted by the active command's allowed-tools"))
 	}
-	// Carry the per-turn OBO (computed above) on the turn ctx so ctx-based
-	// consumers (the durable tool-grant store, an authority-aware history store)
-	// act under the user's grant. Tools also receive it via req.Authority on the
-	// session; this covers the ctx path.
-	ctx = tools.WithMemoryAuthority(ctx, auth)
 	if preparer, ok := r.ctxMgr.(ContextPreparer); ok {
 		ctx, err = preparer.Prepare(ctx)
 		if err != nil {

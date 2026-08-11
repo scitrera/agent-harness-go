@@ -161,8 +161,8 @@ type AppendResult struct {
 type Store interface {
 	Append(ctx context.Context, workspaceID, operationID string, request AppendRequest) (AppendResult, error)
 	Get(ctx context.Context, workspaceID, recordID string) (Record, error)
-	// List returns immutable records newest-first.
-	List(ctx context.Context, workspaceID string) ([]Record, error)
+	// Query returns one bounded newest-first authority page.
+	Query(ctx context.Context, workspaceID string, query Query) (Page, error)
 }
 
 func (r AppendRequest) Validate() error {

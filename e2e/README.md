@@ -230,6 +230,9 @@ worker fallback.
 It also creates a one-shot Aether schedule, publishes a temporary worker view
 through MemoryLayer, and asserts that the resulting targeted background task
 arrives with the exact worker/view binding. Neither scenario invokes a model.
+Finally, it appends a failed refinement record through `sv::memorylayer` and
+asserts that the deployed worker returns it through `/refinements --attention`
+without entering the model path.
 
 ## 5. Exercise model capabilities
 
@@ -249,6 +252,10 @@ In the TUI:
    routes the tool call to this exact TUI. Stop the TUI while a bound tool is
    needed to verify that the worker fails the call instead of reading its own
    checkout.
+6. Enter `/refinements --attention` to inspect failed or partially applied
+   immutable refinement records from the MemoryLayer-authoritative audit. This
+   is a model-free worker command; use its emitted opaque cursor command to
+   continue a bounded page.
 
 Useful observation commands:
 
@@ -275,6 +282,8 @@ when testing provider separation.
   Aether without exposing its absolute path or falling back to a worker checkout;
 - Aether's WorkflowEngine can create an exact-worker scheduled turn whose
   MemoryLayer view, declaration digest, and revision remain pinned at ingress;
+- the worker can browse the bounded MemoryLayer-authoritative refinement audit
+  through `/refinements` without relying on a model response or client cache;
 - the OSS executable loads `config/models.yaml`, supports `/model` pins, routes
   images by declared capability, and can resolve a provider per model;
 - the build consumes the untagged sibling source graph used during development.

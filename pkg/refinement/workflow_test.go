@@ -71,10 +71,11 @@ func TestServiceApplyRequiresApprovalAndRecordsAuthorityResult(t *testing.T) {
 	if len(editor.operations) != 1 || editor.operations[0] == "apply-op" {
 		t.Fatalf("editor operations = %v", editor.operations)
 	}
-	records, err := store.List(context.Background(), "ws-a")
+	page, err := store.Query(context.Background(), "ws-a", Query{Limit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
+	records := page.Records
 	if len(records) != 3 {
 		t.Fatalf("record count = %d, want proposal + decision + application", len(records))
 	}

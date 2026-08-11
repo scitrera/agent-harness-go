@@ -472,7 +472,7 @@ func openRefinementService(cfg appConfig) (*refinement.Service, error) {
 		}
 		editors[refinement.ResourcePromptNote] = localEditor
 	}
-	if promptAuthority == promptNotesAuthorityMemoryLayer || agentAuthority == agentSpecificationsAuthorityMemoryLayer {
+	if hasMemoryLayer {
 		editor, editorErr := memorylayer.NewRefinementResourceEditor(memoryLayerClientConfig(cfg))
 		if editorErr != nil {
 			return nil, editorErr
@@ -484,9 +484,13 @@ func openRefinementService(cfg appConfig) (*refinement.Service, error) {
 		if agentAuthority == agentSpecificationsAuthorityMemoryLayer {
 			editors[refinement.ResourceAgentSpecification] = bound
 		}
+		// Memory and skill manifests have no competing local writer. Once
+		// MemoryLayer is configured it is their sole typed CAS/history authority.
+		editors[refinement.ResourceMemory] = bound
+		editors[refinement.ResourceSkill] = bound
 	}
 	return &refinement.Service{
-		Store: audit, Editors: editors,
+		Store: audit, Editors: editors, AuditAuthority: authority,
 		Policy: refinement.Policy{AllowSessionLowRiskWithoutApproval: cfg.refinementSessionAutoApply},
 	}, nil
 }

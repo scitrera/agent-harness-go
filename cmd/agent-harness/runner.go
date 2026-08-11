@@ -207,6 +207,7 @@ func buildRunner(cfg appConfig, st stores, pub channel.Publisher, approvals appr
 		TurnRecorder:        recorder,
 		Commands:            commands.New(cmdSpecs),
 		ScheduledOperations: scheduledOperations,
+		RefinementAudit:     st.refinements,
 		Now:                 time.Now,
 		Approvals:           approvals,
 		ToolProviders:       toolProviders,

@@ -25,8 +25,8 @@ func (s *boundStore) Get(ctx context.Context, workspaceID, recordID string) (Rec
 	return s.base.Get(ctx, s.backendWorkspace(workspaceID), recordID)
 }
 
-func (s *boundStore) List(ctx context.Context, workspaceID string) ([]Record, error) {
-	return s.base.List(ctx, s.backendWorkspace(workspaceID))
+func (s *boundStore) Query(ctx context.Context, workspaceID string, query Query) (Page, error) {
+	return s.base.Query(ctx, s.backendWorkspace(workspaceID), query)
 }
 
 func (s *boundStore) backendWorkspace(workspaceID string) string {

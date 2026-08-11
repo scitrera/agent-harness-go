@@ -40,8 +40,8 @@ func TestFileStoreAppendReplayRestartAndWorkspaceIsolation(t *testing.T) {
 	if err != nil || !replay.Replayed || replay.Record.ID != created.Record.ID {
 		t.Fatalf("replay = %#v, %v", replay, err)
 	}
-	other, err := store.List(context.Background(), "project-b")
-	if err != nil || len(other) != 0 {
+	other, err := store.Query(context.Background(), "project-b", Query{})
+	if err != nil || len(other.Records) != 0 {
 		t.Fatalf("other workspace = %#v, %v", other, err)
 	}
 	restarted, _ := NewFileStore(store.stateDir, nil)
@@ -83,12 +83,46 @@ func TestFileStoreListsNewestFirst(t *testing.T) {
 	if _, err := store.Append(context.Background(), "project", "op-2", second); err != nil {
 		t.Fatal(err)
 	}
-	records, err := store.List(context.Background(), "project")
-	if err != nil || len(records) != 2 {
-		t.Fatalf("records = %#v, %v", records, err)
+	page, err := store.Query(context.Background(), "project", Query{})
+	if err != nil || len(page.Records) != 2 {
+		t.Fatalf("records = %#v, %v", page, err)
 	}
+	records := page.Records
 	if records[0].RefinementID != "r2" || records[1].RefinementID != "r1" {
 		t.Fatalf("record order = %#v", records)
+	}
+}
+
+func TestFileStoreQueryFiltersAndUsesStableScopedCursor(t *testing.T) {
+	store, _ := NewFileStore(t.TempDir(), nil)
+	appendProposal := func(operationID, refinementID string, kind ResourceKind, summary string) {
+		t.Helper()
+		request := proposal("refinements/" + refinementID + "/proposal")
+		request.RefinementID = refinementID
+		request.Summary = summary
+		request.Edits[0].ResourceKind = kind
+		if _, err := store.Append(context.Background(), "project", operationID, request); err != nil {
+			t.Fatal(err)
+		}
+	}
+	appendProposal("op-1", "r1", ResourceAgentSpecification, "Evidence reviewer one")
+	appendProposal("op-2", "r2", ResourcePromptNote, "Unrelated prompt")
+	appendProposal("op-3", "r3", ResourceAgentSpecification, "Evidence reviewer three")
+
+	query := Query{ResourceKinds: []ResourceKind{ResourceAgentSpecification}, Text: "EVIDENCE", Limit: 1}
+	first, err := store.Query(context.Background(), "project", query)
+	if err != nil || len(first.Records) != 1 || first.Records[0].RefinementID != "r3" || first.NextPageToken == "" {
+		t.Fatalf("first page=%#v err=%v", first, err)
+	}
+	appendProposal("op-4", "r4", ResourceAgentSpecification, "Evidence added after cursor")
+	query.PageToken = first.NextPageToken
+	second, err := store.Query(context.Background(), "project", query)
+	if err != nil || len(second.Records) != 1 || second.Records[0].RefinementID != "r1" || second.NextPageToken != "" || second.ScannedCount != 2 {
+		t.Fatalf("second page=%#v err=%v", second, err)
+	}
+	query.Text = "different"
+	if _, err := store.Query(context.Background(), "project", query); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("mismatched cursor error = %v", err)
 	}
 }
 
@@ -122,9 +156,9 @@ func TestFileStoreConcurrentReplayAppendsOnce(t *testing.T) {
 	if len(ids) != 1 {
 		t.Fatalf("record ids = %#v", ids)
 	}
-	records, err := store.List(context.Background(), "project")
-	if err != nil || len(records) != 1 {
-		t.Fatalf("records = %#v, %v", records, err)
+	page, err := store.Query(context.Background(), "project", Query{})
+	if err != nil || len(page.Records) != 1 {
+		t.Fatalf("records = %#v, %v", page, err)
 	}
 }
 

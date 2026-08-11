@@ -67,6 +67,15 @@ func (r *Runner) runBuiltin(ctx context.Context, addr protocol.MessageAddress, u
 			return protocol.ChatMessage{}, fmt.Errorf("/%s: %w", commands.CanonicalKey(name), err)
 		}
 		return r.emitReply(ctx, addr, text)
+	case "refinements":
+		if r.refinementAudit == nil {
+			return r.emitReply(ctx, addr, "Refinement audit browsing is unavailable: this runtime has no refinement authority configured.")
+		}
+		text, err := r.refinementAudit.RunRefinementAuditCommand(ctx, addr, user, args)
+		if err != nil {
+			return protocol.ChatMessage{}, fmt.Errorf("/refinements: %w", err)
+		}
+		return r.emitReply(ctx, addr, text)
 	default:
 		return r.emitReply(ctx, addr, "Unknown command.")
 	}
@@ -84,6 +93,9 @@ func (r *Runner) helpText() string {
 	if r.scheduledOperations != nil {
 		b.WriteString("\n  /schedules     Inspect authoritative scheduled-turn definitions.")
 		b.WriteString("\n  /runs          Inspect runs; use /runs --help for filters and cursors.")
+	}
+	if r.refinementAudit != nil {
+		b.WriteString("\n  /refinements   Browse the bounded authoritative refinement audit.")
 	}
 	for _, c := range r.commands.List() {
 		b.WriteString("\n  /")

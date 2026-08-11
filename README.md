@@ -458,6 +458,26 @@ MemoryLayer adapter uses the typed `/v1/refinement-records` API through the Go
 SDK. Proposal, decision, application, correction, and rollback are separate
 linked records; rollback never rewrites history.
 
+Both authorities expose the same bounded, newest-first query contract. Filters
+for phase, outcome, scope, resource kind, exact refinement lineage, and bounded
+text search are ANDed across fields and use authority-owned opaque cursors. The
+model can call `query_refinement_records`; operators can inspect the same source
+without a model turn:
+
+```text
+/refinements --attention --limit 20
+/refinements --refinement refine-123
+/refinements --resource skill --search evidence
+```
+
+`--attention` selects immutable `failed` and `partially_applied` application
+records and points the operator at the exact record and current resource heads
+before any retry or rollback. Use `/refinements --help` for all filters. The OSS
+executable defaults to its local audit so standalone TUI/CLI/web/ACP operation
+remains dependency-free. The E2E stack explicitly selects MemoryLayer, making
+`sv::memorylayer` the authoritative multi-process audit without dual writes or
+fallback after selection.
+
 The store intentionally does not execute edits or represent a task's live
 lifecycle. Hosts keep approval, proposal application, recovery, and operational
 CAS with their execution authority (Aether in distributed deployments).
