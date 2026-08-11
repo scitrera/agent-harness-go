@@ -28,8 +28,9 @@ type ScheduledRunTaskQueries interface {
 	QueryTasks(ctx context.Context, filter *pb.TaskFilter, timeout time.Duration) (*sdk.TaskQueryResponse, error)
 }
 
-// ScheduledRunJournal is the MemoryLayer-backed execution lookup required by
-// ScheduledRunReader. Missing records are represented by turnjournal.ErrNotFound.
+// ScheduledRunJournal is the durable execution lookup required by
+// ScheduledRunReader. In the OSS Aether worker this is Aether KV-backed;
+// missing records are represented by turnjournal.ErrNotFound.
 type ScheduledRunJournal interface {
 	Get(ctx context.Context, workspaceID, taskID string) (turnjournal.Record, error)
 }
@@ -68,7 +69,7 @@ type ScheduledRunOccurrence struct {
 
 // ScheduledRunExecution is the exact durable turn-journal checkpoint. Phase is
 // intentionally not collapsed: completing/failing/interrupting identify the
-// MemoryLayer-to-Aether terminal outbox boundary.
+// durable-journal-to-Aether terminal outbox boundary.
 type ScheduledRunExecution struct {
 	Revision      uint64            `json:"revision"`
 	OwnerIdentity string            `json:"owner_identity"`
@@ -79,9 +80,9 @@ type ScheduledRunExecution struct {
 }
 
 // ScheduledRun is a read-only join. TaskStatus/Error/timestamps come from
-// Aether; Execution comes from the MemoryLayer-backed journal; Thread is
-// MemoryLayer thread metadata. A nil Execution or Thread is expected before the
-// worker creates either record and is not filled from another source.
+// Aether; Execution comes from the durable journal; Thread is MemoryLayer
+// thread metadata. A nil Execution or Thread is expected before the worker
+// creates either record and is not filled from another source.
 type ScheduledRun struct {
 	TaskID            string                 `json:"task_id"`
 	TaskStatus        string                 `json:"task_status"`
@@ -240,7 +241,7 @@ func (r *ScheduledRunReader) project(
 	required := []string{
 		"scitrera.schedule_id", "scitrera.schedule_schema", "scitrera.schedule_digest",
 		"scitrera.schedule_miss_policy", "scitrera.logical_workspace", "scitrera.thread_id",
-		"scitrera.view_id", "scitrera.view_revision", "scitrera.execution_tool_host",
+		"scitrera.view_id", "scitrera.execution_tool_host",
 		"aether.schedule.id", "aether.schedule.scheduled_for", "aether.schedule.dispatched_at",
 		"aether.schedule.miss_policy", "aether.schedule.disposition", "aether.schedule.backlog_count",
 		"aether.schedule.backlog_truncated", "aether.schedule.backlog_index",
@@ -249,6 +250,11 @@ func (r *ScheduledRunReader) project(
 		if strings.TrimSpace(metadata[key]) == "" {
 			return ScheduledRun{}, fmt.Errorf("task projection is missing metadata %q", key)
 		}
+	}
+	// Revision is optional for mutable/non-versioned views, but the key remains
+	// part of the exact schedule identity metadata and must not disappear.
+	if _, ok := metadata["scitrera.view_revision"]; !ok {
+		return ScheduledRun{}, errors.New("task projection is missing metadata \"scitrera.view_revision\"")
 	}
 	if metadata["scitrera.schedule_schema"] != ScheduledTurnEnvelopeSchema {
 		return ScheduledRun{}, fmt.Errorf("task projection has unsupported schedule schema %q", metadata["scitrera.schedule_schema"])

@@ -25,7 +25,7 @@ import (
 	"github.com/scitrera/agent-harness-go/pkg/turn"
 )
 
-func buildRunner(cfg appConfig, st stores, pub channel.Publisher, approvals approval.Awaiter, subagentTasks subagent.TaskBackend, notifier channel.Enqueuer, continuationBackend goal.ContinuationBackend, authorityHandoff *authhandoff.Store, decorator func(context.Context, protocol.MessageAddress) context.Context) (*turn.Runner, *localtools.Workspace, error) {
+func buildRunner(cfg appConfig, st stores, pub channel.Publisher, approvals approval.Awaiter, subagentTasks subagent.TaskBackend, notifier channel.Enqueuer, continuationBackend goal.ContinuationBackend, authorityHandoff *authhandoff.Store, decorator func(context.Context, protocol.MessageAddress) context.Context, scheduledOperations turn.ScheduledOperationsCommandProvider) (*turn.Runner, *localtools.Workspace, error) {
 	if st.subagents != nil {
 		var err error
 		if taskRecovery, ok := st.subagents.(subagent.TaskRecoveryRegistry); ok && subagentTasks != nil {
@@ -206,6 +206,7 @@ func buildRunner(cfg appConfig, st stores, pub channel.Publisher, approvals appr
 		StreamFlushInterval: cfg.streamFlush,
 		TurnRecorder:        recorder,
 		Commands:            commands.New(cmdSpecs),
+		ScheduledOperations: scheduledOperations,
 		Now:                 time.Now,
 		Approvals:           approvals,
 		ToolProviders:       toolProviders,

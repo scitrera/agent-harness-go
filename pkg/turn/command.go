@@ -27,7 +27,7 @@ func (r *Runner) resolveCommand(ctx context.Context, addr protocol.MessageAddres
 	}
 	// Reserved built-ins win over workspace files and never reach the model.
 	if commands.IsReserved(name) {
-		reply, err = r.runBuiltin(ctx, addr, name, args)
+		reply, err = r.runBuiltin(ctx, addr, user, name, args)
 		return user, reply, true, "", nil, err
 	}
 	if cmd, found := r.commands.Lookup(name); found {
@@ -41,7 +41,7 @@ func (r *Runner) resolveCommand(ctx context.Context, addr protocol.MessageAddres
 
 // runBuiltin handles a reserved built-in command, returning the synthesized
 // assistant reply (also published via the streamer for Aether egress).
-func (r *Runner) runBuiltin(ctx context.Context, addr protocol.MessageAddress, name, args string) (protocol.ChatMessage, error) {
+func (r *Runner) runBuiltin(ctx context.Context, addr protocol.MessageAddress, user protocol.ChatMessage, name, args string) (protocol.ChatMessage, error) {
 	switch commands.CanonicalKey(name) {
 	case "help", "commands":
 		return r.emitReply(ctx, addr, r.helpText())
@@ -58,6 +58,15 @@ func (r *Runner) runBuiltin(ctx context.Context, addr protocol.MessageAddress, n
 		return r.emitReply(ctx, addr, "Thread history cleared.")
 	case "model", "models":
 		return r.runModelCommand(ctx, addr, args)
+	case "schedules", "runs":
+		if r.scheduledOperations == nil {
+			return r.emitReply(ctx, addr, "Scheduled operations are unavailable: this runtime is not connected to Aether WorkflowEngine.")
+		}
+		text, err := r.scheduledOperations.RunScheduledOperationsCommand(ctx, addr, user, commands.CanonicalKey(name), args)
+		if err != nil {
+			return protocol.ChatMessage{}, fmt.Errorf("/%s: %w", commands.CanonicalKey(name), err)
+		}
+		return r.emitReply(ctx, addr, text)
 	default:
 		return r.emitReply(ctx, addr, "Unknown command.")
 	}
@@ -72,6 +81,10 @@ func (r *Runner) helpText() string {
 	b.WriteString("  /clear         Clear this thread's history.\n")
 	b.WriteString("  /model         List models, or /model MODEL_NAME to switch.")
 	b.WriteString("\n  /models        List models (alias for /model).")
+	if r.scheduledOperations != nil {
+		b.WriteString("\n  /schedules     Inspect authoritative scheduled-turn definitions.")
+		b.WriteString("\n  /runs          Inspect runs; use /runs --help for filters and cursors.")
+	}
 	for _, c := range r.commands.List() {
 		b.WriteString("\n  /")
 		b.WriteString(c.Name)

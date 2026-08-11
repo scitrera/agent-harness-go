@@ -11,6 +11,8 @@ var localSlashCommandSuggestions = []selectionItem{
 	{Value: "/commands", Label: "/commands", Description: "List commands"},
 	{Value: "/model", Label: "/model", Description: "List or switch models"},
 	{Value: "/models", Label: "/models", Description: "List models"},
+	{Value: "/schedules", Label: "/schedules", Description: "Inspect scheduled turns"},
+	{Value: "/runs", Label: "/runs", Description: "Inspect scheduled runs"},
 	{Value: "/thread", Label: "/thread", Description: "Manage threads"},
 	{Value: "/threads", Label: "/threads", Description: "Select a thread"},
 	{Value: "/status", Label: "/status", Description: "Show status"},
@@ -47,6 +49,12 @@ var slashSubcommands = map[string][]selectionItem{
 	},
 	"models": {
 		{Value: "list", Label: "list", Description: "List available models"},
+	},
+	"runs": {
+		{Value: "--help", Label: "--help", Description: "Show filters and cursor usage"},
+		{Value: "--status", Label: "--status", Description: "Filter task status"},
+		{Value: "--limit", Label: "--limit", Description: "Set page size"},
+		{Value: "--cursor", Label: "--cursor", Description: "Continue with opaque cursor"},
 	},
 	"thread": {
 		{Value: "list", Label: "list", Description: "Select a thread"},

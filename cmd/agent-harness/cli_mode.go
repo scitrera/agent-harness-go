@@ -17,7 +17,7 @@ func runCLI(cfg appConfig) error {
 	if err != nil {
 		return err
 	}
-	runner, _, err := buildRunner(cfg, st, cli.NewPublisher(os.Stdout), nil, nil, nil, nil, nil, nil)
+	runner, _, err := buildRunner(cfg, st, cli.NewPublisher(os.Stdout), nil, nil, nil, nil, nil, nil, nil)
 	if err != nil {
 		return err
 	}

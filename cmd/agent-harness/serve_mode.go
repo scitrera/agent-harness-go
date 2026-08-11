@@ -98,7 +98,11 @@ func runServe(cfg appConfig) error {
 	if err != nil {
 		return err
 	}
-	runner, _, err := buildRunner(cfg, st, sessionTransport.Publisher, broker, subagentTasks, ch, continuationBackend, authorityHandoff, ch.TurnContext)
+	scheduledOperations, err := buildAetherScheduledOperations(ch, st)
+	if err != nil {
+		return err
+	}
+	runner, _, err := buildRunner(cfg, st, sessionTransport.Publisher, broker, subagentTasks, ch, continuationBackend, authorityHandoff, ch.TurnContext, scheduledOperations)
 	if err != nil {
 		return err
 	}

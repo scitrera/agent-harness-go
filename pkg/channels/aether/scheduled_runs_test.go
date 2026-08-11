@@ -133,6 +133,32 @@ func TestScheduledRunReaderKeepsExpectedMissingRowsVisible(t *testing.T) {
 	}
 }
 
+func TestScheduledRunReaderAcceptsMutableViewWithoutRevision(t *testing.T) {
+	task := scheduledRunTask(t, "task-mutable-view", pb.TaskStatus_TASK_STATUS_QUEUED)
+	task.Metadata["scitrera.view_revision"] = ""
+	operations := &fakeTaskOperations{listResponses: []*sdk.TaskQueryResponse{{Success: true, Tasks: []*sdk.TaskInfo{task}}}}
+	reader, err := NewScheduledRunReader(
+		operations, &fakeScheduledRunJournal{records: map[string]turnjournal.Record{}},
+		&fakeScheduledRunThreads{sessions: map[string]threadindex.Session{}}, "routing", time.Second,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := reader.Query(context.Background(), ScheduledRunQuery{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Runs) != 1 || page.Runs[0].ViewRevision != "" {
+		t.Fatalf("mutable-view projection = %+v", page.Runs)
+	}
+	delete(task.Metadata, "scitrera.view_revision")
+	operations.listCalls = nil
+	operations.listResponses = []*sdk.TaskQueryResponse{{Success: true, Tasks: []*sdk.TaskInfo{task}}}
+	if _, err := reader.Query(context.Background(), ScheduledRunQuery{}); err == nil || !strings.Contains(err.Error(), "scitrera.view_revision") {
+		t.Fatalf("missing revision key error = %v", err)
+	}
+}
+
 func TestScheduledRunReaderProjectsExactOccurrenceDispositions(t *testing.T) {
 	tests := []struct {
 		name        string

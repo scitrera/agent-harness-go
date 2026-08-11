@@ -164,12 +164,13 @@ type Runner struct {
 	// backend ThreadRegistrar is wired (or it fails). Defaults to a random hex id.
 	newThreadID func() string
 
-	commands          *commands.Registry
-	approvers         []hooks.ToolApprover
-	observers         []hooks.ToolObserver
-	turnObservers     []hooks.TurnObserver
-	authorityFn       AuthorityFunc
-	dedupTrailingUser bool
+	commands            *commands.Registry
+	scheduledOperations ScheduledOperationsCommandProvider
+	approvers           []hooks.ToolApprover
+	observers           []hooks.ToolObserver
+	turnObservers       []hooks.TurnObserver
+	authorityFn         AuthorityFunc
+	dedupTrailingUser   bool
 
 	toolProviders   []ToolProvider
 	staticToolNames map[string]struct{}
@@ -232,6 +233,22 @@ type Runner struct {
 type ApprovalGranter interface {
 	GrantSession(workspaceID, tool string)
 	GrantAlways(ctx context.Context, workspaceID, tool string) error
+}
+
+// ScheduledOperationsCommandProvider is the worker-authoritative operations
+// seam behind /schedules and /runs. The complete inbound message is retained so
+// enterprise hosts can authorize inspection from its authenticated/OBO context;
+// OSS uses a single-user adapter. A nil provider keeps Aether-free runtimes
+// independent and makes the commands report that distributed scheduling is not
+// configured.
+type ScheduledOperationsCommandProvider interface {
+	RunScheduledOperationsCommand(
+		ctx context.Context,
+		addr protocol.MessageAddress,
+		user protocol.ChatMessage,
+		name string,
+		args string,
+	) (string, error)
 }
 
 // AuthorityFunc derives a turn's OBO authority from the inbound address+message.
@@ -370,6 +387,10 @@ type Config struct {
 	// (/help, /commands, /clear) are always available; a nil registry just means
 	// no workspace commands.
 	Commands *commands.Registry
+
+	// ScheduledOperations serves the reserved /schedules and /runs built-ins.
+	// It is optional and normally configured only by an Aether worker host.
+	ScheduledOperations ScheduledOperationsCommandProvider
 
 	// Approvers gate tool calls (first denial wins); Observers watch the tool
 	// lifecycle (no veto). Both are in-process today but the interfaces are
@@ -613,6 +634,7 @@ func NewRunner(cfg Config) (*Runner, error) {
 		now:                       cfg.Now,
 		newThreadID:               cfg.NewThreadID,
 		commands:                  cfg.Commands,
+		scheduledOperations:       cfg.ScheduledOperations,
 		approvers:                 cfg.Approvers,
 		observers:                 cfg.Observers,
 		turnObservers:             cfg.TurnObservers,

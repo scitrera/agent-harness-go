@@ -33,7 +33,7 @@ func (m model) handleSlash(input string) (tea.Model, tea.Cmd) {
 	case "/status":
 		m.addSystem(m.statusSummary())
 		return m, nil
-	case "/model", "/models":
+	case "/model", "/models", "/schedules", "/runs":
 		return m.enqueueMetaCommand(input)
 	case "/pwd", "/cd":
 		updated, cmd, err := m.handleWorkingDirectory(fields)

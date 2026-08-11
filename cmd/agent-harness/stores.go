@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -174,6 +175,14 @@ func (s *boundThreadStore) RenameWorkspaceThread(workspaceID, id, titleText stri
 
 func (s *boundThreadStore) DeleteWorkspaceThread(workspaceID, id string) error {
 	return s.base.DeleteWorkspaceThread(s.backendWorkspace(workspaceID), id)
+}
+
+func (s *boundThreadStore) LookupWorkspaceThread(ctx context.Context, workspaceID, id string) (threadindex.Session, bool, error) {
+	lookup, ok := s.base.(threadindex.WorkspaceLookup)
+	if !ok {
+		return threadindex.Session{}, false, errors.New("thread backend does not support authoritative lookup")
+	}
+	return lookup.LookupWorkspaceThread(ctx, s.backendWorkspace(workspaceID), id)
 }
 
 // boundHistoryStore lets legacy UI surfaces address the process-selected

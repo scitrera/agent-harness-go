@@ -38,8 +38,8 @@ func TestCanonicalKeyAndReserved(t *testing.T) {
 	if CanonicalKey("git:commit") != "git:commit" {
 		t.Fatalf("canonical key must preserve namespace: %q", CanonicalKey("git:commit"))
 	}
-	if !IsReserved("HELP") || !IsReserved("clear") || !IsReserved("models") {
-		t.Fatal("expected help/clear/models reserved")
+	if !IsReserved("HELP") || !IsReserved("clear") || !IsReserved("models") || !IsReserved("schedules") || !IsReserved("runs") {
+		t.Fatal("expected help/clear/models/schedules/runs reserved")
 	}
 	if IsReserved("commit") {
 		t.Fatal("commit must not be reserved")

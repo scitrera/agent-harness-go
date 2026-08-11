@@ -109,6 +109,7 @@ func TestBoundScopedBackendMapsLogicalWorkspaceToOverride(t *testing.T) {
 
 type recordingWorkspaceThreads struct {
 	workspaceID string
+	lookupID    string
 }
 
 func (s *recordingWorkspaceThreads) List() []threadindex.Session { return nil }
@@ -142,6 +143,11 @@ func (s *recordingWorkspaceThreads) DeleteWorkspaceThread(workspaceID, _ string)
 	s.workspaceID = workspaceID
 	return nil
 }
+func (s *recordingWorkspaceThreads) LookupWorkspaceThread(_ context.Context, workspaceID, id string) (threadindex.Session, bool, error) {
+	s.workspaceID = workspaceID
+	s.lookupID = id
+	return threadindex.Session{ID: id}, true, nil
+}
 
 func TestBoundThreadsMapsOnlySelectedLogicalWorkspace(t *testing.T) {
 	base := &recordingWorkspaceThreads{}
@@ -157,6 +163,16 @@ func TestBoundThreadsMapsOnlySelectedLogicalWorkspace(t *testing.T) {
 	}
 	if base.workspaceID != "project-b" {
 		t.Fatalf("dynamic backend workspace = %q", base.workspaceID)
+	}
+	lookup, ok := bound.(threadindex.WorkspaceLookup)
+	if !ok {
+		t.Fatal("bound threads lost authoritative lookup capability")
+	}
+	if session, found, err := lookup.LookupWorkspaceThread(context.Background(), "project-a", "scheduled-thread"); err != nil || !found || session.ID != "scheduled-thread" {
+		t.Fatalf("lookup session=%+v found=%v err=%v", session, found, err)
+	}
+	if base.workspaceID != "memorylayer-a" || base.lookupID != "scheduled-thread" {
+		t.Fatalf("lookup backend workspace=%q thread=%q", base.workspaceID, base.lookupID)
 	}
 }
 

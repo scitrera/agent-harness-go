@@ -111,7 +111,11 @@ func runAetherStandalone(cfg appConfig) error {
 	if err != nil {
 		return err
 	}
-	runner, _, err := buildRunner(cfg, st, sessionTransport.Publisher, broker, subagentTasks, worker, continuationBackend, authorityHandoff, worker.TurnContext)
+	scheduledOperations, err := buildAetherScheduledOperations(worker, st)
+	if err != nil {
+		return err
+	}
+	runner, _, err := buildRunner(cfg, st, sessionTransport.Publisher, broker, subagentTasks, worker, continuationBackend, authorityHandoff, worker.TurnContext, scheduledOperations)
 	if err != nil {
 		return err
 	}

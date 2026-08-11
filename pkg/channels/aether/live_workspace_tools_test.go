@@ -20,6 +20,7 @@ import (
 	"github.com/scitrera/agent-harness-go/pkg/memorylayer"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 	"github.com/scitrera/agent-harness-go/pkg/tools"
+	"github.com/scitrera/agent-harness-go/pkg/turnjournal"
 	workspacepkg "github.com/scitrera/agent-harness-go/pkg/workspace"
 )
 
@@ -341,6 +342,23 @@ func TestLiveAetherScheduledWorkerView(t *testing.T) {
 		scheduleState.LastFiredAt == nil || !scheduleState.LastFiredAt.Equal(*scheduleState.LastOccurrence.DispatchedAt) {
 		t.Fatalf("authoritative schedule state = %+v", scheduleState)
 	}
+	journal, err := turnjournal.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	operations, err := aetherchan.NewScheduledOperationsCommands(worker, journal, mlStore, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	schedulesText, err := operations.RunScheduledOperationsCommand(ctx, inbound.Addr, inbound.Message, "schedules", "")
+	if err != nil || !strings.Contains(schedulesText, registration.ID) || !strings.Contains(schedulesText, "latest=ordinary") {
+		t.Fatalf("live schedules command = %q err=%v", schedulesText, err)
+	}
+	runsText, err := operations.RunScheduledOperationsCommand(ctx, inbound.Addr, inbound.Message, "runs", "--status queued --limit 1")
+	if err != nil || !strings.Contains(runsText, inbound.Addr.TaskID) ||
+		!strings.Contains(runsText, "task=queued") || !strings.Contains(runsText, "disposition=ordinary") {
+		t.Fatalf("live runs command = %q err=%v", runsText, err)
+	}
 	gotBinding, err := spec.GetExecutionBinding(inbound.Message)
 	if err != nil || gotBinding == nil || gotBinding.ViewID != binding.ViewID ||
 		gotBinding.ToolHostID != worker.Topic() || gotBinding.ExecutionSite != spec.ExecutionSiteWorker {
@@ -372,5 +390,67 @@ func TestLiveAetherScheduledWorkerView(t *testing.T) {
 	}
 	if err := worker.FailTask(context.Background(), inbound.Addr.TaskID, "E2E inspection complete"); err != nil {
 		t.Fatal(err)
+	}
+
+	// Exercise the same commands through the separately deployed OSS worker.
+	// Keeping this in the test that creates the run makes the live assertion
+	// independent of Go test ordering and any state left by previous runs.
+	specifier := os.Getenv("AETHER_E2E_SPECIFIER")
+	if specifier == "" {
+		specifier = "e2e"
+	}
+	client, err := aetherchan.NewClient(aetherchan.ClientConfig{
+		ServerAddr: serverAddr, Workspace: aetherWorkspace, SessionWorkspace: "default",
+		AgentSpecifier: specifier, UserID: "operations-e2e", WindowID: "operations-" + suffix,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close() }()
+
+	schedulesText = runLiveMetaCommand(t, ctx, client, "default", "schedules-"+suffix, "/schedules")
+	if !strings.Contains(schedulesText, "Scheduled turns") || strings.Contains(schedulesText, "Thinking") {
+		t.Fatalf("deployed /schedules reply = %q", schedulesText)
+	}
+	runsText = runLiveMetaCommand(t, ctx, client, "default", "runs-"+suffix, "/runs --status failed --limit 1")
+	if !strings.Contains(runsText, "Scheduled runs") || !strings.Contains(runsText, "task=failed") ||
+		!strings.Contains(runsText, "disposition=ordinary") || strings.Contains(runsText, "Thinking") {
+		t.Fatalf("deployed /runs reply = %q", runsText)
+	}
+}
+
+func runLiveMetaCommand(t *testing.T, ctx context.Context, client *aetherchan.Client, workspaceID, taskID, text string) string {
+	t.Helper()
+	part, err := protocol.NewTextPart(text)
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := protocol.MessageAddress{WorkspaceID: workspaceID, ThreadID: "operations-e2e", TaskID: taskID}
+	message := protocol.ChatMessage{
+		ID: "user-" + taskID, Role: protocol.RoleUser, Addr: addr,
+		Content: []protocol.ContentPart{part},
+	}
+	if err := client.Enqueue(ctx, channel.Inbound{Addr: addr, Message: message}); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			t.Fatalf("wait for %s: %v", text, ctx.Err())
+		case event := <-client.Events():
+			if event.Type != channel.EventMessageFinal || event.Addr.TaskID != taskID || event.Message == nil {
+				continue
+			}
+			var b strings.Builder
+			for _, content := range event.Message.Content {
+				if textPart, ok := content.AsText(); ok {
+					b.WriteString(textPart.Text)
+				}
+			}
+			return b.String()
+		}
 	}
 }

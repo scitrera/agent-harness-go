@@ -2,6 +2,7 @@ package turn
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -10,6 +11,25 @@ import (
 	"github.com/scitrera/agent-harness-go/pkg/harness"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 )
+
+type fakeScheduledOperationsCommands struct {
+	addr  protocol.MessageAddress
+	user  protocol.ChatMessage
+	name  string
+	args  string
+	text  string
+	err   error
+	calls int
+}
+
+func (f *fakeScheduledOperationsCommands) RunScheduledOperationsCommand(_ context.Context, addr protocol.MessageAddress, user protocol.ChatMessage, name, args string) (string, error) {
+	f.calls++
+	f.addr = addr
+	f.user = user
+	f.name = name
+	f.args = args
+	return f.text, f.err
+}
 
 func newCommandRunner(t *testing.T, provider *fakeProvider, store *fakeStore, reg *commands.Registry) *Runner {
 	t.Helper()
@@ -58,6 +78,48 @@ func Test_Runner_Run_builtin_models_alias_bypasses_model(t *testing.T) {
 	}
 	if text := assistantPlainText(reply); !strings.Contains(text, "Active model: base-model") {
 		t.Fatalf("models alias reply = %q", text)
+	}
+}
+
+func Test_Runner_Run_builtin_scheduledOperationsRemainWorkerAuthoritative(t *testing.T) {
+	provider := &fakeProvider{}
+	operations := &fakeScheduledOperationsCommands{text: "authoritative schedule state"}
+	r := newCommandRunner(t, provider, &fakeStore{}, commands.New(nil))
+	r.scheduledOperations = operations
+	addr := protocol.MessageAddress{WorkspaceID: "project-a", ThreadID: "t1", TaskID: "task-1"}
+	user := userMessage(t, "/runs --status failed --limit 10")
+	user.ID = "operations-user"
+
+	reply, err := r.Run(context.Background(), addr, user)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if provider.request.Model != "" || operations.calls != 1 || operations.name != "runs" ||
+		operations.args != "--status failed --limit 10" || operations.addr.WorkspaceID != addr.WorkspaceID ||
+		operations.addr.ThreadID != addr.ThreadID || operations.addr.TaskID != addr.TaskID || operations.user.ID != user.ID {
+		t.Fatalf("provider=%q operations=%+v", provider.request.Model, operations)
+	}
+	if got := assistantPlainText(reply); got != operations.text {
+		t.Fatalf("operations reply = %q", got)
+	}
+	if !strings.Contains(r.helpText(), "/schedules") || !strings.Contains(r.helpText(), "/runs") {
+		t.Fatalf("configured operations missing from help: %q", r.helpText())
+	}
+}
+
+func Test_Runner_Run_builtin_scheduledOperationsUnavailableOrFailed(t *testing.T) {
+	r := newCommandRunner(t, &fakeProvider{}, &fakeStore{}, commands.New(nil))
+	reply, err := r.Run(context.Background(), protocol.MessageAddress{ThreadID: "t1"}, userMessage(t, "/schedules"))
+	if err != nil || !strings.Contains(assistantPlainText(reply), "not connected to Aether") {
+		t.Fatalf("standalone reply=%q err=%v", assistantPlainText(reply), err)
+	}
+	if strings.Contains(r.helpText(), "/schedules") {
+		t.Fatalf("standalone help advertised unavailable operations: %q", r.helpText())
+	}
+	r.scheduledOperations = &fakeScheduledOperationsCommands{err: errors.New("authority denied")}
+	if _, err := r.Run(context.Background(), protocol.MessageAddress{ThreadID: "t1"}, userMessage(t, "/runs")); err == nil ||
+		!strings.Contains(err.Error(), "authority denied") {
+		t.Fatalf("operations failure = %v", err)
 	}
 }
 

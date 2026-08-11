@@ -495,6 +495,15 @@ only** — do not bind it beyond loopback. State-changing endpoints enforce a
 same-origin check (a request whose `Origin` doesn't match the host is rejected),
 and shutdown drains any in-flight turn.
 
+An Aether-backed worker also serves model-free `/schedules` and `/runs`
+inspection commands. `/schedules` reads definitions and the latest occurrence
+decision from Aether WorkflowEngine; `/runs` joins Aether task state with the
+Aether KV-backed turn journal and MemoryLayer thread metadata when present. Use
+`/runs --help` for status filters, bounded page sizes, and opaque cursor
+continuation. The TUI only renders the worker response—it does not query or
+cache private scheduler state. Aether-free modes remain supported and report
+that distributed scheduled operations are unavailable.
+
 ## Capabilities
 
 Native tool-calling turn loop with bounded tool iterations, streaming egress,

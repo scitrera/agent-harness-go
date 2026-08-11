@@ -59,6 +59,8 @@ func TestModelCommandsRoundTripWithoutConversationPlaceholder(t *testing.T) {
 	}{
 		{input: "/model", want: "/model"},
 		{input: "/models", want: "/model"},
+		{input: "/schedules", want: "/schedules"},
+		{input: "/runs --status failed --limit 10", want: "/runs --status failed --limit 10"},
 	} {
 		t.Run(tt.input, func(t *testing.T) {
 			ctx := context.Background()
