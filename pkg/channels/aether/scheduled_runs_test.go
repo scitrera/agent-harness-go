@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -85,7 +86,8 @@ func TestScheduledRunReaderJoinsAuthoritiesAndPreservesCursor(t *testing.T) {
 	}
 	if page.Runs[1].Occurrence.DeclarationID != "daily-review" ||
 		page.Runs[1].Occurrence.ScheduleID != scheduledWorkflowID("routing", running.AssignedTo, "daily-review") ||
-		page.Runs[1].Occurrence.MissPolicy != ScheduledMissPolicyFireOnce ||
+		page.Runs[1].Occurrence.MissPolicy != ScheduledMissPolicyFireOnce || page.Runs[1].Occurrence.Disposition != ScheduledDispositionOrdinary ||
+		page.Runs[1].Occurrence.BacklogCount != 1 || page.Runs[1].Occurrence.BacklogIndex != 1 ||
 		page.Runs[1].Occurrence.DispatchDelayMilliseconds != 3000 {
 		t.Fatalf("occurrence = %+v", page.Runs[1].Occurrence)
 	}
@@ -131,6 +133,48 @@ func TestScheduledRunReaderKeepsExpectedMissingRowsVisible(t *testing.T) {
 	}
 }
 
+func TestScheduledRunReaderProjectsExactOccurrenceDispositions(t *testing.T) {
+	tests := []struct {
+		name        string
+		policy      string
+		disposition string
+		count       string
+		truncated   string
+		index       string
+	}{
+		{name: "coalesced", policy: ScheduledMissPolicyFireOnce, disposition: ScheduledDispositionCoalesced, count: "4", truncated: "false", index: "1"},
+		{name: "catch up", policy: ScheduledMissPolicyFireAll, disposition: ScheduledDispositionCatchUp, count: "101", truncated: "true", index: "37"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			task := scheduledRunTask(t, "task-"+test.disposition, pb.TaskStatus_TASK_STATUS_QUEUED)
+			task.Metadata["scitrera.schedule_miss_policy"] = test.policy
+			task.Metadata["aether.schedule.miss_policy"] = test.policy
+			task.Metadata["aether.schedule.disposition"] = test.disposition
+			task.Metadata["aether.schedule.backlog_count"] = test.count
+			task.Metadata["aether.schedule.backlog_truncated"] = test.truncated
+			task.Metadata["aether.schedule.backlog_index"] = test.index
+			operations := &fakeTaskOperations{listResponses: []*sdk.TaskQueryResponse{{Success: true, Tasks: []*sdk.TaskInfo{task}}}}
+			reader, err := NewScheduledRunReader(
+				operations, &fakeScheduledRunJournal{records: map[string]turnjournal.Record{}},
+				&fakeScheduledRunThreads{sessions: map[string]threadindex.Session{}}, "routing", time.Second,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			page, err := reader.Query(context.Background(), ScheduledRunQuery{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := page.Runs[0].Occurrence
+			if got.Disposition != test.disposition || got.BacklogCount != mustAtoi(t, test.count) ||
+				got.BacklogTruncated != (test.truncated == "true") || got.BacklogIndex != mustAtoi(t, test.index) {
+				t.Fatalf("occurrence = %+v", got)
+			}
+		})
+	}
+}
+
 func TestScheduledRunReaderFailsClosedOnCrossSourceIdentityDrift(t *testing.T) {
 	task := scheduledRunTask(t, "task-drift", pb.TaskStatus_TASK_STATUS_RUNNING)
 	tests := []struct {
@@ -144,6 +188,11 @@ func TestScheduledRunReaderFailsClosedOnCrossSourceIdentityDrift(t *testing.T) {
 			name: "metadata", mutate: func(info *sdk.TaskInfo) { info.Metadata["aether.schedule.id"] = "another-schedule" },
 			journal: &fakeScheduledRunJournal{records: map[string]turnjournal.Record{}},
 			threads: &fakeScheduledRunThreads{sessions: map[string]threadindex.Session{}}, want: "workflow schedule id",
+		},
+		{
+			name: "occurrence", mutate: func(info *sdk.TaskInfo) { info.Metadata["aether.schedule.disposition"] = ScheduledDispositionSkipped },
+			journal: &fakeScheduledRunJournal{records: map[string]turnjournal.Record{}},
+			threads: &fakeScheduledRunThreads{sessions: map[string]threadindex.Session{}}, want: "unknown schedule disposition",
 		},
 		{
 			name: "journal session", mutate: func(*sdk.TaskInfo) {},
@@ -181,6 +230,15 @@ func TestScheduledRunReaderFailsClosedOnCrossSourceIdentityDrift(t *testing.T) {
 			}
 		})
 	}
+}
+
+func mustAtoi(t *testing.T, value string) int {
+	t.Helper()
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return parsed
 }
 
 func TestScheduledRunReaderPropagatesAuthorityFailuresAndValidatesQuery(t *testing.T) {
@@ -240,6 +298,10 @@ func scheduledRunTask(t *testing.T, taskID string, status pb.TaskStatus) *sdk.Ta
 	metadata["aether.schedule.scheduled_for"] = "2026-08-10T12:00:00Z"
 	metadata["aether.schedule.dispatched_at"] = "2026-08-10T12:00:03Z"
 	metadata["aether.schedule.miss_policy"] = registration.MissPolicy
+	metadata["aether.schedule.disposition"] = ScheduledDispositionOrdinary
+	metadata["aether.schedule.backlog_count"] = "1"
+	metadata["aether.schedule.backlog_truncated"] = "false"
+	metadata["aether.schedule.backlog_index"] = "1"
 	return &sdk.TaskInfo{
 		TaskID: taskID, TaskType: ScheduledTurnTaskType, Status: status.String(),
 		Workspace: "routing", AssignedTo: registration.Binding.ToolHostID, Metadata: metadata,

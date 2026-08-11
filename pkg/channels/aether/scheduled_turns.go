@@ -25,17 +25,24 @@ import (
 )
 
 const (
-	ScheduledTurnTaskType          = "agent-harness.scheduled-turn.v1"
-	ScheduledTurnEnvelopeSchema    = "agent-harness.scheduled-turn.v1"
-	ScheduledMissPolicySkip        = "skip"
-	ScheduledMissPolicyFireOnce    = "fire_once"
-	ScheduledMissPolicyFireAll     = "fire_all"
-	scheduledTurnMetadataKind      = "scheduled_turn"
-	scheduledTurnMessageMetaKey    = "scitrera.scheduled_turn"
-	scheduledTurnRecoveryPage      = 100
-	scheduledTurnMaxOffsetPages    = 1000
-	scheduledTurnScheduleIDPrefix  = "ah-schedule-v1-"
-	scheduledTurnDeclarationDigest = "sha256:"
+	ScheduledTurnTaskType           = "agent-harness.scheduled-turn.v1"
+	ScheduledTurnEnvelopeSchema     = "agent-harness.scheduled-turn.v1"
+	ScheduledMissPolicySkip         = "skip"
+	ScheduledMissPolicyFireOnce     = "fire_once"
+	ScheduledMissPolicyFireAll      = "fire_all"
+	ScheduledDispositionOrdinary    = "ordinary"
+	ScheduledDispositionSkipped     = "skipped"
+	ScheduledDispositionCoalesced   = "coalesced"
+	ScheduledDispositionCatchUp     = "catch_up"
+	ScheduledSkipReasonMissPolicy   = "miss_policy"
+	ScheduledSkipReasonConcurrency  = "max_concurrent"
+	scheduledTurnMetadataKind       = "scheduled_turn"
+	scheduledTurnMessageMetaKey     = "scitrera.scheduled_turn"
+	scheduledTurnRecoveryPage       = 100
+	scheduledTurnMaxOffsetPages     = 1000
+	scheduledTurnScheduleIDPrefix   = "ah-schedule-v1-"
+	scheduledTurnDeclarationDigest  = "sha256:"
+	scheduledTurnBacklogDetailLimit = 101
 )
 
 // ScheduledTurnRegistration is the validated, host-bound form of one config
@@ -205,15 +212,56 @@ type scheduledWorkflowAction struct {
 }
 
 type scheduledWorkflowDefinition struct {
-	ID            string                  `json:"id"`
-	Name          string                  `json:"name"`
-	Workspace     string                  `json:"workspace"`
-	ScheduleType  string                  `json:"schedule_type"`
-	ScheduleExpr  string                  `json:"schedule_expr"`
-	Action        scheduledWorkflowAction `json:"action"`
-	Enabled       bool                    `json:"enabled"`
-	MissPolicy    string                  `json:"miss_policy"`
-	MaxConcurrent int                     `json:"max_concurrent"`
+	ID             string                           `json:"id"`
+	Name           string                           `json:"name"`
+	Workspace      string                           `json:"workspace"`
+	ScheduleType   string                           `json:"schedule_type"`
+	ScheduleExpr   string                           `json:"schedule_expr"`
+	Action         scheduledWorkflowAction          `json:"action"`
+	Enabled        bool                             `json:"enabled"`
+	MissPolicy     string                           `json:"miss_policy"`
+	MaxConcurrent  int                              `json:"max_concurrent"`
+	NextFireAt     *time.Time                       `json:"next_fire_at,omitempty"`
+	LastFiredAt    *time.Time                       `json:"last_fired_at,omitempty"`
+	LastOccurrence *ScheduledTurnScheduleOccurrence `json:"last_occurrence,omitempty"`
+}
+
+// ScheduledTurnScheduleOccurrence is Aether's bounded authoritative summary
+// of the latest decision for one schedule. DispatchedAt is nil for a no-task
+// skip, which remains observable here even though it cannot appear in task
+// history.
+type ScheduledTurnScheduleOccurrence struct {
+	ScheduledFor     time.Time  `json:"scheduled_for"`
+	DispatchedAt     *time.Time `json:"dispatched_at,omitempty"`
+	Disposition      string     `json:"disposition"`
+	Reason           string     `json:"reason,omitempty"`
+	BacklogCount     int        `json:"backlog_count"`
+	BacklogTruncated bool       `json:"backlog_truncated"`
+	BacklogIndex     int        `json:"backlog_index"`
+}
+
+// ScheduledTurnScheduleState is the operations projection of one Sahara-owned
+// Aether schedule. It is read-only; declarations and reconciliation remain
+// worker-owned and Aether remains authoritative for scheduling.
+type ScheduledTurnScheduleState struct {
+	WorkflowScheduleID string                           `json:"workflow_schedule_id"`
+	DeclarationID      string                           `json:"declaration_id"`
+	DeclarationDigest  string                           `json:"declaration_digest"`
+	Name               string                           `json:"name"`
+	ScheduleType       string                           `json:"schedule_type"`
+	ScheduleExpression string                           `json:"schedule_expression"`
+	RoutingWorkspace   string                           `json:"routing_workspace"`
+	AssignedTo         string                           `json:"assigned_to"`
+	LogicalWorkspace   string                           `json:"logical_workspace"`
+	ThreadID           string                           `json:"thread_id"`
+	ViewID             string                           `json:"view_id"`
+	ViewRevision       string                           `json:"view_revision,omitempty"`
+	MissPolicy         string                           `json:"miss_policy"`
+	MaxConcurrent      int                              `json:"max_concurrent"`
+	Enabled            bool                             `json:"enabled"`
+	NextFireAt         *time.Time                       `json:"next_fire_at,omitempty"`
+	LastFiredAt        *time.Time                       `json:"last_fired_at,omitempty"`
+	LastOccurrence     *ScheduledTurnScheduleOccurrence `json:"last_occurrence,omitempty"`
 }
 
 func scheduledWorkflowID(routingWorkspace, assignedTo, declarationID string) string {
@@ -617,21 +665,9 @@ func (c *Channel) UpdateScheduledTurns(ctx context.Context, registrations []Sche
 }
 
 func (c *Channel) reconcileScheduledTurnDefinitions(ctx context.Context, registrations []ScheduledTurnRegistration) error {
-	if c.scheduleOps == nil {
-		return errors.New("aether: scheduled workflow operations are not configured")
-	}
-	response, err := c.scheduleOps.ListSchedules(ctx, c.workspace)
+	current, err := c.listScheduledWorkflowDefinitions(ctx)
 	if err != nil {
-		return fmt.Errorf("aether: list schedules for reconciliation: %w", err)
-	}
-	if response == nil || !response.Success {
-		return fmt.Errorf("aether: list schedules for reconciliation was rejected: %s", workflowResponseError(response))
-	}
-	var current []scheduledWorkflowDefinition
-	if len(bytes.TrimSpace(response.Data)) > 0 {
-		if err := json.Unmarshal(response.Data, &current); err != nil {
-			return fmt.Errorf("aether: decode schedules for reconciliation: %w", err)
-		}
+		return fmt.Errorf("aether: load schedules for reconciliation: %w", err)
 	}
 	stale := map[string]struct{}{}
 	for _, definition := range current {
@@ -675,6 +711,180 @@ func (c *Channel) reconcileScheduledTurnDefinitions(ctx context.Context, registr
 		}
 	}
 	return nil
+}
+
+func (c *Channel) listScheduledWorkflowDefinitions(ctx context.Context) ([]scheduledWorkflowDefinition, error) {
+	if c == nil || c.scheduleOps == nil {
+		return nil, errors.New("scheduled workflow operations are not configured")
+	}
+	response, err := c.scheduleOps.ListSchedules(ctx, c.workspace)
+	if err != nil {
+		return nil, fmt.Errorf("list schedules: %w", err)
+	}
+	if response == nil || !response.Success {
+		return nil, fmt.Errorf("list schedules was rejected: %s", workflowResponseError(response))
+	}
+	var definitions []scheduledWorkflowDefinition
+	if len(bytes.TrimSpace(response.Data)) == 0 {
+		return definitions, nil
+	}
+	if err := json.Unmarshal(response.Data, &definitions); err != nil {
+		return nil, fmt.Errorf("decode schedules: %w", err)
+	}
+	return definitions, nil
+}
+
+// ListScheduledTurnScheduleStates returns Aether's current state for the
+// scheduled-turn declarations owned by this concrete worker. Other workflow
+// schedules and other workers' declarations are deliberately omitted.
+func (c *Channel) ListScheduledTurnScheduleStates(ctx context.Context) ([]ScheduledTurnScheduleState, error) {
+	definitions, err := c.listScheduledWorkflowDefinitions(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("aether: list scheduled-turn state: %w", err)
+	}
+	states := make([]ScheduledTurnScheduleState, 0, len(definitions))
+	for _, definition := range definitions {
+		if !ownedScheduledWorkflow(definition, c.workspace, c.Topic()) {
+			continue
+		}
+		state, err := projectScheduledTurnScheduleState(definition)
+		if err != nil {
+			return nil, fmt.Errorf("aether: project schedule %q: %w", definition.ID, err)
+		}
+		states = append(states, state)
+	}
+	sort.Slice(states, func(i, j int) bool {
+		return states[i].DeclarationID < states[j].DeclarationID
+	})
+	return states, nil
+}
+
+func projectScheduledTurnScheduleState(definition scheduledWorkflowDefinition) (ScheduledTurnScheduleState, error) {
+	envelope := definition.Action.Payload
+	if err := envelope.validate(); err != nil {
+		return ScheduledTurnScheduleState{}, fmt.Errorf("invalid action envelope: %w", err)
+	}
+	if err := validateScheduledTurnMetadata(definition.Action.Metadata, envelope); err != nil {
+		return ScheduledTurnScheduleState{}, err
+	}
+	registration := ScheduledTurnRegistration{
+		ID: envelope.ScheduleID, Name: definition.Name,
+		ScheduleType: definition.ScheduleType, ScheduleExpression: definition.ScheduleExpr,
+		ThreadID: envelope.ThreadID, Prompt: envelope.Prompt, MissPolicy: envelope.MissPolicy,
+		TargetOfflinePolicy: definition.Action.TargetOfflinePolicy, Enabled: true,
+		Binding: envelope.Binding, ViewPolicy: envelope.ViewPolicy,
+	}
+	if err := registration.Validate(); err != nil {
+		return ScheduledTurnScheduleState{}, fmt.Errorf("invalid declaration: %w", err)
+	}
+	digest, err := scheduledTurnDigest(registration)
+	if err != nil {
+		return ScheduledTurnScheduleState{}, fmt.Errorf("digest declaration: %w", err)
+	}
+	if digest != envelope.DeclarationDigest {
+		return ScheduledTurnScheduleState{}, errors.New("declaration digest does not match schedule content")
+	}
+	if definition.MissPolicy != envelope.MissPolicy {
+		return ScheduledTurnScheduleState{}, errors.New("schedule and declaration miss policies differ")
+	}
+	if definition.Action.Workspace != definition.Workspace || definition.Action.PayloadEncoding != "json" {
+		return ScheduledTurnScheduleState{}, errors.New("scheduled action routing or encoding is invalid")
+	}
+	if definition.Action.TargetAgentID != envelope.Binding.ToolHostID {
+		return ScheduledTurnScheduleState{}, errors.New("scheduled action target does not match its execution binding")
+	}
+
+	occurrence, err := validateScheduledTurnScheduleOccurrence(
+		definition.LastOccurrence, definition.LastFiredAt, definition.MissPolicy,
+	)
+	if err != nil {
+		return ScheduledTurnScheduleState{}, err
+	}
+	return ScheduledTurnScheduleState{
+		WorkflowScheduleID: definition.ID, DeclarationID: envelope.ScheduleID,
+		DeclarationDigest: envelope.DeclarationDigest, Name: definition.Name,
+		ScheduleType: definition.ScheduleType, ScheduleExpression: definition.ScheduleExpr,
+		RoutingWorkspace: definition.Workspace, AssignedTo: definition.Action.TargetAgentID,
+		LogicalWorkspace: envelope.Binding.WorkspaceID, ThreadID: envelope.ThreadID,
+		ViewID: envelope.Binding.ViewID, ViewRevision: envelope.Binding.Revision,
+		MissPolicy: definition.MissPolicy, MaxConcurrent: definition.MaxConcurrent, Enabled: definition.Enabled,
+		NextFireAt: cloneUTC(definition.NextFireAt), LastFiredAt: cloneUTC(definition.LastFiredAt),
+		LastOccurrence: occurrence,
+	}, nil
+}
+
+func validateScheduledTurnScheduleOccurrence(
+	occurrence *ScheduledTurnScheduleOccurrence,
+	lastFiredAt *time.Time,
+	missPolicy string,
+) (*ScheduledTurnScheduleOccurrence, error) {
+	if occurrence == nil {
+		return nil, nil
+	}
+	if occurrence.ScheduledFor.IsZero() || occurrence.BacklogCount < 1 || occurrence.BacklogCount > scheduledTurnBacklogDetailLimit {
+		return nil, errors.New("schedule has invalid occurrence time or backlog count")
+	}
+	if occurrence.BacklogTruncated && occurrence.BacklogCount != scheduledTurnBacklogDetailLimit {
+		return nil, errors.New("schedule has invalid occurrence backlog truncation")
+	}
+	fired := occurrence.Disposition != ScheduledDispositionSkipped
+	if fired {
+		if occurrence.DispatchedAt == nil || occurrence.DispatchedAt.Before(occurrence.ScheduledFor) {
+			return nil, errors.New("schedule has invalid occurrence dispatch time")
+		}
+		if lastFiredAt == nil || !lastFiredAt.Equal(*occurrence.DispatchedAt) {
+			return nil, errors.New("schedule occurrence dispatch does not match last_fired_at")
+		}
+		if occurrence.Reason != "" {
+			return nil, errors.New("dispatched schedule occurrence has a skip reason")
+		}
+	} else if occurrence.DispatchedAt != nil {
+		return nil, errors.New("skipped schedule occurrence has a dispatch time")
+	}
+
+	switch occurrence.Disposition {
+	case ScheduledDispositionOrdinary:
+		if occurrence.BacklogCount != 1 || occurrence.BacklogTruncated || occurrence.BacklogIndex != 1 {
+			return nil, errors.New("schedule has inconsistent ordinary occurrence state")
+		}
+	case ScheduledDispositionSkipped:
+		if occurrence.BacklogIndex != 0 {
+			return nil, errors.New("schedule has inconsistent skipped occurrence index")
+		}
+		switch occurrence.Reason {
+		case ScheduledSkipReasonMissPolicy:
+			if missPolicy != ScheduledMissPolicySkip || occurrence.BacklogCount < 2 {
+				return nil, errors.New("schedule has inconsistent missed-policy skip state")
+			}
+		case ScheduledSkipReasonConcurrency:
+		default:
+			return nil, errors.New("schedule has an unknown skip reason")
+		}
+	case ScheduledDispositionCoalesced:
+		if missPolicy != ScheduledMissPolicyFireOnce || occurrence.BacklogCount < 2 || occurrence.BacklogIndex != 1 {
+			return nil, errors.New("schedule has inconsistent coalesced occurrence state")
+		}
+	case ScheduledDispositionCatchUp:
+		if missPolicy != ScheduledMissPolicyFireAll || occurrence.BacklogCount < 2 ||
+			occurrence.BacklogIndex < 1 || occurrence.BacklogIndex > occurrence.BacklogCount {
+			return nil, errors.New("schedule has inconsistent catch-up occurrence state")
+		}
+	default:
+		return nil, fmt.Errorf("schedule has unknown occurrence disposition %q", occurrence.Disposition)
+	}
+
+	copy := *occurrence
+	copy.ScheduledFor = occurrence.ScheduledFor.UTC()
+	copy.DispatchedAt = cloneUTC(occurrence.DispatchedAt)
+	return &copy, nil
+}
+
+func cloneUTC(value *time.Time) *time.Time {
+	if value == nil {
+		return nil
+	}
+	copy := value.UTC()
+	return &copy
 }
 
 func workflowResponseError(response *sdk.WorkflowResponse) string {

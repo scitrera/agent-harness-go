@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -56,6 +57,10 @@ type ScheduledRunOccurrence struct {
 	ScheduleID                string    `json:"schedule_id"`
 	DeclarationID             string    `json:"declaration_id"`
 	MissPolicy                string    `json:"miss_policy"`
+	Disposition               string    `json:"disposition"`
+	BacklogCount              int       `json:"backlog_count"`
+	BacklogTruncated          bool      `json:"backlog_truncated"`
+	BacklogIndex              int       `json:"backlog_index"`
 	ScheduledFor              time.Time `json:"scheduled_for"`
 	DispatchedAt              time.Time `json:"dispatched_at"`
 	DispatchDelayMilliseconds int64     `json:"dispatch_delay_ms"`
@@ -237,7 +242,8 @@ func (r *ScheduledRunReader) project(
 		"scitrera.schedule_miss_policy", "scitrera.logical_workspace", "scitrera.thread_id",
 		"scitrera.view_id", "scitrera.view_revision", "scitrera.execution_tool_host",
 		"aether.schedule.id", "aether.schedule.scheduled_for", "aether.schedule.dispatched_at",
-		"aether.schedule.miss_policy",
+		"aether.schedule.miss_policy", "aether.schedule.disposition", "aether.schedule.backlog_count",
+		"aether.schedule.backlog_truncated", "aether.schedule.backlog_index",
 	}
 	for _, key := range required {
 		if strings.TrimSpace(metadata[key]) == "" {
@@ -285,6 +291,10 @@ func (r *ScheduledRunReader) project(
 	}
 	scheduledFor = scheduledFor.UTC()
 	dispatchedAt = dispatchedAt.UTC()
+	disposition, backlogCount, backlogTruncated, backlogIndex, err := parseScheduledOccurrenceMetadata(metadata)
+	if err != nil {
+		return ScheduledRun{}, err
+	}
 
 	run := ScheduledRun{
 		TaskID: info.TaskID, TaskStatus: info.Status, TaskError: info.Error,
@@ -295,7 +305,9 @@ func (r *ScheduledRunReader) project(
 		DeclarationDigest: metadata["scitrera.schedule_digest"],
 		Occurrence: ScheduledRunOccurrence{
 			ScheduleID: metadata["aether.schedule.id"], DeclarationID: metadata["scitrera.schedule_id"],
-			MissPolicy: metadata["aether.schedule.miss_policy"], ScheduledFor: scheduledFor, DispatchedAt: dispatchedAt,
+			MissPolicy: metadata["aether.schedule.miss_policy"], Disposition: disposition,
+			BacklogCount: backlogCount, BacklogTruncated: backlogTruncated, BacklogIndex: backlogIndex,
+			ScheduledFor: scheduledFor, DispatchedAt: dispatchedAt,
 			DispatchDelayMilliseconds: dispatchedAt.Sub(scheduledFor).Milliseconds(),
 		},
 		Attempt: info.Attempt, MaxAttempts: info.MaxAttempts,
@@ -342,6 +354,39 @@ func (r *ScheduledRunReader) project(
 		}
 	}
 	return run, nil
+}
+
+func parseScheduledOccurrenceMetadata(metadata map[string]string) (string, int, bool, int, error) {
+	disposition := metadata["aether.schedule.disposition"]
+	backlogCount, err := strconv.Atoi(metadata["aether.schedule.backlog_count"])
+	if err != nil || backlogCount < 1 || backlogCount > scheduledTurnBacklogDetailLimit {
+		return "", 0, false, 0, errors.New("task projection has an invalid schedule backlog count")
+	}
+	backlogTruncated, err := strconv.ParseBool(metadata["aether.schedule.backlog_truncated"])
+	if err != nil || (backlogTruncated && backlogCount != scheduledTurnBacklogDetailLimit) {
+		return "", 0, false, 0, errors.New("task projection has an invalid schedule backlog truncation")
+	}
+	backlogIndex, err := strconv.Atoi(metadata["aether.schedule.backlog_index"])
+	if err != nil || backlogIndex < 1 || backlogIndex > backlogCount {
+		return "", 0, false, 0, errors.New("task projection has an invalid schedule backlog index")
+	}
+	switch disposition {
+	case ScheduledDispositionOrdinary:
+		if backlogCount != 1 || backlogTruncated || backlogIndex != 1 {
+			return "", 0, false, 0, errors.New("task projection has inconsistent ordinary occurrence metadata")
+		}
+	case ScheduledDispositionCoalesced:
+		if metadata["aether.schedule.miss_policy"] != ScheduledMissPolicyFireOnce || backlogCount < 2 || backlogIndex != 1 {
+			return "", 0, false, 0, errors.New("task projection has inconsistent coalesced occurrence metadata")
+		}
+	case ScheduledDispositionCatchUp:
+		if metadata["aether.schedule.miss_policy"] != ScheduledMissPolicyFireAll || backlogCount < 2 {
+			return "", 0, false, 0, errors.New("task projection has inconsistent catch-up occurrence metadata")
+		}
+	default:
+		return "", 0, false, 0, fmt.Errorf("task projection has unknown schedule disposition %q", disposition)
+	}
+	return disposition, backlogCount, backlogTruncated, backlogIndex, nil
 }
 
 func scheduledRunState(taskStatus string, execution *ScheduledRunExecution) string {

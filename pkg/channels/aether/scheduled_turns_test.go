@@ -196,6 +196,83 @@ func TestScheduledTurnReconciliationDeletesOnlyOwnedStaleDefinitions(t *testing.
 	}
 }
 
+func TestListScheduledTurnScheduleStatesProjectsSkippedBacklog(t *testing.T) {
+	worker, _ := newTestChannel(t)
+	registration := scheduledRegistration()
+	registration.Binding.ToolHostID = worker.Topic()
+	registration.MissPolicy = ScheduledMissPolicySkip
+	data, err := scheduledWorkflowData(worker.workspace, worker.Topic(), registration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var definition scheduledWorkflowDefinition
+	if err := json.Unmarshal(data, &definition); err != nil {
+		t.Fatal(err)
+	}
+	lastFiredAt := time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)
+	scheduledFor := lastFiredAt.Add(24 * time.Hour)
+	nextFireAt := scheduledFor.Add(24 * time.Hour)
+	definition.LastFiredAt = &lastFiredAt
+	definition.NextFireAt = &nextFireAt
+	definition.LastOccurrence = &ScheduledTurnScheduleOccurrence{
+		ScheduledFor: scheduledFor, Disposition: ScheduledDispositionSkipped,
+		Reason: ScheduledSkipReasonMissPolicy, BacklogCount: scheduledTurnBacklogDetailLimit,
+		BacklogTruncated: true,
+	}
+	worker.scheduleOps = &fakeScheduleOperations{schedules: map[string]scheduledWorkflowDefinition{
+		definition.ID: definition,
+	}}
+
+	states, err := worker.ListScheduledTurnScheduleStates(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(states) != 1 {
+		t.Fatalf("schedule states = %+v", states)
+	}
+	state := states[0]
+	if state.WorkflowScheduleID != definition.ID || state.DeclarationID != registration.ID ||
+		state.RoutingWorkspace != worker.workspace || state.AssignedTo != worker.Topic() ||
+		state.LogicalWorkspace != registration.Binding.WorkspaceID || state.ThreadID != registration.ThreadID ||
+		state.ViewID != registration.Binding.ViewID || state.ViewRevision != registration.Binding.Revision ||
+		state.ScheduleType != registration.ScheduleType || state.ScheduleExpression != registration.ScheduleExpression ||
+		state.LastFiredAt == nil || !state.LastFiredAt.Equal(lastFiredAt) ||
+		state.NextFireAt == nil || !state.NextFireAt.Equal(nextFireAt) {
+		t.Fatalf("schedule state = %+v", state)
+	}
+	if state.LastOccurrence == nil || state.LastOccurrence.Disposition != ScheduledDispositionSkipped ||
+		state.LastOccurrence.Reason != ScheduledSkipReasonMissPolicy || state.LastOccurrence.DispatchedAt != nil ||
+		state.LastOccurrence.BacklogCount != scheduledTurnBacklogDetailLimit ||
+		!state.LastOccurrence.BacklogTruncated || state.LastOccurrence.BacklogIndex != 0 {
+		t.Fatalf("schedule occurrence = %+v", state.LastOccurrence)
+	}
+}
+
+func TestListScheduledTurnScheduleStatesRejectsMalformedOwnedOccurrence(t *testing.T) {
+	worker, _ := newTestChannel(t)
+	registration := scheduledRegistration()
+	registration.Binding.ToolHostID = worker.Topic()
+	data, err := scheduledWorkflowData(worker.workspace, worker.Topic(), registration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var definition scheduledWorkflowDefinition
+	if err := json.Unmarshal(data, &definition); err != nil {
+		t.Fatal(err)
+	}
+	definition.LastOccurrence = &ScheduledTurnScheduleOccurrence{
+		ScheduledFor: time.Now().UTC(), Disposition: ScheduledDispositionCoalesced,
+		BacklogCount: 2, BacklogIndex: 1,
+	}
+	worker.scheduleOps = &fakeScheduleOperations{schedules: map[string]scheduledWorkflowDefinition{
+		definition.ID: definition,
+	}}
+	if _, err := worker.ListScheduledTurnScheduleStates(context.Background()); err == nil ||
+		!strings.Contains(err.Error(), "dispatch time") {
+		t.Fatalf("malformed occurrence error = %v", err)
+	}
+}
+
 func TestScheduledTurnExecutorEnqueuesPinnedWorkerTurn(t *testing.T) {
 	registration := scheduledRegistration()
 	envelope, err := scheduledTurnEnvelopeFor(registration)

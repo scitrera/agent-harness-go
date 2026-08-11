@@ -310,8 +310,36 @@ func TestLiveAetherScheduledWorkerView(t *testing.T) {
 		info.Metadata["aether.schedule.miss_policy"] != aetherchan.ScheduledMissPolicyFireOnce ||
 		info.Metadata["scitrera.schedule_miss_policy"] != aetherchan.ScheduledMissPolicyFireOnce ||
 		info.Metadata["scitrera.thread_id"] != registration.ThreadID ||
+		info.Metadata["aether.schedule.disposition"] != aetherchan.ScheduledDispositionOrdinary ||
+		info.Metadata["aether.schedule.backlog_count"] != "1" ||
+		info.Metadata["aether.schedule.backlog_truncated"] != "false" ||
+		info.Metadata["aether.schedule.backlog_index"] != "1" ||
 		scheduledErr != nil || dispatchedErr != nil || dispatchedAt.Before(scheduledFor) {
 		t.Fatalf("scheduled occurrence metadata = %#v scheduled_err=%v dispatched_err=%v", info.Metadata, scheduledErr, dispatchedErr)
+	}
+	var scheduleState *aetherchan.ScheduledTurnScheduleState
+	stateDeadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(stateDeadline) {
+		states, stateErr := worker.ListScheduledTurnScheduleStates(ctx)
+		if stateErr != nil {
+			t.Fatal(stateErr)
+		}
+		for i := range states {
+			if states[i].DeclarationID == registration.ID && states[i].LastOccurrence != nil {
+				scheduleState = &states[i]
+				break
+			}
+		}
+		if scheduleState != nil {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if scheduleState == nil || scheduleState.LastOccurrence.Disposition != aetherchan.ScheduledDispositionOrdinary ||
+		scheduleState.LastOccurrence.DispatchedAt == nil || scheduleState.LastOccurrence.BacklogCount != 1 ||
+		scheduleState.LastOccurrence.BacklogTruncated || scheduleState.LastOccurrence.BacklogIndex != 1 ||
+		scheduleState.LastFiredAt == nil || !scheduleState.LastFiredAt.Equal(*scheduleState.LastOccurrence.DispatchedAt) {
+		t.Fatalf("authoritative schedule state = %+v", scheduleState)
 	}
 	gotBinding, err := spec.GetExecutionBinding(inbound.Message)
 	if err != nil || gotBinding == nil || gotBinding.ViewID != binding.ViewID ||
