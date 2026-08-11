@@ -157,7 +157,13 @@ MemoryLayer-authoritative workspace view; it never carries the host's absolute
 path. Clean Git views pin the current commit by default. Mutable directories
 and dirty worktrees are rejected unless the declaration opts in with
 `allow_mutable_view` or `allow_dirty_view` respectively. `miss_policy` defaults
-to `fire_once`; supported schedule types are `cron`, `interval`, and `once`.
+to `fire_once`, which coalesces an outage backlog into one task. `skip` discards
+a backlog containing multiple due occurrences and resumes at the next future
+time, while `fire_all` emits one task per occurrence in durable batches of at
+most 100 without discarding a larger backlog. Every emitted Aether task records
+its scheduled occurrence and dispatch time and receives a deterministic
+per-occurrence idempotency key. Supported schedule types are `cron`, `interval`,
+and `once`.
 `offline_policy` defaults to `queue`, which persists a due exact-target task
 until this static worker reconnects without asking an orchestrator to launch
 it. Use `reject` to fail creation while absent or `orchestrate` only when the

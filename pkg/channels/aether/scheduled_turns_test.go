@@ -78,11 +78,32 @@ func scheduledRegistration() ScheduledTurnRegistration {
 	return ScheduledTurnRegistration{
 		ID: "daily-review", Name: "Daily review", ScheduleType: "cron",
 		ScheduleExpression: "0 9 * * *", ThreadID: "scheduled-daily-review",
-		Prompt: "Review this workspace", MissPolicy: "fire_once", Enabled: true,
+		Prompt: "Review this workspace", MissPolicy: ScheduledMissPolicyFireOnce, Enabled: true,
 		TargetOfflinePolicy: "queue",
 		Binding:             binding, ViewPolicy: ScheduledViewPolicy{
 			WriteAccess: workspacepkg.ViewWriteAccessReadWrite, AllowDirtyView: true,
 		},
+	}
+}
+
+func TestScheduledTurnRegistrationAcceptsExplicitMissPolicies(t *testing.T) {
+	for _, policy := range []string{
+		ScheduledMissPolicySkip,
+		ScheduledMissPolicyFireOnce,
+		ScheduledMissPolicyFireAll,
+	} {
+		t.Run(policy, func(t *testing.T) {
+			registration := scheduledRegistration()
+			registration.MissPolicy = policy
+			if err := registration.Validate(); err != nil {
+				t.Fatalf("validate %q: %v", policy, err)
+			}
+		})
+	}
+	registration := scheduledRegistration()
+	registration.MissPolicy = "future_policy"
+	if err := registration.Validate(); err == nil {
+		t.Fatal("unknown missed-fire policy was accepted")
 	}
 }
 
@@ -108,17 +129,19 @@ func TestScheduledWorkflowDataTargetsExactWorkerWithJSONEnvelope(t *testing.T) {
 	if err := json.Unmarshal(data, &definition); err != nil {
 		t.Fatal(err)
 	}
-	if definition.ID == "" || definition.MissPolicy != "fire_once" || definition.MaxConcurrent != 0 {
+	if definition.ID == "" || definition.MissPolicy != ScheduledMissPolicyFireOnce || definition.MaxConcurrent != 0 {
 		t.Fatalf("schedule definition = %+v", definition)
 	}
 	if definition.Action.TargetAgentID != registration.Binding.ToolHostID ||
 		definition.Action.TargetOfflinePolicy != "queue" ||
 		definition.Action.PayloadEncoding != "json" ||
 		definition.Action.TaskType != ScheduledTurnTaskType ||
+		definition.Action.Payload.MissPolicy != ScheduledMissPolicyFireOnce ||
 		!reflect.DeepEqual(definition.Action.Payload.Binding, registration.Binding) {
 		t.Fatalf("schedule action = %+v", definition.Action)
 	}
 	if definition.Action.Metadata["scitrera.schedule_digest"] == "" ||
+		definition.Action.Metadata["scitrera.schedule_miss_policy"] != ScheduledMissPolicyFireOnce ||
 		definition.Action.Metadata["scitrera.view_revision"] != registration.Binding.Revision {
 		t.Fatalf("schedule metadata = %#v", definition.Action.Metadata)
 	}

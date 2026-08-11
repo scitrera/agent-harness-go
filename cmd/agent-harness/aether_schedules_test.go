@@ -41,7 +41,7 @@ schedules:
 	}
 	registration := registrations[0]
 	if !registration.Enabled || registration.Name != "workspace-review" ||
-		registration.ThreadID != "scheduled-workspace-review" || registration.MissPolicy != "fire_once" ||
+		registration.ThreadID != "scheduled-workspace-review" || registration.MissPolicy != aetherchan.ScheduledMissPolicyFireOnce ||
 		registration.TargetOfflinePolicy != "queue" ||
 		registration.Binding.ToolHostID != "worker-a" || registration.Binding.WorkspaceID != "project-a" {
 		t.Fatalf("registration = %+v", registration)
@@ -99,6 +99,13 @@ schedules:
     allow_mutable_view: true
     offline_policy: eventually
 `,
+		"miss policy": `version: 1
+schedules:
+  - id: review
+    schedule: {type: interval, expression: 1h, miss_policy: eventually}
+    prompt: Review.
+    allow_mutable_view: true
+`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "schedules.yaml")
@@ -111,6 +118,32 @@ schedules:
 			}
 			if name == "mutable" && !strings.Contains(err.Error(), "allow_mutable_view") {
 				t.Fatalf("mutable view error = %v", err)
+			}
+		})
+	}
+}
+
+func TestPrepareScheduledTurnRegistrationsAcceptsExplicitMissedFirePolicies(t *testing.T) {
+	root := t.TempDir()
+	host, err := aetherchan.NewWorkerToolHost(context.Background(), aetherchan.WorkerToolHostConfig{
+		WorkspaceID: "project-a", WorkspaceRoot: root, StateDir: t.TempDir(), ToolHostID: "worker-a",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, policy := range []string{aetherchan.ScheduledMissPolicySkip, aetherchan.ScheduledMissPolicyFireAll} {
+		t.Run(policy, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "schedules.yaml")
+			body := "version: 1\nschedules:\n  - id: review\n    schedule: {type: interval, expression: 1h, miss_policy: " + policy + "}\n    prompt: Review.\n    allow_mutable_view: true\n"
+			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			registrations, err := prepareScheduledTurnRegistrations(context.Background(), path, root, host)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(registrations) != 1 || registrations[0].MissPolicy != policy {
+				t.Fatalf("registrations = %+v", registrations)
 			}
 		})
 	}

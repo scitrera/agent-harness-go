@@ -277,7 +277,7 @@ func TestLiveAetherScheduledWorkerView(t *testing.T) {
 	}
 	registration := aetherchan.ScheduledTurnRegistration{
 		ID: "once-" + suffix, Name: "E2E scheduled view", Enabled: true,
-		ScheduleType: "once", ScheduleExpression: time.Now().Add(30 * time.Second).UTC().Format(time.RFC3339), MissPolicy: "fire_once",
+		ScheduleType: "once", ScheduleExpression: time.Now().Add(30 * time.Second).UTC().Format(time.RFC3339), MissPolicy: aetherchan.ScheduledMissPolicyFireOnce,
 		TargetOfflinePolicy: "queue", ThreadID: "scheduled-e2e",
 		Prompt: "This initial declaration must be replaced", Binding: binding,
 		ViewPolicy: aetherchan.ScheduledViewPolicy{
@@ -299,6 +299,18 @@ func TestLiveAetherScheduledWorkerView(t *testing.T) {
 	if inbound.Addr.WorkspaceID != logicalWorkspace || inbound.Addr.ThreadID != "scheduled-e2e" ||
 		inbound.Addr.TaskID == "" || !aetherchan.IsScheduledTurnMessage(inbound.Message) {
 		t.Fatalf("scheduled inbound = %+v", inbound)
+	}
+	info, err := worker.GetTaskInfo(ctx, inbound.Addr.TaskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scheduledFor, scheduledErr := time.Parse(time.RFC3339Nano, info.Metadata["aether.schedule.scheduled_for"])
+	dispatchedAt, dispatchedErr := time.Parse(time.RFC3339Nano, info.Metadata["aether.schedule.dispatched_at"])
+	if info.Metadata["aether.schedule.id"] == "" ||
+		info.Metadata["aether.schedule.miss_policy"] != aetherchan.ScheduledMissPolicyFireOnce ||
+		info.Metadata["scitrera.schedule_miss_policy"] != aetherchan.ScheduledMissPolicyFireOnce ||
+		scheduledErr != nil || dispatchedErr != nil || dispatchedAt.Before(scheduledFor) {
+		t.Fatalf("scheduled occurrence metadata = %#v scheduled_err=%v dispatched_err=%v", info.Metadata, scheduledErr, dispatchedErr)
 	}
 	gotBinding, err := spec.GetExecutionBinding(inbound.Message)
 	if err != nil || gotBinding == nil || gotBinding.ViewID != binding.ViewID ||

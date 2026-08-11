@@ -8,8 +8,9 @@ schedules:
     schedule:
       type: cron
       expression: "0 9 * * *"
-      # Explicitly fire once after a gateway outage. "skip" is intentionally
-      # not accepted by Sahara because it can discard the first due fire.
+      # fire_once (default) coalesces any outage backlog into one task.
+      # skip discards a backlog and resumes at the next future occurrence;
+      # fire_all emits every due occurrence in durable batches of at most 100.
       miss_policy: fire_once
     thread_id: scheduled-workspace-review
     relative_directory: ""

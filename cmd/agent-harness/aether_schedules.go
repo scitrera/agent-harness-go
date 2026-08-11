@@ -150,7 +150,7 @@ func prepareScheduledTurnDeclarations(
 		}
 		missPolicy := strings.ToLower(strings.TrimSpace(declaration.Schedule.MissPolicy))
 		if missPolicy == "" {
-			missPolicy = "fire_once"
+			missPolicy = aetherchan.ScheduledMissPolicyFireOnce
 		}
 		offlinePolicy := strings.ToLower(strings.TrimSpace(declaration.OfflinePolicy))
 		if offlinePolicy == "" {

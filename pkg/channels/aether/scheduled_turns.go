@@ -27,6 +27,9 @@ import (
 const (
 	ScheduledTurnTaskType          = "agent-harness.scheduled-turn.v1"
 	ScheduledTurnEnvelopeSchema    = "agent-harness.scheduled-turn.v1"
+	ScheduledMissPolicySkip        = "skip"
+	ScheduledMissPolicyFireOnce    = "fire_once"
+	ScheduledMissPolicyFireAll     = "fire_all"
 	scheduledTurnMetadataKind      = "scheduled_turn"
 	scheduledTurnMessageMetaKey    = "scitrera.scheduled_turn"
 	scheduledTurnRecoveryPage      = 100
@@ -67,7 +70,9 @@ func (r ScheduledTurnRegistration) Validate() error {
 	if strings.TrimSpace(r.ScheduleExpression) == "" || strings.TrimSpace(r.ThreadID) == "" || strings.TrimSpace(r.Prompt) == "" {
 		return fmt.Errorf("aether: scheduled turn %q requires expression, thread, and prompt", r.ID)
 	}
-	if r.MissPolicy != "fire_once" && r.MissPolicy != "fire_all" {
+	if r.MissPolicy != ScheduledMissPolicySkip &&
+		r.MissPolicy != ScheduledMissPolicyFireOnce &&
+		r.MissPolicy != ScheduledMissPolicyFireAll {
 		return fmt.Errorf("aether: scheduled turn %q has unsupported miss policy %q", r.ID, r.MissPolicy)
 	}
 	if r.TargetOfflinePolicy != "queue" && r.TargetOfflinePolicy != "reject" && r.TargetOfflinePolicy != "orchestrate" {
@@ -91,6 +96,7 @@ type scheduledTurnEnvelope struct {
 	DeclarationDigest string                `json:"declaration_digest"`
 	ThreadID          string                `json:"thread_id"`
 	Prompt            string                `json:"prompt"`
+	MissPolicy        string                `json:"miss_policy"`
 	Binding           spec.ExecutionBinding `json:"execution_binding"`
 	ViewPolicy        ScheduledViewPolicy   `json:"view_policy"`
 }
@@ -99,7 +105,8 @@ func (e scheduledTurnEnvelope) validate() error {
 	if e.Schema != ScheduledTurnEnvelopeSchema {
 		return fmt.Errorf("aether: unsupported scheduled turn schema %q", e.Schema)
 	}
-	if e.ScheduleID == "" || e.DeclarationDigest == "" || e.ThreadID == "" || strings.TrimSpace(e.Prompt) == "" {
+	if e.ScheduleID == "" || e.DeclarationDigest == "" || e.ThreadID == "" || strings.TrimSpace(e.Prompt) == "" ||
+		(e.MissPolicy != ScheduledMissPolicySkip && e.MissPolicy != ScheduledMissPolicyFireOnce && e.MissPolicy != ScheduledMissPolicyFireAll) {
 		return errors.New("aether: scheduled turn envelope is incomplete")
 	}
 	if err := e.Binding.Validate(); err != nil {
@@ -134,7 +141,12 @@ func parseScheduledTurnEnvelope(payload []byte) (scheduledTurnEnvelope, error) {
 }
 
 func scheduledTurnDigest(registration ScheduledTurnRegistration) (string, error) {
-	canonical, err := json.Marshal(registration)
+	canonical, err := json.Marshal(struct {
+		Schema       string                    `json:"schema"`
+		Registration ScheduledTurnRegistration `json:"registration"`
+	}{
+		Schema: ScheduledTurnEnvelopeSchema, Registration: registration,
+	})
 	if err != nil {
 		return "", err
 	}
@@ -150,22 +162,23 @@ func scheduledTurnEnvelopeFor(registration ScheduledTurnRegistration) (scheduled
 	return scheduledTurnEnvelope{
 		Schema: ScheduledTurnEnvelopeSchema, ScheduleID: registration.ID,
 		DeclarationDigest: digest, ThreadID: registration.ThreadID,
-		Prompt: registration.Prompt, Binding: registration.Binding,
+		Prompt: registration.Prompt, MissPolicy: registration.MissPolicy, Binding: registration.Binding,
 		ViewPolicy: registration.ViewPolicy,
 	}, nil
 }
 
 func scheduledTurnMetadata(envelope scheduledTurnEnvelope) map[string]string {
 	return map[string]string{
-		"scitrera.component":           taskMetadataComponent,
-		"scitrera.kind":                scheduledTurnMetadataKind,
-		"scitrera.schedule_id":         envelope.ScheduleID,
-		"scitrera.schedule_schema":     envelope.Schema,
-		"scitrera.schedule_digest":     envelope.DeclarationDigest,
-		"scitrera.logical_workspace":   envelope.Binding.WorkspaceID,
-		"scitrera.view_id":             envelope.Binding.ViewID,
-		"scitrera.view_revision":       envelope.Binding.Revision,
-		"scitrera.execution_tool_host": envelope.Binding.ToolHostID,
+		"scitrera.component":            taskMetadataComponent,
+		"scitrera.kind":                 scheduledTurnMetadataKind,
+		"scitrera.schedule_id":          envelope.ScheduleID,
+		"scitrera.schedule_schema":      envelope.Schema,
+		"scitrera.schedule_digest":      envelope.DeclarationDigest,
+		"scitrera.schedule_miss_policy": envelope.MissPolicy,
+		"scitrera.logical_workspace":    envelope.Binding.WorkspaceID,
+		"scitrera.view_id":              envelope.Binding.ViewID,
+		"scitrera.view_revision":        envelope.Binding.Revision,
+		"scitrera.execution_tool_host":  envelope.Binding.ToolHostID,
 	}
 }
 
