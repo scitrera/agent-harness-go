@@ -101,8 +101,19 @@ func (e *turnExecution) assistantPersisted(ctx context.Context, session *harness
 }
 
 func (e *turnExecution) toolPending(ctx context.Context, call protocol.ToolInvokeEnvelope, assistant turnjournal.HistoryMessageRef, iteration int) error {
+	return e.toolsPending(ctx, []protocol.ToolInvokeEnvelope{call}, assistant, iteration)
+}
+
+// toolsPending records a complete assistant tool batch in source order before
+// any call body is exposed. Sequential execution uses a one-call batch per
+// mutation; explicitly parallel-safe execution checkpoints every sibling call
+// together so a crash cannot hide an unconfirmed invocation.
+func (e *turnExecution) toolsPending(ctx context.Context, calls []protocol.ToolInvokeEnvelope, assistant turnjournal.HistoryMessageRef, iteration int) error {
 	if e == nil {
 		return nil
+	}
+	if len(calls) == 0 {
+		return errors.New("turn: cannot checkpoint an empty tool batch")
 	}
 	// ChildResolved is a deliberately recoverable boundary. Once the live owner
 	// is about to expose another mutation, leave it before recording the next
@@ -115,12 +126,17 @@ func (e *turnExecution) toolPending(ctx context.Context, call protocol.ToolInvok
 	return e.update(ctx, func(record *turnjournal.Record) {
 		record.Phase = turnjournal.PhaseToolPending
 		record.Iteration = uint32(max(iteration, 0))
-		record.Tool = &turnjournal.ToolCheckpoint{
-			InvocationID: call.CallID,
-			Name:         call.Name,
-			ArgsDigest:   digestJournalBytes(protocol.ArgsToRaw(call.Args)),
-			Assistant:    assistant,
-			Outcome:      turnjournal.ToolOutcomeRequested,
+		record.ToolBatch = &turnjournal.ToolBatchCheckpoint{
+			Assistant: assistant,
+			Calls:     make([]turnjournal.ToolCheckpoint, len(calls)),
+		}
+		for i := range calls {
+			record.ToolBatch.Calls[i] = turnjournal.ToolCheckpoint{
+				InvocationID: calls[i].CallID,
+				Name:         calls[i].Name,
+				ArgsDigest:   digestJournalBytes(protocol.ArgsToRaw(calls[i].Args)),
+				Outcome:      turnjournal.ToolOutcomeRequested,
+			}
 		}
 	})
 }
@@ -129,7 +145,8 @@ func (e *turnExecution) externalAdmitted(ctx context.Context, taskID string, env
 	if e == nil || envelope.Background {
 		return nil
 	}
-	if e.record.Tool == nil || e.record.Phase != turnjournal.PhaseToolPending || e.record.Tool.Outcome != turnjournal.ToolOutcomeRequested || e.record.Tool.InvocationID != envelope.InvocationID {
+	pending := singleJournalTool(e.record.ToolBatch)
+	if pending == nil || e.record.Phase != turnjournal.PhaseToolPending || pending.Outcome != turnjournal.ToolOutcomeRequested || pending.InvocationID != envelope.InvocationID {
 		return errors.New("turn: external child admission does not match the pending tool invocation")
 	}
 	descriptor, err := subagent.MarshalExecutionEnvelope(envelope)
@@ -142,8 +159,8 @@ func (e *turnExecution) externalAdmitted(ctx context.Context, taskID string, env
 	}
 	return e.update(ctx, func(record *turnjournal.Record) {
 		record.Phase = turnjournal.PhaseWaitingExternalChild
-		record.Tool.Outcome = turnjournal.ToolOutcomeAdmitted
-		record.Tool.External = &external
+		record.ToolBatch.Calls[0].Outcome = turnjournal.ToolOutcomeAdmitted
+		record.ToolBatch.Calls[0].External = &external
 	})
 }
 
@@ -151,7 +168,8 @@ func (e *turnExecution) toolConfirmed(ctx context.Context, session *harness.Sess
 	if e == nil {
 		return nil
 	}
-	if e.record.Tool == nil || e.record.Tool.InvocationID != callID {
+	index := journalToolIndex(e.record.ToolBatch, callID)
+	if index < 0 {
 		return errors.New("turn: confirmed tool result does not match the pending journal invocation")
 	}
 	result, err := journalPersistedMessageRef(session, callID+"-result")
@@ -159,16 +177,73 @@ func (e *turnExecution) toolConfirmed(ctx context.Context, session *harness.Sess
 		return err
 	}
 	return e.update(ctx, func(record *turnjournal.Record) {
-		if record.Tool.External != nil {
+		call := &record.ToolBatch.Calls[index]
+		if call.External != nil {
 			record.Phase = turnjournal.PhaseChildResolved
-		} else {
+		} else if journalBatchConfirmedExcept(record.ToolBatch, index) {
 			record.Phase = turnjournal.PhaseProviderPending
+		} else {
+			record.Phase = turnjournal.PhaseToolPending
 		}
 		record.Iteration = uint32(max(iteration, 0))
 		record.LastMessageID = result.MessageID
-		record.Tool.Outcome = turnjournal.ToolOutcomeConfirmed
-		record.Tool.Result = &result
+		call.Outcome = turnjournal.ToolOutcomeConfirmed
+		call.Result = &result
 	})
+}
+
+func singleJournalTool(batch *turnjournal.ToolBatchCheckpoint) *turnjournal.ToolCheckpoint {
+	if batch == nil || len(batch.Calls) != 1 {
+		return nil
+	}
+	return &batch.Calls[0]
+}
+
+func journalToolIndex(batch *turnjournal.ToolBatchCheckpoint, callID string) int {
+	if batch == nil {
+		return -1
+	}
+	for i := range batch.Calls {
+		if batch.Calls[i].InvocationID == callID {
+			return i
+		}
+	}
+	return -1
+}
+
+func journalBatchConfirmedExcept(batch *turnjournal.ToolBatchCheckpoint, confirming int) bool {
+	if batch == nil || confirming < 0 || confirming >= len(batch.Calls) {
+		return false
+	}
+	for i := range batch.Calls {
+		if i != confirming && batch.Calls[i].Outcome != turnjournal.ToolOutcomeConfirmed {
+			return false
+		}
+	}
+	return true
+}
+
+func journalBatchHasRequested(batch *turnjournal.ToolBatchCheckpoint) bool {
+	if batch == nil {
+		return false
+	}
+	for i := range batch.Calls {
+		if batch.Calls[i].Outcome == turnjournal.ToolOutcomeRequested {
+			return true
+		}
+	}
+	return false
+}
+
+func markJournalBatchUncertain(batch *turnjournal.ToolBatchCheckpoint) {
+	if batch == nil {
+		return
+	}
+	for i := range batch.Calls {
+		if batch.Calls[i].Outcome == turnjournal.ToolOutcomeRequested {
+			batch.Calls[i].Outcome = turnjournal.ToolOutcomeUncertain
+		}
+	}
 }
 
 func (e *turnExecution) finish(ctx context.Context, runErr error) error {
@@ -188,7 +263,7 @@ func (e *turnExecution) finish(ctx context.Context, runErr error) error {
 		}
 		reason = boundedJournalReason(runErr.Error())
 		if errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded) || errors.Is(runErr, turncancel.ErrTurnCancelled) || errors.Is(runErr, subagent.ErrParentCheckpointUncertain) || errors.Is(runErr, ErrRecoveryUnsafe) ||
-			(e.record.Tool != nil && e.record.Tool.Outcome == turnjournal.ToolOutcomeRequested) {
+			journalBatchHasRequested(e.record.ToolBatch) {
 			phase = turnjournal.PhaseInterrupted
 			if managed && !errors.Is(runErr, turncancel.ErrTurnCancelled) {
 				phase = turnjournal.PhaseInterrupting
@@ -198,8 +273,8 @@ func (e *turnExecution) finish(ctx context.Context, runErr error) error {
 	return e.update(ctx, func(record *turnjournal.Record) {
 		record.Phase = phase
 		record.FailureReason = reason
-		if (phase == turnjournal.PhaseInterrupted || phase == turnjournal.PhaseInterrupting) && record.Tool != nil && record.Tool.Outcome == turnjournal.ToolOutcomeRequested {
-			record.Tool.Outcome = turnjournal.ToolOutcomeUncertain
+		if phase == turnjournal.PhaseInterrupted || phase == turnjournal.PhaseInterrupting {
+			markJournalBatchUncertain(record.ToolBatch)
 		}
 	})
 }
@@ -214,9 +289,7 @@ func (e *turnExecution) interrupt(ctx context.Context, reason string) error {
 			record.Phase = turnjournal.PhaseInterrupting
 		}
 		record.FailureReason = boundedJournalReason(reason)
-		if record.Tool != nil && record.Tool.Outcome == turnjournal.ToolOutcomeRequested {
-			record.Tool.Outcome = turnjournal.ToolOutcomeUncertain
-		}
+		markJournalBatchUncertain(record.ToolBatch)
 	})
 }
 
@@ -344,18 +417,21 @@ func cloneTurnExecutionRecord(record turnjournal.Record) turnjournal.Record {
 		completed := *record.CompletedAt
 		record.CompletedAt = &completed
 	}
-	if record.Tool != nil {
-		tool := *record.Tool
-		if tool.External != nil {
-			external := *tool.External
-			external.Descriptor = append(json.RawMessage(nil), external.Descriptor...)
-			tool.External = &external
+	if record.ToolBatch != nil {
+		batch := *record.ToolBatch
+		batch.Calls = append([]turnjournal.ToolCheckpoint(nil), batch.Calls...)
+		for i := range batch.Calls {
+			if batch.Calls[i].External != nil {
+				external := *batch.Calls[i].External
+				external.Descriptor = append(json.RawMessage(nil), external.Descriptor...)
+				batch.Calls[i].External = &external
+			}
+			if batch.Calls[i].Result != nil {
+				result := *batch.Calls[i].Result
+				batch.Calls[i].Result = &result
+			}
 		}
-		if tool.Result != nil {
-			result := *tool.Result
-			tool.Result = &result
-		}
-		record.Tool = &tool
+		record.ToolBatch = &batch
 	}
 	return record
 }

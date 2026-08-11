@@ -162,6 +162,29 @@ func (r *Runner) runProviderLoop(ctx context.Context, session *harness.Session, 
 				toolCallParts[env.CallID] = part
 			}
 		}
+		appendInjectedUser := func(injectUser []protocol.ContentPart) error {
+			if len(injectUser) == 0 {
+				return nil
+			}
+			if err := session.Append(ctx, protocol.ChatMessage{Role: protocol.RoleUser, Addr: addr, Content: injectUser}); err != nil {
+				return fmt.Errorf("append injected user message: %w", err)
+			}
+			if !required.Vision && containsImage(injectUser) {
+				required.Vision = true
+				model = r.escalateModel(ctx, addr, user, required, model)
+			}
+			return nil
+		}
+		if toolBatchParallelSafe(calls, tt) {
+			injectUser, err := r.runParallelToolBatch(ctx, session, addr, calls, toolCallParts, streamer, perTurnApprovers, tt, execution, assistantRef, toolIterations)
+			if err != nil {
+				return protocol.ChatMessage{}, err
+			}
+			if err := appendInjectedUser(injectUser); err != nil {
+				return protocol.ChatMessage{}, err
+			}
+			continue
+		}
 		// Parts a tool asks to inject into the model's OWN context as a NEW
 		// user-role message (inject_image's QC image). Collected across this
 		// iteration's calls in order and appended AFTER every tool_call is answered
@@ -315,17 +338,8 @@ func (r *Runner) runProviderLoop(ctx context.Context, session *harness.Session, 
 		}
 		// After every tool_call is answered, inject the collected parts as ONE new
 		// user-role message so the next provider iteration sees them in context.
-		if len(injectUser) > 0 {
-			if err := session.Append(ctx, protocol.ChatMessage{Role: protocol.RoleUser, Addr: addr, Content: injectUser}); err != nil {
-				return protocol.ChatMessage{}, fmt.Errorf("append injected user message: %w", err)
-			}
-			// When an image entered context and this turn isn't already routed to a
-			// vision model, flip the required capability and escalate for the next
-			// iteration so the model can actually see it.
-			if !required.Vision && containsImage(injectUser) {
-				required.Vision = true
-				model = r.escalateModel(ctx, addr, user, required, model)
-			}
+		if err := appendInjectedUser(injectUser); err != nil {
+			return protocol.ChatMessage{}, err
 		}
 	}
 }

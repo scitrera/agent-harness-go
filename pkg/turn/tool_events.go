@@ -43,12 +43,16 @@ func applyHookDecision(event tools.ToolEvent, decision hooks.Decision) tools.Too
 }
 
 func finishToolEvent(call protocol.ToolInvokeEnvelope, started time.Time, result tools.Result, err error) tools.ToolEvent {
+	return finishToolEventAt(call, started, time.Now(), result, err)
+}
+
+func finishToolEventAt(call protocol.ToolInvokeEnvelope, started, finished time.Time, result tools.Result, err error) tools.ToolEvent {
 	status := tools.ToolEventFinished
 	if err != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
 		status = tools.ToolEventAborted
 	}
 	event := toolEventFromCall(status, call)
-	event.DurationMS = tools.DurationMillis(time.Since(started))
+	event.DurationMS = tools.DurationMillis(finished.Sub(started))
 	event.Result = result.Metadata
 	event.Result.PayloadBytes = len(result.Payload)
 	event.IsError = result.IsError || err != nil

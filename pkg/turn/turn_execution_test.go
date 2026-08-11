@@ -115,8 +115,9 @@ func TestRunnerTurnJournalConfirmsToolAndCompletes(t *testing.T) {
 	if record.Phase != turnjournal.PhaseCompleted || !record.Terminal() || record.CompletedAt == nil {
 		t.Fatalf("terminal record = %+v", record)
 	}
-	if record.Tool == nil || record.Tool.InvocationID != "call-1" || record.Tool.Outcome != turnjournal.ToolOutcomeConfirmed || record.Tool.Result == nil || record.Tool.Result.MessageID != "call-1-result" {
-		t.Fatalf("tool checkpoint = %+v", record.Tool)
+	tool := singleJournalTool(record.ToolBatch)
+	if tool == nil || tool.InvocationID != "call-1" || tool.Outcome != turnjournal.ToolOutcomeConfirmed || tool.Result == nil || tool.Result.MessageID != "call-1-result" {
+		t.Fatalf("tool checkpoint = %+v", record.ToolBatch)
 	}
 	active, err := journal.ListActive(context.Background(), "agent-a")
 	if err != nil {
@@ -270,17 +271,18 @@ func TestRunnerTurnJournalBindsExternalDescriptorBeforeAwait(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if record.Phase != turnjournal.PhaseWaitingExternalChild || record.Tool == nil || record.Tool.Outcome != turnjournal.ToolOutcomeAdmitted || record.Tool.External == nil {
+	tool := singleJournalTool(record.ToolBatch)
+	if record.Phase != turnjournal.PhaseWaitingExternalChild || tool == nil || tool.Outcome != turnjournal.ToolOutcomeAdmitted || tool.External == nil {
 		t.Fatalf("admitted checkpoint = %+v", record)
 	}
-	if record.Tool.External.TaskID != "child-task" || record.Tool.External.ExecutionID == "" || record.Tool.External.ChildSessionID == "" {
-		t.Fatalf("external identity = %+v", record.Tool.External)
+	if tool.External.TaskID != "child-task" || tool.External.ExecutionID == "" || tool.External.ChildSessionID == "" {
+		t.Fatalf("external identity = %+v", tool.External)
 	}
-	envelope, err := subagent.ParseExecutionEnvelope(record.Tool.External.Descriptor)
+	envelope, err := subagent.ParseExecutionEnvelope(tool.External.Descriptor)
 	if err != nil {
 		t.Fatalf("parse persisted descriptor: %v", err)
 	}
-	if envelope.ExecutionID != record.Tool.External.ExecutionID || envelope.InvocationID != "spawn-1" || envelope.ParentTaskID != addr.TaskID {
+	if envelope.ExecutionID != tool.External.ExecutionID || envelope.InvocationID != "spawn-1" || envelope.ParentTaskID != addr.TaskID {
 		t.Fatalf("descriptor identity = %+v", envelope)
 	}
 	cancel()
@@ -291,7 +293,8 @@ func TestRunnerTurnJournalBindsExternalDescriptorBeforeAwait(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if record.Phase != turnjournal.PhaseInterrupted || record.Tool == nil || record.Tool.Outcome != turnjournal.ToolOutcomeAdmitted || record.Tool.External == nil || record.Tool.External.TaskID != "child-task" {
+	tool = singleJournalTool(record.ToolBatch)
+	if record.Phase != turnjournal.PhaseInterrupted || tool == nil || tool.Outcome != turnjournal.ToolOutcomeAdmitted || tool.External == nil || tool.External.TaskID != "child-task" {
 		t.Fatalf("interrupted admitted checkpoint = %+v", record)
 	}
 }
@@ -418,7 +421,8 @@ func TestRunnerTurnJournalStopsAfterAmbiguousAdmissionCheckpoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if record.Phase != turnjournal.PhaseInterrupted || record.Tool == nil || record.Tool.Outcome != turnjournal.ToolOutcomeUncertain || record.Tool.External != nil {
+	tool := singleJournalTool(record.ToolBatch)
+	if record.Phase != turnjournal.PhaseInterrupted || tool == nil || tool.Outcome != turnjournal.ToolOutcomeUncertain || tool.External != nil {
 		t.Fatalf("uncertain admission checkpoint = %+v", record)
 	}
 }
@@ -501,18 +505,20 @@ func TestRunnerResumeTurnUsesAdmittedChildAndAppendsResultExactlyOnce(t *testing
 			record.Phase = turnjournal.PhaseToolPending
 			record.Iteration = 1
 			record.LastMessageID = assistant.ID
-			record.Tool = &turnjournal.ToolCheckpoint{
-				InvocationID: "spawn-1", Name: tools.SubagentToolName,
-				ArgsDigest: digestJournalBytes(protocol.ArgsToRaw(args)), Assistant: assistantRef,
-				Outcome: turnjournal.ToolOutcomeRequested,
+			record.ToolBatch = &turnjournal.ToolBatchCheckpoint{
+				Assistant: assistantRef,
+				Calls: []turnjournal.ToolCheckpoint{{
+					InvocationID: "spawn-1", Name: tools.SubagentToolName,
+					ArgsDigest: digestJournalBytes(protocol.ArgsToRaw(args)), Outcome: turnjournal.ToolOutcomeRequested,
+				}},
 			}
 			record, err = journal.Update(context.Background(), record, record.Revision)
 			if err != nil {
 				t.Fatal(err)
 			}
 			record.Phase = turnjournal.PhaseWaitingExternalChild
-			record.Tool.Outcome = turnjournal.ToolOutcomeAdmitted
-			record.Tool.External = &external
+			record.ToolBatch.Calls[0].Outcome = turnjournal.ToolOutcomeAdmitted
+			record.ToolBatch.Calls[0].External = &external
 			if _, err = journal.Update(context.Background(), record, record.Revision); err != nil {
 				t.Fatal(err)
 			}
@@ -574,7 +580,8 @@ func TestRunnerResumeTurnUsesAdmittedChildAndAppendsResultExactlyOnce(t *testing
 			if err != nil {
 				t.Fatal(err)
 			}
-			if terminal.Phase != turnjournal.PhaseCompleted || terminal.Tool == nil || terminal.Tool.Outcome != turnjournal.ToolOutcomeConfirmed || terminal.Tool.Result == nil || terminal.Tool.Result.MessageID != "spawn-1-result" {
+			tool := singleJournalTool(terminal.ToolBatch)
+			if terminal.Phase != turnjournal.PhaseCompleted || tool == nil || tool.Outcome != turnjournal.ToolOutcomeConfirmed || tool.Result == nil || tool.Result.MessageID != "spawn-1-result" {
 				t.Fatalf("terminal recovery record = %+v", terminal)
 			}
 			if _, err := runner.ResumeTurn(context.Background(), addr.WorkspaceID, addr.TaskID); !errors.Is(err, ErrRecoveryUnsafe) {

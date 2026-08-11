@@ -266,18 +266,21 @@ func cloneRecord(record Record) Record {
 		completed := *record.CompletedAt
 		record.CompletedAt = &completed
 	}
-	if record.Tool != nil {
-		tool := *record.Tool
-		if tool.External != nil {
-			external := *tool.External
-			external.Descriptor = append(json.RawMessage(nil), external.Descriptor...)
-			tool.External = &external
+	if record.ToolBatch != nil {
+		batch := *record.ToolBatch
+		batch.Calls = append([]ToolCheckpoint(nil), batch.Calls...)
+		for i := range batch.Calls {
+			if batch.Calls[i].External != nil {
+				external := *batch.Calls[i].External
+				external.Descriptor = append(json.RawMessage(nil), external.Descriptor...)
+				batch.Calls[i].External = &external
+			}
+			if batch.Calls[i].Result != nil {
+				result := *batch.Calls[i].Result
+				batch.Calls[i].Result = &result
+			}
 		}
-		if tool.Result != nil {
-			result := *tool.Result
-			tool.Result = &result
-		}
-		record.Tool = &tool
+		record.ToolBatch = &batch
 	}
 	return record
 }

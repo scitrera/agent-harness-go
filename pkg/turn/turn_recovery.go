@@ -19,10 +19,11 @@ func (r *Runner) resolveRecoveredExternalTool(ctx context.Context, session *harn
 		return nil
 	}
 	record := execution.record
-	if record.Phase != turnjournal.PhaseWaitingExternalChild || record.Tool == nil || record.Tool.External == nil {
+	tool := singleJournalTool(record.ToolBatch)
+	if record.Phase != turnjournal.PhaseWaitingExternalChild || tool == nil || tool.External == nil {
 		return fmt.Errorf("%w: execution lacks an admitted external child", ErrRecoveryUnsafe)
 	}
-	external := record.Tool.External
+	external := tool.External
 	envelope, err := subagent.ParseExecutionEnvelope(external.Descriptor)
 	if err != nil {
 		return fmt.Errorf("%w: invalid child execution descriptor: %v", ErrRecoveryUnsafe, err)
@@ -38,7 +39,7 @@ func (r *Runner) resolveRecoveredExternalTool(ctx context.Context, session *harn
 	if err != nil {
 		return fmt.Errorf("turn: await recovered child task %q: %w", external.TaskID, err)
 	}
-	result, err := r.recoveredSubagentToolResult(ctx, addr, envelope, recovery, external.TaskID, record.Tool.InvocationID)
+	result, err := r.recoveredSubagentToolResult(ctx, addr, envelope, recovery, external.TaskID, tool.InvocationID)
 	if err != nil {
 		return err
 	}
@@ -47,10 +48,10 @@ func (r *Runner) resolveRecoveredExternalTool(ctx context.Context, session *harn
 		return fmt.Errorf("turn: build recovered child tool result: %w", err)
 	}
 	parts := append([]protocol.ContentPart{part}, result.Parts...)
-	if err := appendRecoveredToolResultOnce(ctx, session, addr, record.Tool.InvocationID, parts); err != nil {
+	if err := appendRecoveredToolResultOnce(ctx, session, addr, tool.InvocationID, parts); err != nil {
 		return err
 	}
-	assistant, err := journalMessageByRef(session.History(), record.Tool.Assistant)
+	assistant, err := journalMessageByRef(session.History(), record.ToolBatch.Assistant)
 	if err != nil {
 		return err
 	}
@@ -64,18 +65,22 @@ func (r *Runner) resolveRecoveredExternalTool(ctx context.Context, session *harn
 			return fmt.Errorf("turn: stream recovered child result: %w", err)
 		}
 	}
-	if err := execution.toolConfirmed(ctx, session, record.Tool.InvocationID, int(record.Iteration)); err != nil {
+	if err := execution.toolConfirmed(ctx, session, tool.InvocationID, int(record.Iteration)); err != nil {
 		return err
 	}
 	return nil
 }
 
 func validateRecoveredEnvelope(record turnjournal.Record, envelope subagent.ExecutionEnvelope) error {
-	external := record.Tool.External
+	tool := singleJournalTool(record.ToolBatch)
+	if tool == nil || tool.External == nil {
+		return fmt.Errorf("%w: child execution checkpoint is not singular", ErrRecoveryUnsafe)
+	}
+	external := tool.External
 	if envelope.ExecutionID != external.ExecutionID || envelope.WorkspaceID != record.WorkspaceID ||
 		envelope.ParentSessionID != record.SessionID || envelope.ChildSessionID != external.ChildSessionID ||
-		envelope.ParentTaskID != record.TaskID || envelope.ParentMessageID != record.Tool.Assistant.MessageID ||
-		envelope.InvocationID != record.Tool.InvocationID || envelope.Background {
+		envelope.ParentTaskID != record.TaskID || envelope.ParentMessageID != record.ToolBatch.Assistant.MessageID ||
+		envelope.InvocationID != tool.InvocationID || envelope.Background {
 		return fmt.Errorf("%w: child execution descriptor does not match parent checkpoint", ErrRecoveryUnsafe)
 	}
 	return nil

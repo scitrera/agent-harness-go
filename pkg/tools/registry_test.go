@@ -71,6 +71,33 @@ func Test_Registry_Invoke_returns_unknown_tool_when_name_missing(t *testing.T) {
 	}
 }
 
+func Test_Registry_Prepare_admits_without_executing(t *testing.T) {
+	reg := NewRegistry()
+	invocations := 0
+	if err := reg.Register("read", HandlerFunc(func(_ context.Context, req Request) (Result, error) {
+		invocations++
+		return NewJSONResult(req.CallID, req.Name, json.RawMessage(`{"ok":true}`))
+	})); err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := reg.Prepare(context.Background(), Request{CallID: "call-1", Name: "read"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if invocations != 0 {
+		t.Fatal("Prepare executed the tool body")
+	}
+	if _, err := prepared.Invoke(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if invocations != 1 {
+		t.Fatalf("invocations = %d", invocations)
+	}
+	if _, err := prepared.Invoke(context.Background()); !errors.Is(err, ErrInvalidTool) {
+		t.Fatalf("second invocation error = %v", err)
+	}
+}
+
 func Test_RegisterLocal_web_search_sends_placeholder_auth_when_exa_configured(t *testing.T) {
 	// Given
 	ctx := context.Background()

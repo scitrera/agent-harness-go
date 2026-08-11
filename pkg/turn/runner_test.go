@@ -66,6 +66,12 @@ func (s *fakeStore) SaveHistory(_ context.Context, _ string, messages []protocol
 	return nil
 }
 
+func (s *fakeStore) HistoryForTest() []protocol.ChatMessage {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]protocol.ChatMessage(nil), s.messages...)
+}
+
 type fakeLoader struct {
 	files []bootstrap.File
 }

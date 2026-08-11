@@ -11,6 +11,9 @@ import (
 // it instead of cfg.Workspace. The ACP channel wires one that proxies to the
 // editor's fs/* client capability so edits land in the user's open buffers. No
 // ACP import here — the seam is ctx-carried, so tools stays transport-agnostic.
+// ReadFile may be called concurrently when an assistant emits a batch composed
+// entirely of explicitly parallel-safe read tools; implementations must
+// correlate concurrent requests or serialize internally.
 type FileDelegate interface {
 	ReadFile(ctx context.Context, path string, maxBytes int64) (string, error)
 	WriteFile(ctx context.Context, path, content string) error
@@ -28,7 +31,9 @@ type CommandDelegate interface {
 // ToolDelegate redirects complete tool invocations for a turn. It is used when
 // the tool authority is on another host (for example, an Aether-connected TUI
 // that owns the selected checkout). Registry policy and audit run before this
-// seam, so the remote host receives only admitted calls.
+// seam, so the remote host receives only admitted calls. InvokeTool may be
+// called concurrently only for descriptors explicitly marked ParallelSafe;
+// implementations must support that overlap or serialize internally.
 type ToolDelegate interface {
 	HandlesTool(name string) bool
 	InvokeTool(ctx context.Context, req Request) (Result, error)

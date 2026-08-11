@@ -157,7 +157,26 @@ func (s *Session) InvokeToolApproved(ctx context.Context, env protocol.ToolInvok
 	return s.invokeTool(ctx, env, true)
 }
 
+// PrepareTool performs registry policy/audit/view admission without invoking
+// the tool body. It is used by deterministic parallel batches.
+func (s *Session) PrepareTool(ctx context.Context, env protocol.ToolInvokeEnvelope) (tools.PreparedInvocation, error) {
+	return s.prepareTool(ctx, env, false)
+}
+
+// PrepareToolApproved is PrepareTool for a once-approved invocation.
+func (s *Session) PrepareToolApproved(ctx context.Context, env protocol.ToolInvokeEnvelope) (tools.PreparedInvocation, error) {
+	return s.prepareTool(ctx, env, true)
+}
+
 func (s *Session) invokeTool(ctx context.Context, env protocol.ToolInvokeEnvelope, approved bool) (tools.Result, error) {
+	return s.tools.Invoke(ctx, s.toolRequest(ctx, env, approved))
+}
+
+func (s *Session) prepareTool(ctx context.Context, env protocol.ToolInvokeEnvelope, approved bool) (tools.PreparedInvocation, error) {
+	return s.tools.Prepare(ctx, s.toolRequest(ctx, env, approved))
+}
+
+func (s *Session) toolRequest(ctx context.Context, env protocol.ToolInvokeEnvelope, approved bool) tools.Request {
 	req := tools.RequestFromEnvelope(env)
 	req.Authority = s.authority
 	req.Approved = approved
@@ -169,7 +188,7 @@ func (s *Session) invokeTool(ctx context.Context, env protocol.ToolInvokeEnvelop
 	// Invocation only — the caller (the turn loop) owns persisting the result to
 	// history, in ONE place for every tool (static, dynamic, denied, errored), so
 	// the "append the result" responsibility can't silently diverge per path.
-	return s.tools.Invoke(ctx, req)
+	return req
 }
 
 // AppendToolResult persists a tool_result content part as a tool-result message.

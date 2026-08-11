@@ -78,7 +78,7 @@ func TestAssembleTurnTools(t *testing.T) {
 
 	t.Run("merges discovered tools; static wins on collision", func(t *testing.T) {
 		r := newToolsRunner(static, &fakeDynamicProvider{descs: []tools.Descriptor{
-			{Name: "remote_x", Description: "x"},
+			{Name: "remote_x", Description: "x", Concurrency: tools.ConcurrencyParallelSafe},
 			{Name: "dup", Description: "should be dropped"},      // collides with a static tool
 			{Name: "remote_x", Description: "duplicate dynamic"}, // intra-batch dup
 		}})
@@ -95,6 +95,9 @@ func TestAssembleTurnTools(t *testing.T) {
 		}
 		if len(tt.providerByTool) != 1 {
 			t.Errorf("expected exactly 1 routed tool, got %d", len(tt.providerByTool))
+		}
+		if tt.concurrencyByTool["remote_x"] != tools.ConcurrencyParallelSafe {
+			t.Errorf("remote_x concurrency contract was not retained: %+v", tt.concurrencyByTool)
 		}
 	})
 

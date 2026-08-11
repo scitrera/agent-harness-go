@@ -26,6 +26,26 @@ const (
 	TrustRequiresFreshApproval
 )
 
+// ConcurrencyClass declares whether invocations of a tool may overlap other
+// calls from the same assistant message. This is execution metadata only: it is
+// intentionally not sent to the model or inferred from a tool name.
+//
+// The zero value is conservative. A call is eligible for concurrent execution
+// only when every call in the assistant's batch is explicitly ParallelSafe.
+type ConcurrencyClass int
+
+const (
+	// ConcurrencyUnspecified keeps the tool sequential. This is the descriptor
+	// zero value so existing and dynamically discovered tools fail closed.
+	ConcurrencyUnspecified ConcurrencyClass = iota
+	// ConcurrencySequential explicitly requires source-ordered execution.
+	ConcurrencySequential
+	// ConcurrencyParallelSafe promises that overlapping invocations do not
+	// mutate shared state, do not use turn-mutating emitters, and are safe under
+	// the turn's shared cancellation. Effects must be returned in Result.
+	ConcurrencyParallelSafe
+)
+
 // Descriptor is the model-facing metadata for a tool: its name, a one-line
 // description, and a JSON-schema object for its arguments. It is what the
 // provider tool-API needs to expose the tool to the model.
@@ -37,6 +57,9 @@ type Descriptor struct {
 	// leaves authorization to the runtime policy; a provider may stamp a stronger
 	// hint (a later stage — no local descriptor sets it today).
 	Trust TrustLevel
+	// Concurrency is the tool's neutral runtime concurrency contract. It is not
+	// part of the model-facing function schema. Unspecified is sequential.
+	Concurrency ConcurrencyClass
 }
 
 // Describe attaches model-facing metadata for an already-registered tool.

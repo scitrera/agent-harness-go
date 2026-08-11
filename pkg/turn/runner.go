@@ -314,6 +314,10 @@ type turnTools struct {
 	// local tools, which stay TrustDefault this stage) reads as the zero value,
 	// TrustDefault — so today's flow is unchanged.
 	trustByTool map[string]tools.TrustLevel
+	// concurrencyByTool carries the neutral execution contract without exposing
+	// it through the provider's model-facing function schema. Missing entries are
+	// ConcurrencyUnspecified and therefore sequential.
+	concurrencyByTool map[string]tools.ConcurrencyClass
 }
 
 type Config struct {
@@ -721,23 +725,33 @@ func (r *Runner) assembleTurnTools(ctx context.Context, addr protocol.MessageAdd
 	// scoped-out tool is never advertised (invokeTool separately blocks execution).
 	defer func() { tt = r.filterExcludedTools(ctx, tt) }()
 	tt = turnTools{specs: r.toolSpecs}
-	if len(r.toolProviders) == 0 {
-		return
-	}
-	specs := append([]provider.ToolSpec(nil), r.toolSpecs...)
-	route := map[string]ToolProvider{}
 	// Carry each tool's Trust hint into dispatch. Seed with the static registry's
 	// descriptors (built-ins default TrustDefault this stage); provider tools add
 	// theirs below. Local tools may be omitted (missing → TrustDefault), but the
 	// static seed keeps the map faithful to the descriptors.
 	trust := map[string]tools.TrustLevel{}
+	concurrency := map[string]tools.ConcurrencyClass{}
 	if r.registry != nil {
 		for _, d := range r.registry.Descriptors() {
 			if d.Trust != tools.TrustDefault {
 				trust[d.Name] = d.Trust
 			}
+			if d.Concurrency != tools.ConcurrencyUnspecified {
+				concurrency[d.Name] = d.Concurrency
+			}
 		}
 	}
+	if len(trust) > 0 {
+		tt.trustByTool = trust
+	}
+	if len(concurrency) > 0 {
+		tt.concurrencyByTool = concurrency
+	}
+	if len(r.toolProviders) == 0 {
+		return
+	}
+	specs := append([]provider.ToolSpec(nil), r.toolSpecs...)
+	route := map[string]ToolProvider{}
 	for _, p := range r.toolProviders {
 		descs, err := p.Tools(ctx, addr, user)
 		if err != nil {
@@ -756,6 +770,9 @@ func (r *Runner) assembleTurnTools(ctx context.Context, addr protocol.MessageAdd
 			if d.Trust != tools.TrustDefault {
 				trust[d.Name] = d.Trust
 			}
+			if d.Concurrency != tools.ConcurrencyUnspecified {
+				concurrency[d.Name] = d.Concurrency
+			}
 			specs = append(specs, provider.ToolSpec{Name: d.Name, Description: d.Description, Parameters: d.Parameters})
 		}
 	}
@@ -766,6 +783,9 @@ func (r *Runner) assembleTurnTools(ctx context.Context, addr protocol.MessageAdd
 	tt.providerByTool = route
 	if len(trust) > 0 {
 		tt.trustByTool = trust
+	}
+	if len(concurrency) > 0 {
+		tt.concurrencyByTool = concurrency
 	}
 	return
 }
@@ -789,6 +809,7 @@ func (r *Runner) filterExcludedTools(ctx context.Context, tt turnTools) turnTool
 	for name := range excl {
 		delete(tt.providerByTool, name) // nil-map delete is a safe no-op
 		delete(tt.trustByTool, name)
+		delete(tt.concurrencyByTool, name)
 	}
 	return tt
 }

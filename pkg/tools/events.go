@@ -22,6 +22,8 @@ const (
 )
 
 type ToolEventSink interface {
+	// EmitToolEvent may be called concurrently for explicitly parallel-safe tool
+	// bodies. Implementations must synchronize shared state or serialize events.
 	EmitToolEvent(ctx context.Context, event ToolEvent) error
 }
 

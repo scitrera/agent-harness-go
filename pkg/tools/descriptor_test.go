@@ -51,4 +51,14 @@ func TestLocalDescriptorsCoverAllLocalTools(t *testing.T) {
 			t.Fatalf("%s parameters not an object schema: %v", name, schema)
 		}
 	}
+	for _, name := range []string{"read_file", "list_dir", "inspect_file", "web_search"} {
+		if byName[name].Concurrency != ConcurrencyParallelSafe {
+			t.Fatalf("%s concurrency = %v, want explicitly parallel-safe", name, byName[name].Concurrency)
+		}
+	}
+	for _, name := range []string{"write_file", "edit_file", "shell", "python"} {
+		if byName[name].Concurrency == ConcurrencyParallelSafe {
+			t.Fatalf("mutating tool %s must remain sequential", name)
+		}
+	}
 }

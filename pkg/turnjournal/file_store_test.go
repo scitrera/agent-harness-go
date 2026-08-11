@@ -63,14 +63,13 @@ func TestFileStore_RestartRoundTripAndRecoverableChildFlow(t *testing.T) {
 	*now = now.Add(time.Second)
 	record.Phase = PhaseToolPending
 	record.LastMessageID = "assistant-tool-1"
-	record.Tool = &ToolCheckpoint{
-		InvocationID: "call-1",
-		Name:         "spawn_subagent",
-		ArgsDigest:   testDigestB,
+	record.ToolBatch = &ToolBatchCheckpoint{
 		Assistant: HistoryMessageRef{
 			WorkspaceID: "project-a", SessionID: "thread-1", MessageID: "assistant-tool-1", Digest: testDigestC,
 		},
-		Outcome: ToolOutcomeRequested,
+		Calls: []ToolCheckpoint{{
+			InvocationID: "call-1", Name: "spawn_subagent", ArgsDigest: testDigestB, Outcome: ToolOutcomeRequested,
+		}},
 	}
 	record, err = store.Update(ctx, record, record.Revision)
 	if err != nil {
@@ -78,12 +77,12 @@ func TestFileStore_RestartRoundTripAndRecoverableChildFlow(t *testing.T) {
 	}
 	*now = now.Add(time.Second)
 	record.Phase = PhaseWaitingExternalChild
-	record.Tool.Outcome = ToolOutcomeAdmitted
+	record.ToolBatch.Calls[0].Outcome = ToolOutcomeAdmitted
 	external, err := NewExternalChildRef("task-child", "ahx-v1-child", "thread-child", []byte(`{"schema":"child.v1"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	record.Tool.External = &external
+	record.ToolBatch.Calls[0].External = &external
 	record, err = store.Update(ctx, record, record.Revision)
 	if err != nil {
 		t.Fatal(err)
@@ -97,7 +96,7 @@ func TestFileStore_RestartRoundTripAndRecoverableChildFlow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded.Phase != PhaseWaitingExternalChild || loaded.Tool == nil || loaded.Tool.External == nil || loaded.Tool.External.TaskID != "task-child" {
+	if loaded.Phase != PhaseWaitingExternalChild || loaded.ToolBatch == nil || loaded.ToolBatch.Calls[0].External == nil || loaded.ToolBatch.Calls[0].External.TaskID != "task-child" {
 		t.Fatalf("restart lost child checkpoint: %+v", loaded)
 	}
 	active, err := reopened.ListActive(ctx, "agent-parent")
@@ -107,8 +106,8 @@ func TestFileStore_RestartRoundTripAndRecoverableChildFlow(t *testing.T) {
 
 	reopened.now = func() time.Time { return now.Add(time.Second) }
 	loaded.Phase = PhaseChildResolved
-	loaded.Tool.Outcome = ToolOutcomeConfirmed
-	loaded.Tool.Result = &HistoryMessageRef{WorkspaceID: "project-a", SessionID: "thread-1", MessageID: "tool-result-1", Digest: testDigestA}
+	loaded.ToolBatch.Calls[0].Outcome = ToolOutcomeConfirmed
+	loaded.ToolBatch.Calls[0].Result = &HistoryMessageRef{WorkspaceID: "project-a", SessionID: "thread-1", MessageID: "tool-result-1", Digest: testDigestA}
 	loaded.LastMessageID = "tool-result-1"
 	loaded, err = reopened.Update(ctx, loaded, loaded.Revision)
 	if err != nil {
@@ -116,7 +115,7 @@ func TestFileStore_RestartRoundTripAndRecoverableChildFlow(t *testing.T) {
 	}
 	loaded.Phase = PhaseProviderPending
 	loaded.Iteration = 1
-	loaded.Tool = nil
+	loaded.ToolBatch = nil
 	loaded, err = reopened.Update(ctx, loaded, loaded.Revision)
 	if err != nil {
 		t.Fatal(err)
@@ -260,23 +259,22 @@ func TestFileStore_RejectsUnsafeTransitionAndUncertainMutationCanOnlyInterrupt(t
 		t.Fatal(err)
 	}
 	record.Phase = PhaseToolPending
-	record.Tool = &ToolCheckpoint{
-		InvocationID: "call-1", Name: "write_file", ArgsDigest: testDigestB,
+	record.ToolBatch = &ToolBatchCheckpoint{
 		Assistant: HistoryMessageRef{WorkspaceID: "project-a", SessionID: "thread-1", MessageID: "assistant-1", Digest: testDigestC},
-		Outcome:   ToolOutcomeRequested,
+		Calls:     []ToolCheckpoint{{InvocationID: "call-1", Name: "write_file", ArgsDigest: testDigestB, Outcome: ToolOutcomeRequested}},
 	}
 	record, err = store.Update(ctx, record, record.Revision)
 	if err != nil {
 		t.Fatal(err)
 	}
 	record.Phase = PhaseInterrupted
-	record.Tool.Outcome = ToolOutcomeUncertain
+	record.ToolBatch.Calls[0].Outcome = ToolOutcomeUncertain
 	record.FailureReason = "write_file outcome was not confirmed"
 	record, err = store.Update(ctx, record, record.Revision)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if record.CompletedAt == nil || record.Tool.Outcome != ToolOutcomeUncertain {
+	if record.CompletedAt == nil || record.ToolBatch.Calls[0].Outcome != ToolOutcomeUncertain {
 		t.Fatalf("uncertain mutation was not terminal: %+v", record)
 	}
 	record.Phase = PhaseProviderPending
@@ -298,35 +296,34 @@ func TestFileStore_ExternalChildIdentitySurvivesFailureAndCannotBeReplaced(t *te
 		t.Fatal(err)
 	}
 	record.Phase = PhaseToolPending
-	record.Tool = &ToolCheckpoint{
-		InvocationID: "call-1", Name: "spawn_subagent", ArgsDigest: testDigestB,
+	record.ToolBatch = &ToolBatchCheckpoint{
 		Assistant: HistoryMessageRef{WorkspaceID: "project-a", SessionID: "thread-1", MessageID: "assistant-1", Digest: testDigestC},
-		Outcome:   ToolOutcomeRequested,
+		Calls:     []ToolCheckpoint{{InvocationID: "call-1", Name: "spawn_subagent", ArgsDigest: testDigestB, Outcome: ToolOutcomeRequested}},
 	}
 	record, err = store.Update(ctx, record, record.Revision)
 	if err != nil {
 		t.Fatal(err)
 	}
 	record.Phase = PhaseWaitingExternalChild
-	record.Tool.Outcome = ToolOutcomeAdmitted
+	record.ToolBatch.Calls[0].Outcome = ToolOutcomeAdmitted
 	external, err := NewExternalChildRef("task-child", "execution-child", "thread-child", []byte(`{"schema":"child.v1"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	record.Tool.External = &external
+	record.ToolBatch.Calls[0].External = &external
 	record, err = store.Update(ctx, record, record.Revision)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	changed := cloneRecord(record)
-	changed.Tool.External.TaskID = "different-child"
+	changed.ToolBatch.Calls[0].External.TaskID = "different-child"
 	if _, err := store.Update(ctx, changed, changed.Revision); !errors.Is(err, ErrInvalidTransition) {
 		t.Fatalf("changed child identity error = %v", err)
 	}
 	dropped := cloneRecord(record)
 	dropped.Phase = PhaseFailed
-	dropped.Tool = nil
+	dropped.ToolBatch = nil
 	dropped.FailureReason = "child failed"
 	if _, err := store.Update(ctx, dropped, dropped.Revision); !errors.Is(err, ErrInvalidTransition) {
 		t.Fatalf("dropped child checkpoint error = %v", err)
@@ -338,7 +335,7 @@ func TestFileStore_ExternalChildIdentitySurvivesFailureAndCannotBeReplaced(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	if record.Tool == nil || record.Tool.External == nil || record.Tool.External.TaskID != "task-child" || record.CompletedAt == nil {
+	if record.ToolBatch == nil || record.ToolBatch.Calls[0].External == nil || record.ToolBatch.Calls[0].External.TaskID != "task-child" || record.CompletedAt == nil {
 		t.Fatalf("terminal child failure lost identity: %+v", record)
 	}
 }
@@ -356,35 +353,80 @@ func TestFileStore_ConfirmedToolCanAdvanceToAnotherToolWithoutLosingSafety(t *te
 		t.Fatal(err)
 	}
 	record.Phase = PhaseToolPending
-	record.Tool = &ToolCheckpoint{
-		InvocationID: "call-1", Name: "read_file", ArgsDigest: testDigestA,
+	record.ToolBatch = &ToolBatchCheckpoint{
 		Assistant: HistoryMessageRef{WorkspaceID: "project-a", SessionID: "thread-1", MessageID: "assistant-1", Digest: testDigestB},
-		Outcome:   ToolOutcomeRequested,
+		Calls:     []ToolCheckpoint{{InvocationID: "call-1", Name: "read_file", ArgsDigest: testDigestA, Outcome: ToolOutcomeRequested}},
 	}
 	record, err = store.Update(ctx, record, record.Revision)
 	if err != nil {
 		t.Fatal(err)
 	}
 	record.Phase = PhaseProviderPending
-	record.Tool.Outcome = ToolOutcomeConfirmed
-	record.Tool.Result = &HistoryMessageRef{WorkspaceID: "project-a", SessionID: "thread-1", MessageID: "call-1-result", Digest: testDigestC}
+	record.ToolBatch.Calls[0].Outcome = ToolOutcomeConfirmed
+	record.ToolBatch.Calls[0].Result = &HistoryMessageRef{WorkspaceID: "project-a", SessionID: "thread-1", MessageID: "call-1-result", Digest: testDigestC}
 	record.LastMessageID = "call-1-result"
 	record, err = store.Update(ctx, record, record.Revision)
 	if err != nil {
 		t.Fatal(err)
 	}
 	record.Phase = PhaseToolPending
-	record.Tool = &ToolCheckpoint{
-		InvocationID: "call-2", Name: "read_file", ArgsDigest: testDigestB,
+	record.ToolBatch = &ToolBatchCheckpoint{
 		Assistant: HistoryMessageRef{WorkspaceID: "project-a", SessionID: "thread-1", MessageID: "assistant-1", Digest: testDigestB},
-		Outcome:   ToolOutcomeRequested,
+		Calls:     []ToolCheckpoint{{InvocationID: "call-2", Name: "read_file", ArgsDigest: testDigestB, Outcome: ToolOutcomeRequested}},
 	}
 	record, err = store.Update(ctx, record, record.Revision)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if record.Tool.InvocationID != "call-2" || record.Phase != PhaseToolPending {
+	if record.ToolBatch.Calls[0].InvocationID != "call-2" || record.Phase != PhaseToolPending {
 		t.Fatalf("next tool checkpoint = %+v", record)
+	}
+}
+
+func TestFileStore_SourceOrderedBatchConfirmsOneResultAtATime(t *testing.T) {
+	store, _ := newTestStore(t)
+	ctx := context.Background()
+	record, err := store.Create(ctx, preparedRecord("project-a", "thread-1", "task-batch", "owner"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	record.Phase = PhaseProviderPending
+	record, err = store.Update(ctx, record, record.Revision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record.Phase = PhaseToolPending
+	record.ToolBatch = &ToolBatchCheckpoint{
+		Assistant: HistoryMessageRef{WorkspaceID: "project-a", SessionID: "thread-1", MessageID: "assistant-batch", Digest: testDigestA},
+		Calls: []ToolCheckpoint{
+			{InvocationID: "call-a", Name: "read_file", ArgsDigest: testDigestB, Outcome: ToolOutcomeRequested},
+			{InvocationID: "call-b", Name: "memory_get", ArgsDigest: testDigestC, Outcome: ToolOutcomeRequested},
+		},
+	}
+	record, err = store.Update(ctx, record, record.Revision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record.ToolBatch.Calls[0].Outcome = ToolOutcomeConfirmed
+	record.ToolBatch.Calls[0].Result = &HistoryMessageRef{WorkspaceID: "project-a", SessionID: "thread-1", MessageID: "call-a-result", Digest: testDigestA}
+	record.LastMessageID = "call-a-result"
+	record, err = store.Update(ctx, record, record.Revision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.Phase != PhaseToolPending || record.ToolBatch.Calls[1].Outcome != ToolOutcomeRequested {
+		t.Fatalf("partially confirmed batch = %+v", record)
+	}
+	record.Phase = PhaseProviderPending
+	record.ToolBatch.Calls[1].Outcome = ToolOutcomeConfirmed
+	record.ToolBatch.Calls[1].Result = &HistoryMessageRef{WorkspaceID: "project-a", SessionID: "thread-1", MessageID: "call-b-result", Digest: testDigestB}
+	record.LastMessageID = "call-b-result"
+	record, err = store.Update(ctx, record, record.Revision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.Phase != PhaseProviderPending || !toolBatchAll(record.ToolBatch, ToolOutcomeConfirmed) {
+		t.Fatalf("fully confirmed batch = %+v", record)
 	}
 }
 
