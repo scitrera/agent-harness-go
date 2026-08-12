@@ -244,7 +244,19 @@ func (c *Channel) invokeClientToolWithAccess(
 				return tools.Result{}, fmt.Errorf("aether: authorize cross-host client tool call: %w", authErr)
 			}
 		}
-		sendErr = c.sendAuthorizedToolMessage(topic, payload, authorization)
+		if crossHost {
+			scope, scopeErr := workspacepkg.NewExecutionScope(binding, policy)
+			if scopeErr != nil {
+				return tools.Result{}, fmt.Errorf("aether: bind cross-host client tool call: %w", scopeErr)
+			}
+			checkedAccess, accessErr := ExecutionBindingAccessRequest(scope, req.CallID)
+			if accessErr != nil {
+				return tools.Result{}, fmt.Errorf("aether: check cross-host client tool call: %w", accessErr)
+			}
+			sendErr = c.sendCheckedToolMessage(topic, payload, authorization, checkedAccess)
+		} else {
+			sendErr = c.sendAuthorizedToolMessage(topic, payload, authorization)
+		}
 	} else {
 		sendErr = c.sendToolMessage(topic, payload)
 	}
@@ -253,7 +265,8 @@ func (c *Channel) invokeClientToolWithAccess(
 	}
 	select {
 	case <-ctx.Done():
-		c.sendClientToolCancellation(topic, authorization, req, ctx.Err())
+		scope, _ := workspacepkg.NewExecutionScope(binding, policy)
+		c.sendClientToolCancellation(topic, authorization, scope, crossHost, req, ctx.Err())
 		return tools.Result{}, ctx.Err()
 	case received := <-response:
 		if received.source != binding.ToolHostID {
@@ -268,7 +281,7 @@ func (c *Channel) invokeClientToolWithAccess(
 			Payload: received.body.Output,
 			IsError: received.body.IsError,
 		}
-		if raw := received.body.Meta[toolResultMetadataKey]; len(raw) > 0 {
+		if raw := received.body.Meta[ToolResultMetadataKey]; len(raw) > 0 {
 			_ = json.Unmarshal(raw, &result.Metadata)
 		}
 		if received.body.Error != nil {
@@ -281,6 +294,8 @@ func (c *Channel) invokeClientToolWithAccess(
 func (c *Channel) sendClientToolCancellation(
 	topic string,
 	authorization *pb.AuthorizationContext,
+	scope workspacepkg.ExecutionScope,
+	checked bool,
 	req tools.Request,
 	cause error,
 ) {
@@ -293,6 +308,13 @@ func (c *Channel) sendClientToolCancellation(
 	}
 	payload, err := json.Marshal(envelope)
 	if err != nil {
+		return
+	}
+	if checked {
+		access, accessErr := ExecutionBindingAccessRequest(scope, req.CallID)
+		if accessErr == nil {
+			_ = c.sendCheckedToolMessage(topic, payload, authorization, access)
+		}
 		return
 	}
 	if authorization != nil {
@@ -323,7 +345,7 @@ func (c *Channel) onToolCallMessage(_ context.Context, msg *sdk.Message) error {
 		return nil
 	}
 	var taskID string
-	if raw := body.Meta[toolTaskIDMetaKey]; len(raw) > 0 {
+	if raw := body.Meta[ToolTaskIDMetaKey]; len(raw) > 0 {
 		_ = json.Unmarshal(raw, &taskID)
 	}
 	if taskID == "" {

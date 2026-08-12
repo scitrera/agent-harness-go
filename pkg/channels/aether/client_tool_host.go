@@ -14,8 +14,8 @@ import (
 	workspacepkg "github.com/scitrera/agent-harness-go/pkg/workspace"
 )
 
-const toolResultMetadataKey = "scitrera.result_metadata"
-const toolTaskIDMetaKey = "scitrera.tool_task_id"
+const ToolResultMetadataKey = "scitrera.result_metadata"
+const ToolTaskIDMetaKey = "scitrera.tool_task_id"
 
 // ClientToolHostConfig configures a frontend that owns local workspace tools.
 type ClientToolHostConfig struct {
@@ -53,6 +53,9 @@ type activeClientToolCall struct {
 	cancel     context.CancelFunc
 	address    spec.MessageAddress
 	onBehalfOf workspacepkg.Principal
+	scope      workspacepkg.ExecutionScope
+	checked    bool
+	accessErr  error
 }
 
 // ClientToolAccessRequest carries both the logical binding and the identities
@@ -190,14 +193,14 @@ func toolResultBody(envelope spec.ToolInvokeEnvelope, result tools.Result, invok
 		body.Error = &spec.ToolError{Type: errorType, Message: invokeErr.Error()}
 	}
 	if metadata, err := json.Marshal(result.Metadata); err == nil && string(metadata) != "{}" {
-		body.Meta = map[string]json.RawMessage{toolResultMetadataKey: metadata}
+		body.Meta = map[string]json.RawMessage{ToolResultMetadataKey: metadata}
 	}
 	if envelope.Addr.TaskID != "" {
 		if body.Meta == nil {
 			body.Meta = map[string]json.RawMessage{}
 		}
 		if taskID, err := json.Marshal(envelope.Addr.TaskID); err == nil {
-			body.Meta[toolTaskIDMetaKey] = taskID
+			body.Meta[ToolTaskIDMetaKey] = taskID
 		}
 	}
 	return body
@@ -235,13 +238,27 @@ func (c *Client) handleToolCall(ctx context.Context, msg *sdk.Message) {
 	if err := json.Unmarshal(msg.Payload, &envelope); err != nil || envelope.CallID == "" {
 		return
 	}
+	c.mu.Lock()
+	host := c.toolHost
+	c.mu.Unlock()
+	var scope workspacepkg.ExecutionScope
+	var accessErr error
+	checked := host != nil && host.accessAuthorizer != nil
+	if checked {
+		scope, accessErr = toolEnvelopeExecutionScope(envelope)
+		if accessErr == nil {
+			accessErr = ValidateExecutionBindingAccessReceipt(
+				msg.AccessReceipt, msg.OnBehalfSubject, scope, envelope.CallID, c.ToolHostID(), time.Now(),
+			)
+		}
+	}
 	key := clientToolKey(msg.SourceTopic, envelope.Addr, envelope.CallID)
 	callCtx, cancel := context.WithCancel(ctx)
 	active := &activeClientToolCall{
 		cancel: cancel, address: envelope.Addr, onBehalfOf: toolMessagePrincipal(msg),
+		scope: scope, checked: checked, accessErr: accessErr,
 	}
 	c.mu.Lock()
-	host := c.toolHost
 	if _, exists := c.activeToolCalls[key]; exists {
 		c.mu.Unlock()
 		cancel()
@@ -270,7 +287,9 @@ func (c *Client) executeClientToolCall(
 	}()
 	var result tools.Result
 	var invokeErr error
-	if host == nil {
+	if active.accessErr != nil {
+		invokeErr = fmt.Errorf("client tool access denied: %w", active.accessErr)
+	} else if host == nil {
 		invokeErr = fmt.Errorf("client workspace tool host is not configured")
 	} else {
 		access := ClientToolAccessRequest{AgentTopic: msg.SourceTopic, OnBehalfOf: active.onBehalfOf}
@@ -294,6 +313,14 @@ func (c *Client) cancelClientToolCall(msg *sdk.Message, envelope spec.ToolCancel
 	if active == nil || !sameToolCallAddress(active.address, envelope.Addr) || active.onBehalfOf != onBehalfOf {
 		c.mu.Unlock()
 		return
+	}
+	if active.checked {
+		if err := ValidateExecutionBindingAccessReceipt(
+			msg.AccessReceipt, msg.OnBehalfSubject, active.scope, envelope.CallID, c.ToolHostID(), time.Now(),
+		); err != nil {
+			c.mu.Unlock()
+			return
+		}
 	}
 	c.mu.Unlock()
 	active.cancel()

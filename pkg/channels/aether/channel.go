@@ -168,6 +168,7 @@ type Channel struct {
 	sendMessage               func(topic string, payload []byte) error
 	sendToolMessage           func(topic string, payload []byte) error
 	sendAuthorizedToolMessage func(topic string, payload []byte, authorization *pb.AuthorizationContext) error
+	sendCheckedToolMessage    func(topic string, payload []byte, authorization *pb.AuthorizationContext, access *pb.ResourceAccessRequest) error
 }
 
 type sessionSubscriber struct {
@@ -247,6 +248,12 @@ func New(cfg Config) (*Channel, error) {
 	c.sendAuthorizedToolMessage = func(topic string, payload []byte, authorization *pb.AuthorizationContext) error {
 		return client.SendWithOptions(sdk.SendMessageOptions{
 			TargetTopic: topic, Payload: payload, MessageType: sdk.MessageTypeToolCall, Authorization: authorization,
+		})
+	}
+	c.sendCheckedToolMessage = func(topic string, payload []byte, authorization *pb.AuthorizationContext, access *pb.ResourceAccessRequest) error {
+		return client.SendWithOptions(sdk.SendMessageOptions{
+			TargetTopic: topic, Payload: payload, MessageType: sdk.MessageTypeToolCall,
+			Authorization: authorization, CheckedAccess: access,
 		})
 	}
 	client.OnMessage(c.onMessage)

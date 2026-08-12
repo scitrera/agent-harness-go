@@ -25,6 +25,14 @@ var workspaceToolNames = map[string]struct{}{
 	"python":       {},
 }
 
+// IsWorkspaceToolName reports whether a built-in tool must execute against the
+// exact workspace view selected for the turn. Distributions use this when they
+// install transport-specific remote execution delegates.
+func IsWorkspaceToolName(name string) bool {
+	_, ok := workspaceToolNames[name]
+	return ok
+}
+
 type boundWorkspaceToolHostConfig struct {
 	WorkspaceID   string
 	WorkspaceRoot string

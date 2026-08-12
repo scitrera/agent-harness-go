@@ -168,9 +168,13 @@ func TestReverseToolCancellationStopsExactClientExecution(t *testing.T) {
 	worker.sendToolMessage = func(string, []byte) error {
 		return errors.New("cross-host tool traffic bypassed its OBO authorization")
 	}
-	worker.sendAuthorizedToolMessage = func(topic string, payload []byte, got *pb.AuthorizationContext) error {
+	worker.sendCheckedToolMessage = func(topic string, payload []byte, got *pb.AuthorizationContext, checked *pb.ResourceAccessRequest) error {
 		if topic != client.ToolHostID() || got != authorization {
 			return fmt.Errorf("authorized tool send topic=%q auth=%p", topic, got)
+		}
+		if checked.GetResourceType() != workspacepkg.ExecutionViewResourceType ||
+			checked.GetCorrelationId() != "call-cancel" {
+			return fmt.Errorf("unexpected checked tool access: %+v", checked)
 		}
 		var header struct {
 			Type string `json:"type"`
@@ -633,6 +637,96 @@ func TestClientToolHostPolicyReceivesCallerAndOBOSubject(t *testing.T) {
 	}
 }
 
+func TestEnterpriseClientToolHostRequiresExactCheckedViewReceipt(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "identity.txt"), []byte("client"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	client, _ := newTestClient(t)
+	authorizer := &recordingClientAccessAuthorizer{}
+	host, err := NewClientToolHost(context.Background(), ClientToolHostConfig{
+		WorkspaceID: "shared", WorkspaceRoot: root, StateDir: t.TempDir(),
+		ToolHostID: client.ToolHostID(), AccessAuthorizer: authorizer,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.SetToolHost(host)
+	binding, err := host.ExecutionBindingForDirectory(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope, err := workspacepkg.NewExecutionScope(binding, workspacepkg.ExecutionViewPolicy{
+		WriteAccess: workspacepkg.ViewWriteAccessReadOnly,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bindingJSON, _ := json.Marshal(binding)
+	policyJSON, _ := workspacepkg.EncodeExecutionViewPolicy(scope.Policy)
+	addr := spec.MessageAddress{WorkspaceID: "shared", ThreadID: "thread-1", TaskID: "task-checked"}
+	makePayload := func(callID string) []byte {
+		envelope := spec.ToolInvokeEnvelope{
+			SchemaVersion: spec.ToolsSchemaVersion, CallID: callID, Name: "read_file", Addr: addr,
+			Args: map[string]json.RawMessage{"path": json.RawMessage(`"identity.txt"`)},
+			Meta: map[string]json.RawMessage{
+				spec.ExecutionBindingMetaKey: bindingJSON, workspacepkg.ExecutionViewPolicyMetaKey: policyJSON,
+			},
+		}
+		payload, marshalErr := json.Marshal(envelope)
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		return payload
+	}
+	results := make(chan spec.ToolResultPartBody, 2)
+	client.sendToolMessage = func(_ string, payload []byte) error {
+		var body spec.ToolResultPartBody
+		if err := json.Unmarshal(payload, &body); err != nil {
+			return err
+		}
+		results <- body
+		return nil
+	}
+	subject := &pb.PrincipalRef{PrincipalType: "user", PrincipalId: "alice"}
+	client.handleToolCall(context.Background(), &sdk.Message{
+		SourceTopic: "ag::shared::sahara::one", Payload: makePayload("call-denied"), OnBehalfSubject: subject,
+	})
+	select {
+	case body := <-results:
+		if body.Error == nil || !strings.Contains(body.Error.Message, "gateway allow receipt is required") {
+			t.Fatalf("missing-receipt result = %+v", body)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("missing-receipt denial was not returned")
+	}
+
+	access, err := ExecutionBindingAccessRequest(scope, "call-allowed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt := &pb.AccessDecisionReceipt{
+		Allowed: true, Decision: "ALLOW", Request: access,
+		DeliveryTarget: client.ToolHostID(), ExpiresAtMs: time.Now().Add(time.Minute).UnixMilli(),
+		AuthorityMode: "on_behalf_of", GrantId: "grant-task", Subject: subject,
+	}
+	client.handleToolCall(context.Background(), &sdk.Message{
+		SourceTopic: "ag::shared::sahara::one", Payload: makePayload("call-allowed"),
+		OnBehalfSubject: subject, AccessReceipt: receipt,
+	})
+	select {
+	case body := <-results:
+		if body.Error != nil || body.IsError {
+			t.Fatalf("checked invocation result = %+v", body)
+		}
+		if authorizer.request.Binding.ViewID != binding.ViewID || authorizer.request.OnBehalfOf.ID != "alice" {
+			t.Fatalf("host policy request = %+v", authorizer.request)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("checked invocation result was not returned")
+	}
+}
+
 type recordingToolAuthorizationProvider struct {
 	access workspacepkg.ExecutionBindingAuthorizationRequest
 	tool   string
@@ -670,9 +764,14 @@ func TestReverseToolCallCarriesProviderAuthorization(t *testing.T) {
 	}
 	provider := &recordingToolAuthorizationProvider{auth: auth}
 	worker.SetToolCallAuthorizationProvider(provider)
-	worker.sendAuthorizedToolMessage = func(topic string, payload []byte, got *pb.AuthorizationContext) error {
+	worker.sendCheckedToolMessage = func(topic string, payload []byte, got *pb.AuthorizationContext, checked *pb.ResourceAccessRequest) error {
 		if topic != binding.ToolHostID || got != auth {
 			t.Fatalf("authorized send topic=%q auth=%#v", topic, got)
+		}
+		if checked.GetResourceType() != workspacepkg.ExecutionViewResourceType ||
+			checked.GetOperation() != workspacepkg.ExecutionViewBindOperation ||
+			checked.GetCorrelationId() != "call-1" {
+			t.Fatalf("checked access = %+v", checked)
 		}
 		var envelope spec.ToolInvokeEnvelope
 		if err := json.Unmarshal(payload, &envelope); err != nil {
@@ -681,7 +780,7 @@ func TestReverseToolCallCarriesProviderAuthorization(t *testing.T) {
 		body := spec.ToolResultPartBody{
 			Type: string(spec.PartToolResult), CallID: envelope.CallID, Name: envelope.Name,
 			Output: json.RawMessage(`{"ok":true}`),
-			Meta:   map[string]json.RawMessage{toolTaskIDMetaKey: json.RawMessage(`"task-1"`)},
+			Meta:   map[string]json.RawMessage{ToolTaskIDMetaKey: json.RawMessage(`"task-1"`)},
 		}
 		response, _ := json.Marshal(body)
 		return worker.onToolCallMessage(context.Background(), &sdk.Message{
