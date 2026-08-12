@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	pb "github.com/scitrera/aether/api/proto"
 	"github.com/scitrera/agent-harness-go/pkg/catalog"
 	spec "github.com/scitrera/ecosystem-messaging-spec/go"
 )
@@ -42,7 +43,11 @@ func TestServicePreservesContextAndReportsSnapshotWideBareNameAmbiguity(t *testi
 	query := spec.ToolCatalogQuery{
 		SchemaVersion: spec.ToolCatalogSchemaVersion, Context: catalogContext, Limit: 1,
 	}
-	raw, err := service.HandleJSON(ctx, Caller{SourceTopic: "sv::agent-harness::worker-1", SubjectID: "alice"}, MethodQuery, mustJSON(t, query))
+	caller := Caller{
+		SourceTopic: "sv::agent-harness::worker-1", SubjectID: "alice",
+		ForwardedAuthorization: testForwardedAuthorization("alice", "root-1", "sv::tool-catalog::catalog-1"),
+	}
+	raw, err := service.HandleJSON(ctx, caller, MethodQuery, mustJSON(t, query))
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}
@@ -61,7 +66,12 @@ func TestServicePreservesContextAndReportsSnapshotWideBareNameAmbiguity(t *testi
 	}
 
 	query.Cursor = page.NextCursor
-	raw, err = service.HandleJSON(ctx, Caller{SubjectID: "alice"}, MethodQuery, mustJSON(t, query))
+	otherLineage := caller
+	otherLineage.ForwardedAuthorization = testForwardedAuthorization("alice", "root-2", "sv::tool-catalog::catalog-1")
+	if _, err := service.HandleJSON(ctx, otherLineage, MethodQuery, mustJSON(t, query)); err == nil || !strings.Contains(err.Error(), "cursor") {
+		t.Fatalf("cursor replay under another root grant error = %v", err)
+	}
+	raw, err = service.HandleJSON(ctx, caller, MethodQuery, mustJSON(t, query))
 	if err != nil {
 		t.Fatalf("query continuation: %v", err)
 	}
@@ -92,6 +102,9 @@ func TestServiceRejectsUntrustedMutationAndUnboundQuery(t *testing.T) {
 	if _, err := service.HandleJSON(context.Background(), Caller{}, MethodQuery, mustJSON(t, query)); err == nil || !strings.Contains(err.Error(), "OBO subject") {
 		t.Fatalf("unbound query error = %v", err)
 	}
+	if _, err := service.HandleJSON(context.Background(), Caller{SubjectID: "alice"}, MethodQuery, mustJSON(t, query)); err == nil || !strings.Contains(err.Error(), "forwarded authorization") {
+		t.Fatalf("query without forwarded authority error = %v", err)
+	}
 }
 
 func TestServiceRejectsTrailingJSONValue(t *testing.T) {
@@ -108,10 +121,24 @@ func TestServiceRejectsTrailingJSONValue(t *testing.T) {
 	}
 	payload := append(mustJSON(t, query), []byte(` {}`)...)
 	_, err = service.HandleJSON(
-		context.Background(), Caller{SubjectID: "alice"}, MethodQuery, payload,
+		context.Background(), Caller{
+			SubjectID:              "alice",
+			ForwardedAuthorization: testForwardedAuthorization("alice", "root-1", "sv::tool-catalog::catalog-1"),
+		}, MethodQuery, payload,
 	)
 	if err == nil || !strings.Contains(err.Error(), "multiple JSON values") {
 		t.Fatalf("trailing JSON error = %v", err)
+	}
+}
+
+func testForwardedAuthorization(subject, rootGrantID, target string) *pb.ForwardedAuthorization {
+	return &pb.ForwardedAuthorization{
+		Authorization: &pb.AuthorizationContext{
+			AuthorityMode: "on_behalf_of",
+			Subject:       &pb.PrincipalRef{PrincipalType: "user", PrincipalId: subject},
+			GrantId:       "child-" + rootGrantID,
+		},
+		RootGrantId: rootGrantID, ExpiresAtMs: time.Now().Add(time.Minute).UnixMilli(), DeliveryTarget: target,
 	}
 }
 

@@ -33,7 +33,7 @@ func run() error {
 	address := flag.String("aether", envOr("AETHER_ADDR", envOr("AETHER_GATEWAY", "127.0.0.1:50051")), "Aether gateway host:port")
 	implementation := flag.String("implementation", envOr("TOOL_CATALOG_IMPLEMENTATION", "tool-catalog"), "Aether service implementation")
 	specifier := flag.String("specifier", envOr("AETHER_SERVICE_SPECIFIER", hostname()), "Aether service specifier")
-	policyEpoch := flag.String("policy-epoch", envOr("TOOL_CATALOG_POLICY_EPOCH", "transition-v1"), "authorization policy epoch bound into snapshots")
+	policyEpoch := flag.String("policy-epoch", envOr("TOOL_CATALOG_POLICY_EPOCH", "aether-entry-v1"), "authorization policy epoch bound into snapshots")
 	mutationSources := flag.String("mutation-source-prefixes", envOr("TOOL_CATALOG_MUTATION_SOURCE_PREFIXES", "sv::platform-bridge::"), "comma-separated trusted mutation source prefixes")
 	keyValue := flag.String("cursor-key", os.Getenv("TOOL_CATALOG_CURSOR_KEY"), "stable cursor HMAC key (raw or base64, at least 32 bytes)")
 	flag.Parse()
@@ -64,14 +64,22 @@ func run() error {
 	}
 	defer client.Close()
 
-	pool := &workspacePool{kv: client.KV(), cursorKey: cursorKey, services: make(map[string]*catalog.LiveService)}
+	authorizer, err := catalogrpc.NewAetherEntryAuthorizer(client)
+	if err != nil {
+		return err
+	}
+	pool := &workspacePool{
+		kv: client.KV(), cursorKey: cursorKey, authorizer: authorizer,
+		services: make(map[string]*catalog.LiveService),
+	}
 	service, err := catalogrpc.NewService(pool, catalogrpc.ServiceOptions{
 		MutationSourcePrefixes: splitCSV(*mutationSources), PolicyEpoch: strings.TrimSpace(*policyEpoch),
 	})
 	if err != nil {
 		return err
 	}
-	handler, err := catalogrpc.NewAetherHandler(service, client, strings.TrimSpace(*implementation))
+	serviceTopic := fmt.Sprintf("sv::%s::%s", strings.TrimSpace(*implementation), strings.TrimSpace(*specifier))
+	handler, err := catalogrpc.NewAetherHandler(service, client, serviceTopic)
 	if err != nil {
 		return err
 	}
@@ -90,10 +98,11 @@ func run() error {
 }
 
 type workspacePool struct {
-	mu        sync.Mutex
-	kv        *sdk.KV
-	cursorKey []byte
-	services  map[string]*catalog.LiveService
+	mu         sync.Mutex
+	kv         *sdk.KV
+	cursorKey  []byte
+	authorizer catalog.EntryAuthorizer
+	services   map[string]*catalog.LiveService
 }
 
 func (p *workspacePool) ResolveCatalogWorkspace(_ context.Context, workspace string) (*catalog.LiveService, error) {
@@ -109,10 +118,7 @@ func (p *workspacePool) ResolveCatalogWorkspace(_ context.Context, workspace str
 		return nil, err
 	}
 	service, err := catalog.NewLiveService(backend, catalog.LiveServiceOptions{
-		// Transitional only: the RPC boundary requires an authenticated OBO
-		// subject and binds it into cursors. The next enterprise slice replaces
-		// this with bounded Aether entry checks for query and describe.
-		Authorizer: catalog.AllowAllEntryAuthorizer{}, CursorKey: p.cursorKey,
+		Authorizer: p.authorizer, CursorKey: p.cursorKey,
 		MaxLease: 30 * time.Minute,
 	})
 	if err != nil {

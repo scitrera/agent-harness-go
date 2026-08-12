@@ -18,7 +18,7 @@ func TestAetherHandlerUsesGatewayIdentityAndCorrelatesRuntimeReply(t *testing.T)
 		t.Fatalf("NewService: %v", err)
 	}
 	sender := &recordingSender{}
-	handler, err := NewAetherHandler(service, sender, "tool-catalog")
+	handler, err := NewAetherHandler(service, sender, "sv::tool-catalog::catalog-1")
 	if err != nil {
 		t.Fatalf("NewAetherHandler: %v", err)
 	}
@@ -35,7 +35,8 @@ func TestAetherHandlerUsesGatewayIdentityAndCorrelatesRuntimeReply(t *testing.T)
 	}
 	if err := handler.Handle(context.Background(), &sdk.Message{
 		SourceTopic: "sv::agent-harness::worker-1", Payload: mustJSON(t, request),
-		OnBehalfSubject: &pb.PrincipalRef{PrincipalType: "user", PrincipalId: "alice"},
+		OnBehalfSubject:        &pb.PrincipalRef{PrincipalType: "user", PrincipalId: "alice"},
+		ForwardedAuthorization: testForwardedAuthorization("alice", "root-1", "sv::tool-catalog::catalog-1"),
 	}); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
@@ -51,6 +52,41 @@ func TestAetherHandlerUsesGatewayIdentityAndCorrelatesRuntimeReply(t *testing.T)
 	}
 	if _, ok := response.Arguments["result"]; !ok {
 		t.Fatalf("response arguments = %s", sender.options.Payload)
+	}
+}
+
+func TestAetherHandlerRejectsForwardedAuthorizationForAnotherTarget(t *testing.T) {
+	service, err := NewService(newTestResolver(t), ServiceOptions{
+		MutationSourcePrefixes: []string{"sv::platform-bridge::"}, PolicyEpoch: "policy-1",
+	})
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	sender := &recordingSender{}
+	handler, err := NewAetherHandler(service, sender, "sv::tool-catalog::catalog-1")
+	if err != nil {
+		t.Fatalf("NewAetherHandler: %v", err)
+	}
+	request := runtimeEnvelope{
+		Arguments: map[string]json.RawMessage{MethodQuery: mustJSON(t, spec.ToolCatalogQuery{
+			SchemaVersion: spec.ToolCatalogSchemaVersion,
+			Context:       spec.ToolCatalogContext{WorkspaceID: "project-a"}, Limit: 10,
+		})},
+		RequestID: "request-2",
+	}
+	if err := handler.Handle(context.Background(), &sdk.Message{
+		SourceTopic: "sv::agent-harness::worker-1", Payload: mustJSON(t, request),
+		OnBehalfSubject:        &pb.PrincipalRef{PrincipalType: "user", PrincipalId: "alice"},
+		ForwardedAuthorization: testForwardedAuthorization("alice", "root-1", "sv::tool-catalog::catalog-2"),
+	}); err != nil {
+		t.Fatalf("Handle should return an RPC error reply, got %v", err)
+	}
+	var response runtimeEnvelope
+	if err := json.Unmarshal(sender.options.Payload, &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if _, ok := response.Arguments["error"]; !ok {
+		t.Fatalf("expected target-bound authority error, got %s", sender.options.Payload)
 	}
 }
 

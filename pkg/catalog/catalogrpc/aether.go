@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	sdk "github.com/scitrera/aether/sdk/go/aether"
 	"github.com/scitrera/agent-harness-go/pkg/catalog"
@@ -23,17 +24,19 @@ type AetherHandler struct {
 	service        *Service
 	sender         messageSender
 	implementation string
+	serviceTopic   string
 }
 
-func NewAetherHandler(service *Service, sender messageSender, implementation string) (*AetherHandler, error) {
+func NewAetherHandler(service *Service, sender messageSender, serviceTopic string) (*AetherHandler, error) {
 	if service == nil || sender == nil {
 		return nil, fmt.Errorf("catalogrpc: service and Aether sender are required")
 	}
-	implementation = strings.TrimSpace(implementation)
-	if implementation == "" {
-		return nil, fmt.Errorf("catalogrpc: Aether implementation is required")
+	serviceTopic = strings.TrimSpace(serviceTopic)
+	parts := strings.Split(serviceTopic, "::")
+	if len(parts) != 3 || parts[0] != "sv" || parts[1] == "" || parts[2] == "" {
+		return nil, fmt.Errorf("catalogrpc: exact Aether service topic is required")
 	}
-	return &AetherHandler{service: service, sender: sender, implementation: implementation}, nil
+	return &AetherHandler{service: service, sender: sender, implementation: parts[1], serviceTopic: serviceTopic}, nil
 }
 
 // Handle processes one gateway-authenticated Aether message. Register it via
@@ -54,8 +57,38 @@ func (h *AetherHandler) Handle(ctx context.Context, message *sdk.Message) error 
 	if message.OnBehalfSubject != nil && message.OnBehalfSubject.GetPrincipalType() == "user" {
 		caller.SubjectID = message.OnBehalfSubject.GetPrincipalId()
 	}
+	if message.ForwardedAuthorization != nil {
+		if err := h.validateForwardedAuthorization(message); err != nil {
+			return h.reply(message.SourceTopic, request, nil, err)
+		}
+		caller.ForwardedAuthorization = message.ForwardedAuthorization
+	}
 	result, callErr := h.service.HandleJSON(ctx, caller, method, payload)
 	return h.reply(message.SourceTopic, request, result, callErr)
+}
+
+func (h *AetherHandler) validateForwardedAuthorization(message *sdk.Message) error {
+	forwarded := message.ForwardedAuthorization
+	if forwarded.GetDeliveryTarget() != h.serviceTopic {
+		return fmt.Errorf("catalogrpc: forwarded authorization is bound to another service target")
+	}
+	if forwarded.GetExpiresAtMs() <= time.Now().UnixMilli() {
+		return fmt.Errorf("catalogrpc: forwarded authorization is expired")
+	}
+	if strings.TrimSpace(forwarded.GetRootGrantId()) == "" {
+		return fmt.Errorf("catalogrpc: forwarded authorization root grant is required")
+	}
+	authorization := forwarded.GetAuthorization()
+	if authorization == nil || authorization.GetAuthorityMode() != "on_behalf_of" ||
+		authorization.GetSubject() == nil || strings.TrimSpace(authorization.GetGrantId()) == "" {
+		return fmt.Errorf("catalogrpc: forwarded authorization context is invalid")
+	}
+	if message.OnBehalfSubject == nil ||
+		!strings.EqualFold(message.OnBehalfSubject.GetPrincipalType(), authorization.GetSubject().GetPrincipalType()) ||
+		message.OnBehalfSubject.GetPrincipalId() != authorization.GetSubject().GetPrincipalId() {
+		return fmt.Errorf("catalogrpc: forwarded authorization subject does not match gateway subject")
+	}
+	return nil
 }
 
 func (h *AetherHandler) reply(targetTopic string, request runtimeEnvelope, result json.RawMessage, callErr error) error {

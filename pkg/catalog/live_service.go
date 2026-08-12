@@ -56,9 +56,10 @@ type MutationBinding struct {
 // copied from catalog payloads; they bind retained snapshots and cursors to the
 // authenticated caller and current authorization epoch.
 type QueryBinding struct {
-	SubjectID   string
-	PolicyEpoch string
-	Context     spec.ToolCatalogContext
+	SubjectID          string
+	PolicyEpoch        string
+	AuthorityLineageID string
+	Context            spec.ToolCatalogContext
 }
 
 // ResolvedCatalogEntry retains the authenticated publication context beside
@@ -86,7 +87,7 @@ type ResolvedCatalogPage struct {
 // StandaloneQueryBinding supplies explicit single-user authority for the
 // dependency-free runtime while retaining the same snapshot/cursor boundary.
 func StandaloneQueryBinding(c spec.ToolCatalogContext) QueryBinding {
-	return QueryBinding{SubjectID: "standalone", PolicyEpoch: "standalone", Context: c}
+	return QueryBinding{SubjectID: "standalone", PolicyEpoch: "standalone", AuthorityLineageID: "standalone", Context: c}
 }
 
 // EntryAuthorizer independently decides discovery and describe access for one
@@ -94,6 +95,14 @@ func StandaloneQueryBinding(c spec.ToolCatalogContext) QueryBinding {
 // Aether decisions; standalone mode uses AllowAllEntryAuthorizer explicitly.
 type EntryAuthorizer interface {
 	AuthorizeCatalogEntry(ctx context.Context, action string, binding QueryBinding, entry spec.ToolCatalogEntry) (bool, error)
+}
+
+// BatchEntryAuthorizer lets distributed adapters evaluate catalog entries in
+// bounded transport batches while preserving the per-entry allow/deny result.
+// LiveService validates result cardinality and fails the whole operation on a
+// malformed or failed batch. EntryAuthorizer remains the standalone seam.
+type BatchEntryAuthorizer interface {
+	AuthorizeCatalogEntries(ctx context.Context, action string, binding QueryBinding, entries []spec.ToolCatalogEntry) ([]bool, error)
 }
 
 // EntryAuthorizerFunc adapts a function to EntryAuthorizer.
@@ -534,11 +543,11 @@ func (s *LiveService) DescribeResolved(ctx context.Context, binding QueryBinding
 		return ResolvedCatalogDescribeResult{}, catalogProtocolError(CatalogErrorAmbiguousRef, "exact tool reference resolved more than once", false)
 	}
 	entry := record.Entry
-	allowed, err := s.authorizer.AuthorizeCatalogEntry(ctx, CatalogActionDescribe, binding, entry)
+	decisions, err := s.authorizeCatalogEntries(ctx, CatalogActionDescribe, binding, []spec.ToolCatalogEntry{entry})
 	if err != nil {
 		return ResolvedCatalogDescribeResult{}, fmt.Errorf("catalog: authorize describe: %w", err)
 	}
-	if !allowed {
+	if !decisions[0] {
 		return ResolvedCatalogDescribeResult{}, unauthorized("describe access denied")
 	}
 	return ResolvedCatalogDescribeResult{
@@ -609,11 +618,11 @@ func (s *LiveService) ResolveInvocationRecord(ctx context.Context, binding Query
 	if err != nil {
 		return ResolvedCatalogEntry{}, err
 	}
-	allowed, err := s.authorizer.AuthorizeCatalogEntry(ctx, action, binding, entries[0].Entry)
+	decisions, err := s.authorizeCatalogEntries(ctx, action, binding, []spec.ToolCatalogEntry{entries[0].Entry})
 	if err != nil {
 		return ResolvedCatalogEntry{}, fmt.Errorf("catalog: authorize invocation: %w", err)
 	}
-	if !allowed {
+	if !decisions[0] {
 		return ResolvedCatalogEntry{}, unauthorized("invocation access denied")
 	}
 	return entries[0], nil
@@ -648,7 +657,7 @@ func (s *LiveService) createQuerySnapshot(ctx context.Context, binding QueryBind
 		return RetainedSnapshot{}, fmt.Errorf("catalog: invalid backend state: %w", err)
 	}
 	now := s.now().UTC()
-	records := make([]ResolvedCatalogEntry, 0)
+	candidates := make([]ResolvedCatalogEntry, 0)
 	for _, publication := range state.Publications {
 		if !publicationLiveAt(publication, now) || !contextMatches(publication.Context, query.Context) {
 			continue
@@ -666,13 +675,21 @@ func (s *LiveService) createQuerySnapshot(ctx context.Context, binding QueryBind
 			if !entryMatchesQuery(entry, query.Query) {
 				continue
 			}
-			allowed, err := s.authorizer.AuthorizeCatalogEntry(ctx, CatalogActionDiscover, binding, entry)
-			if err != nil {
-				return RetainedSnapshot{}, fmt.Errorf("catalog: authorize discovery: %w", err)
-			}
-			if allowed {
-				records = append(records, ResolvedCatalogEntry{Entry: entry, Context: publication.Context})
-			}
+			candidates = append(candidates, ResolvedCatalogEntry{Entry: entry, Context: publication.Context})
+		}
+	}
+	entries := make([]spec.ToolCatalogEntry, len(candidates))
+	for i := range candidates {
+		entries[i] = candidates[i].Entry
+	}
+	decisions, err := s.authorizeCatalogEntries(ctx, CatalogActionDiscover, binding, entries)
+	if err != nil {
+		return RetainedSnapshot{}, fmt.Errorf("catalog: authorize discovery: %w", err)
+	}
+	records := make([]ResolvedCatalogEntry, 0, len(candidates))
+	for i, allowed := range decisions {
+		if allowed {
+			records = append(records, candidates[i])
 		}
 	}
 	if err := sortAndCheckRecords(records); err != nil {
@@ -683,6 +700,31 @@ func (s *LiveService) createQuerySnapshot(ctx context.Context, binding QueryBind
 		return RetainedSnapshot{}, err
 	}
 	return s.retainSnapshot(ctx, revision, bindingDigest, queryDigest, query.Limit, records, now)
+}
+
+func (s *LiveService) authorizeCatalogEntries(ctx context.Context, action string, binding QueryBinding, entries []spec.ToolCatalogEntry) ([]bool, error) {
+	if len(entries) == 0 {
+		return []bool{}, nil
+	}
+	if batch, ok := s.authorizer.(BatchEntryAuthorizer); ok {
+		decisions, err := batch.AuthorizeCatalogEntries(ctx, action, binding, entries)
+		if err != nil {
+			return nil, err
+		}
+		if len(decisions) != len(entries) {
+			return nil, fmt.Errorf("catalog authorization returned %d decisions for %d entries", len(decisions), len(entries))
+		}
+		return decisions, nil
+	}
+	decisions := make([]bool, len(entries))
+	for i := range entries {
+		allowed, err := s.authorizer.AuthorizeCatalogEntry(ctx, action, binding, entries[i])
+		if err != nil {
+			return nil, err
+		}
+		decisions[i] = allowed
+	}
+	return decisions, nil
 }
 
 func (s *LiveService) createDescribeSnapshot(ctx context.Context, binding QueryBinding, bindingDigest string, request spec.ToolCatalogDescribeRequest) (RetainedSnapshot, error) {

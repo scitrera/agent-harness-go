@@ -11,6 +11,7 @@ import (
 	"io"
 	"strings"
 
+	pb "github.com/scitrera/aether/api/proto"
 	"github.com/scitrera/agent-harness-go/pkg/catalog"
 	spec "github.com/scitrera/ecosystem-messaging-spec/go"
 )
@@ -26,8 +27,9 @@ const (
 // Caller is gateway-authenticated transport state. SourceTopic and SubjectID
 // must never be populated from the JSON request envelope.
 type Caller struct {
-	SourceTopic string
-	SubjectID   string
+	SourceTopic            string
+	SubjectID              string
+	ForwardedAuthorization *pb.ForwardedAuthorization
 }
 
 // MutationBinding is the private JSON form of catalog.MutationBinding. The
@@ -187,7 +189,7 @@ func (s *Service) revoke(ctx context.Context, caller Caller, payload json.RawMes
 }
 
 func (s *Service) query(ctx context.Context, caller Caller, payload json.RawMessage) (catalog.ResolvedCatalogPage, error) {
-	if err := requireSubject(caller); err != nil {
+	if err := requireQueryAuthority(caller); err != nil {
 		return catalog.ResolvedCatalogPage{}, err
 	}
 	var query spec.ToolCatalogQuery
@@ -198,12 +200,16 @@ func (s *Service) query(ctx context.Context, caller Caller, payload json.RawMess
 	if err != nil {
 		return catalog.ResolvedCatalogPage{}, err
 	}
-	binding := catalog.QueryBinding{SubjectID: caller.SubjectID, PolicyEpoch: s.policyEpoch, Context: query.Context}
+	binding := catalog.QueryBinding{
+		SubjectID: caller.SubjectID, PolicyEpoch: s.policyEpoch,
+		AuthorityLineageID: caller.ForwardedAuthorization.GetRootGrantId(), Context: query.Context,
+	}
+	ctx = context.WithValue(ctx, forwardedAuthorizationContextKey{}, caller.ForwardedAuthorization)
 	return service.QueryResolved(ctx, binding, query)
 }
 
 func (s *Service) describe(ctx context.Context, caller Caller, payload json.RawMessage) (catalog.ResolvedCatalogDescribeResult, error) {
-	if err := requireSubject(caller); err != nil {
+	if err := requireQueryAuthority(caller); err != nil {
 		return catalog.ResolvedCatalogDescribeResult{}, err
 	}
 	var request spec.ToolCatalogDescribeRequest
@@ -214,7 +220,11 @@ func (s *Service) describe(ctx context.Context, caller Caller, payload json.RawM
 	if err != nil {
 		return catalog.ResolvedCatalogDescribeResult{}, err
 	}
-	binding := catalog.QueryBinding{SubjectID: caller.SubjectID, PolicyEpoch: s.policyEpoch, Context: request.Context}
+	binding := catalog.QueryBinding{
+		SubjectID: caller.SubjectID, PolicyEpoch: s.policyEpoch,
+		AuthorityLineageID: caller.ForwardedAuthorization.GetRootGrantId(), Context: request.Context,
+	}
+	ctx = context.WithValue(ctx, forwardedAuthorizationContextKey{}, caller.ForwardedAuthorization)
 	return service.DescribeResolved(ctx, binding, request)
 }
 
@@ -245,6 +255,27 @@ func (s *Service) authorizeMutationCaller(caller Caller) error {
 func requireSubject(caller Caller) error {
 	if strings.TrimSpace(caller.SubjectID) == "" || strings.TrimSpace(caller.SubjectID) != caller.SubjectID || strings.ContainsRune(caller.SubjectID, '\x00') {
 		return fmt.Errorf("catalogrpc: authenticated OBO subject is required")
+	}
+	return nil
+}
+
+type forwardedAuthorizationContextKey struct{}
+
+func requireQueryAuthority(caller Caller) error {
+	if err := requireSubject(caller); err != nil {
+		return err
+	}
+	forwarded := caller.ForwardedAuthorization
+	if forwarded == nil || forwarded.GetAuthorization() == nil ||
+		strings.TrimSpace(forwarded.GetRootGrantId()) == "" ||
+		strings.TrimSpace(forwarded.GetAuthorization().GetGrantId()) == "" {
+		return fmt.Errorf("catalogrpc: gateway-forwarded authorization is required")
+	}
+	authorization := forwarded.GetAuthorization()
+	if authorization.GetAuthorityMode() != "on_behalf_of" || authorization.GetSubject() == nil ||
+		!strings.EqualFold(authorization.GetSubject().GetPrincipalType(), "user") ||
+		authorization.GetSubject().GetPrincipalId() != caller.SubjectID {
+		return fmt.Errorf("catalogrpc: forwarded authorization subject does not match authenticated caller")
 	}
 	return nil
 }
