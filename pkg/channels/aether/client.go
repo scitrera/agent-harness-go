@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	pb "github.com/scitrera/aether/api/proto"
 	sdk "github.com/scitrera/aether/sdk/go/aether"
 	spec "github.com/scitrera/ecosystem-messaging-spec/go"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/scitrera/agent-harness-go/pkg/channel"
 	"github.com/scitrera/agent-harness-go/pkg/ids"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
+	workspacepkg "github.com/scitrera/agent-harness-go/pkg/workspace"
 )
 
 // eventBuffer bounds decoded stream events awaiting the UI. Mirrors the
@@ -98,8 +100,9 @@ type Client struct {
 
 	// sendToAgent is the egress seam, so ingress/egress are testable without a
 	// live gateway.
-	sendToAgent     func(payload []byte) error
-	sendToolMessage func(topic string, payload []byte) error
+	sendToAgent        func(payload []byte) error
+	sendCheckedToAgent func(payload []byte, access *pb.ResourceAccessRequest) error
+	sendToolMessage    func(topic string, payload []byte) error
 }
 
 type sessionAttachResponse struct {
@@ -200,6 +203,12 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	}
 	c.sendToAgent = func(payload []byte) error {
 		return user.SendToAgent(c.workspace, c.impl, c.specifier, payload)
+	}
+	c.sendCheckedToAgent = func(payload []byte, access *pb.ResourceAccessRequest) error {
+		return user.SendWithOptions(sdk.SendMessageOptions{
+			TargetTopic: c.AgentTopic(), Payload: payload,
+			MessageType: sdk.MessageTypeChat, CheckedAccess: access,
+		})
 	}
 	c.sendToolMessage = user.SendToolCallMessage
 	user.OnMessage(c.onMessage)
@@ -418,8 +427,22 @@ func (c *Client) Enqueue(ctx context.Context, in channel.Inbound) error {
 	if err != nil {
 		return fmt.Errorf("aether: encode turn: %w", err)
 	}
-	if err := c.sendToAgent(payload); err != nil {
-		return fmt.Errorf("aether: send turn: %w", err)
+	scope, err := workspacepkg.GetExecutionScope(msg)
+	if err != nil {
+		return fmt.Errorf("aether: execution scope: %w", err)
+	}
+	var sendErr error
+	if scope != nil && scope.Binding.ToolHostID != c.ToolHostID() {
+		access, accessErr := ExecutionBindingAccessRequest(*scope, msg.Addr.TaskID)
+		if accessErr != nil {
+			return fmt.Errorf("aether: shared execution scope: %w", accessErr)
+		}
+		sendErr = c.sendCheckedToAgent(payload, access)
+	} else {
+		sendErr = c.sendToAgent(payload)
+	}
+	if sendErr != nil {
+		return fmt.Errorf("aether: send turn: %w", sendErr)
 	}
 	c.recordProjection(ctx, msg)
 	return nil

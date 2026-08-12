@@ -363,11 +363,17 @@ func (c *Channel) onMessage(ctx context.Context, msg *sdk.Message) error {
 		// carry traffic we are not the intended reader of.
 		return nil
 	}
-	binding, bindingErr := spec.GetExecutionBinding(chatMsg)
+	scope, bindingErr := workspacepkg.GetExecutionScope(chatMsg)
 	if bindingErr != nil {
 		slog.WarnContext(ctx, "aether: invalid execution binding", slog.Any("err", bindingErr))
 		c.rejectTurn(msg.SourceTopic, chatMsg, "invalid workspace execution binding")
 		return nil
+	}
+	var binding *spec.ExecutionBinding
+	var viewPolicy workspacepkg.ExecutionViewPolicy
+	if scope != nil {
+		binding = &scope.Binding
+		viewPolicy = scope.Policy
 	}
 	var workspaceResolveErr error
 	if c.workspaceResolver != nil {
@@ -430,10 +436,8 @@ func (c *Channel) onMessage(ctx context.Context, msg *sdk.Message) error {
 	var access *workspacepkg.ExecutionBindingAuthorizationRequest
 	if binding != nil {
 		request := workspacepkg.ExecutionBindingAuthorizationRequest{
-			Binding: *binding,
-			ViewPolicy: workspacepkg.ExecutionViewPolicy{
-				WriteAccess: workspacepkg.ViewWriteAccessReadWrite,
-			},
+			Binding:     *binding,
+			ViewPolicy:  viewPolicy,
 			SourceTopic: msg.SourceTopic, RequestUserID: chatMsg.Addr.UserID,
 		}
 		if msg.OnBehalfSubject != nil {
@@ -448,6 +452,14 @@ func (c *Channel) onMessage(ctx context.Context, msg *sdk.Message) error {
 		slog.WarnContext(ctx, "aether: cross-host execution binding requires access and OBO providers")
 		c.rejectTurn(msg.SourceTopic, chatMsg, "workspace tool sharing is not configured")
 		return nil
+	}
+	if access != nil && binding.ToolHostID != msg.SourceTopic {
+		if ValidateExecutionBindingAccessReceipt(
+			msg.AccessReceipt, msg.OnBehalfSubject, *scope, chatMsg.Addr.TaskID, c.Topic(), time.Now(),
+		) != nil {
+			c.rejectTurn(msg.SourceTopic, chatMsg, "shared workspace binding has no exact access decision")
+			return nil
+		}
 	}
 	if access != nil && authorizer != nil {
 		go c.authorizeAndEnqueueTurn(context.WithoutCancel(ctx), msg.SourceTopic, chatMsg, *access, authorizer)

@@ -395,6 +395,62 @@ func (a testBindingAuthorizer) AuthorizeExecutionBinding(_ context.Context, _ wo
 	return a.err
 }
 
+func TestSharedBindingIngressRequiresExactCheckedDecision(t *testing.T) {
+	worker, _ := newTestChannel(t)
+	worker.SetExecutionBindingAuthorizer(testBindingAuthorizer{})
+	worker.SetToolCallAuthorizationProvider(&recordingToolAuthorizationProvider{})
+	binding := spec.NewExecutionBinding("default", "view-shared", "us::owner::window-2", spec.ExecutionSiteClient)
+	binding.RootRef = "root:view-shared"
+	scope, err := workspacepkg.NewExecutionScope(binding, workspacepkg.ExecutionViewPolicy{
+		WriteAccess: workspacepkg.ViewWriteAccessReadOnly,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := protocol.ChatMessage{
+		ID: "user-1", Role: protocol.RoleUser,
+		Addr: protocol.MessageAddress{WorkspaceID: "default", ThreadID: "thread-1", TaskID: "task-shared"},
+	}
+	if err := workspacepkg.PutExecutionScope(&message, scope); err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := "us::requester::window-1"
+	if err := worker.onMessage(context.Background(), &sdk.Message{SourceTopic: source, Payload: payload}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case inbound := <-worker.tasks:
+		t.Fatalf("shared binding without receipt enqueued: %+v", inbound)
+	default:
+	}
+	access, err := ExecutionBindingAccessRequest(scope, message.Addr.TaskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt := &pb.AccessDecisionReceipt{
+		Allowed: true, Decision: "ALLOW", Request: access,
+		DeliveryTarget: worker.Topic(), ExpiresAtMs: time.Now().Add(time.Minute).UnixMilli(),
+	}
+	if err := worker.onMessage(context.Background(), &sdk.Message{
+		SourceTopic: source, Payload: payload, AccessReceipt: receipt,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	inbound, err := worker.FetchTask(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inbound.Addr.TaskID != message.Addr.TaskID {
+		t.Fatalf("admitted task = %+v", inbound.Addr)
+	}
+}
+
 func TestAuthoritativeBindingCanAdmitDynamicWorkspace(t *testing.T) {
 	worker, err := New(Config{
 		ServerAddr: "127.0.0.1:1", Workspace: "routing", SessionWorkspace: "project-a",
@@ -410,7 +466,13 @@ func TestAuthoritativeBindingCanAdmitDynamicWorkspace(t *testing.T) {
 		ID: "user-1", Role: protocol.RoleUser,
 		Addr: protocol.MessageAddress{WorkspaceID: "project-b", ThreadID: "thread-1", TaskID: "task-1"},
 	}
-	if err := spec.PutExecutionBinding(&message, binding); err != nil {
+	scope, err := workspacepkg.NewExecutionScope(binding, workspacepkg.ExecutionViewPolicy{
+		WriteAccess: workspacepkg.ViewWriteAccessReadWrite,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := workspacepkg.PutExecutionScope(&message, scope); err != nil {
 		t.Fatal(err)
 	}
 	payload, err := json.Marshal(message)
@@ -445,7 +507,13 @@ func TestRejectedAuthoritativeBindingIsNotEnqueued(t *testing.T) {
 		ID: "user-1", Role: protocol.RoleUser,
 		Addr: protocol.MessageAddress{WorkspaceID: "default", ThreadID: "thread-1", TaskID: "task-1"},
 	}
-	if err := spec.PutExecutionBinding(&message, binding); err != nil {
+	scope, err := workspacepkg.NewExecutionScope(binding, workspacepkg.ExecutionViewPolicy{
+		WriteAccess: workspacepkg.ViewWriteAccessReadWrite,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := workspacepkg.PutExecutionScope(&message, scope); err != nil {
 		t.Fatal(err)
 	}
 	payload, _ := json.Marshal(message)

@@ -121,7 +121,13 @@ func TestLiveAetherClientWorkspaceToolRouting(t *testing.T) {
 		ID: "user-task-1", Role: protocol.RoleUser,
 		Addr: protocol.MessageAddress{WorkspaceID: logicalWorkspace, ThreadID: "thread-1", TaskID: "task-1"},
 	}
-	if err := spec.PutExecutionBinding(&message, binding); err != nil {
+	scope, err := workspacepkg.NewExecutionScope(binding, workspacepkg.ExecutionViewPolicy{
+		WriteAccess: workspacepkg.ViewWriteAccessReadWrite,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := workspacepkg.PutExecutionScope(&message, scope); err != nil {
 		t.Fatal(err)
 	}
 	if err := client.Enqueue(ctx, channel.Inbound{Addr: message.Addr, Message: message}); err != nil {

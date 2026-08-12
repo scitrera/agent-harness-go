@@ -80,17 +80,32 @@ func TestWorkspaceViewPublisherPersistsAndAuthorizesExactHostWithoutLocalPath(t 
 	binding := spec.NewExecutionBinding(workspaceID, viewID, observerID, spec.ExecutionSiteClient)
 	binding.RootRef = rootRef
 	binding.Revision = "abc123"
+	validator, err := NewWorkspaceBindingValidator(Config{Transport: transport, Workspace: workspaceID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validator.ValidateExecutionBinding(context.Background(), binding); err != nil {
+		t.Fatalf("authority-only exact validation: %v", err)
+	}
+	if err := publisher.AuthorizeExecutionBinding(context.Background(), workspacepkg.ExecutionBindingAuthorizationRequest{
+		Binding: binding, SourceTopic: "sv::platform-bridge::edge-1", RequestUserID: "drew",
+	}); err == nil {
+		t.Fatal("standalone authorizer accepted a different source topic")
+	}
 	if err := publisher.AuthorizeExecutionBinding(context.Background(), workspacepkg.ExecutionBindingAuthorizationRequest{
 		Binding: binding, SourceTopic: observerID, RequestUserID: "drew",
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if requests != 5 {
-		t.Fatalf("requests = %d, want 5", requests)
+	if requests != 7 {
+		t.Fatalf("requests = %d, want 7", requests)
 	}
 
 	wrongHost := binding
 	wrongHost.ToolHostID = "us::drew::window-2"
+	if err := validator.ValidateExecutionBinding(context.Background(), wrongHost); err == nil {
+		t.Fatal("validator substituted another observer for the requested host")
+	}
 	if data, _ := json.Marshal(wrongHost); strings.Contains(string(data), "/private/client/checkout") {
 		t.Fatal("binding serialized a host-local path")
 	}

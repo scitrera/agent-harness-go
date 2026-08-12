@@ -3,10 +3,9 @@ package tui
 import (
 	"fmt"
 
-	spec "github.com/scitrera/ecosystem-messaging-spec/go"
-
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 	"github.com/scitrera/agent-harness-go/pkg/tools"
+	workspacepkg "github.com/scitrera/agent-harness-go/pkg/workspace"
 )
 
 // scopeMessage stamps the current logical workspace on every runner-bound
@@ -25,7 +24,13 @@ func (m model) scopeMessage(addr *protocol.MessageAddress, message *protocol.Cha
 		}
 		addr.WorkspaceID = binding.WorkspaceID
 		message.Addr.WorkspaceID = binding.WorkspaceID
-		if err := spec.PutExecutionBinding(message, binding); err != nil {
+		scope, err := workspacepkg.NewExecutionScope(binding, workspacepkg.ExecutionViewPolicy{
+			WriteAccess: workspacepkg.ViewWriteAccessReadWrite,
+		})
+		if err != nil {
+			return fmt.Errorf("build working directory scope: %w", err)
+		}
+		if err := workspacepkg.PutExecutionScope(message, scope); err != nil {
 			return fmt.Errorf("encode working directory binding: %w", err)
 		}
 		return nil

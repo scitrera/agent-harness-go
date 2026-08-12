@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"testing"
 
+	pb "github.com/scitrera/aether/api/proto"
 	spec "github.com/scitrera/ecosystem-messaging-spec/go"
 
 	"github.com/scitrera/agent-harness-go/pkg/aetherwire"
 	"github.com/scitrera/agent-harness-go/pkg/approval"
 	"github.com/scitrera/agent-harness-go/pkg/channel"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
+	workspacepkg "github.com/scitrera/agent-harness-go/pkg/workspace"
 )
 
 func newTestClient(t *testing.T) (*Client, *[][]byte) {
@@ -31,6 +33,37 @@ func newTestClient(t *testing.T) (*Client, *[][]byte) {
 		return nil
 	}
 	return c, sent
+}
+
+func TestEnqueueUsesCheckedViewBindForAnotherHost(t *testing.T) {
+	c, sent := newTestClient(t)
+	var checked *pb.ResourceAccessRequest
+	c.sendCheckedToAgent = func(payload []byte, access *pb.ResourceAccessRequest) error {
+		*sent = append(*sent, payload)
+		checked = access
+		return nil
+	}
+	binding := spec.NewExecutionBinding("default", "view-shared", "us::drew::w2", spec.ExecutionSiteClient)
+	binding.RootRef = "root:view-shared"
+	scope, err := workspacepkg.NewExecutionScope(binding, workspacepkg.ExecutionViewPolicy{
+		WriteAccess: workspacepkg.ViewWriteAccessReadOnly,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := spec.NewChatMessage("message-1", spec.RoleUser)
+	message.Addr = spec.MessageAddress{WorkspaceID: "default", ThreadID: "thread-1", TaskID: "task-1"}
+	if err := workspacepkg.PutExecutionScope(&message, scope); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Enqueue(context.Background(), channel.Inbound{Addr: message.Addr, Message: message}); err != nil {
+		t.Fatal(err)
+	}
+	if len(*sent) != 1 || checked == nil || checked.GetOperation() != "bind" ||
+		checked.GetRequiredAccessLevel() != workspacepkg.ExecutionViewReadAccess ||
+		checked.GetCorrelationId() != "task-1" {
+		t.Fatalf("checked send = %+v, payloads=%d", checked, len(*sent))
+	}
 }
 
 // memProjection is an in-memory stand-in for the UI's history store.
