@@ -63,7 +63,8 @@ func (r *Runner) prepareParallelTool(ctx context.Context, session *harness.Sessi
 	call = bound
 	trust := tt.trustByTool[call.Name]
 	if provider, ok := tt.providerByTool[call.Name]; ok {
-		if err := r.resolveCatalogInvocation(ctx, call, tt); err != nil {
+		entry, err := r.resolveCatalogInvocation(ctx, call, tt)
+		if err != nil {
 			return nil, err
 		}
 		in := AuthzInput{Call: call, Addr: addr, Trust: trust, ProviderID: provider.ID()}
@@ -74,6 +75,7 @@ func (r *Runner) prepareParallelTool(ctx context.Context, session *harness.Sessi
 			return nil, policyErrorFor(call.Name)
 		}
 		req := tools.RequestFromEnvelope(call)
+		req.CatalogMeta = cloneCatalogMeta(entry.Descriptor.Meta)
 		if authority, ok := tools.MemoryAuthorityFrom(ctx); ok {
 			req.Authority = authority
 		}

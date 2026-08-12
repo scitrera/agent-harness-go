@@ -37,6 +37,10 @@ type Request struct {
 	// dynamically surfaced tool. It is nil for the standalone static-registry
 	// path and older bare-name callers.
 	ToolRef *protocol.ToolReference
+	// CatalogMeta is copied from the exact catalog entry after the independent
+	// invocation-time resolution succeeds. It is trusted admitted metadata, not
+	// model input. Providers may use it to validate an upstream exact reference.
+	CatalogMeta map[string]json.RawMessage
 }
 
 type Result struct {

@@ -59,6 +59,12 @@ type Descriptor struct {
 	// tools. Empty defaults to "remote" in the ToolProvider compatibility
 	// adapter.
 	CatalogKind string
+	// CatalogMeta is provider-owned metadata that is admitted as part of the
+	// immutable catalog entry and returned to that same provider at invocation.
+	// It is never exposed as model arguments. Transport adapters use it to carry
+	// an upstream exact reference through a wrapper catalog without trusting
+	// caller-supplied routing fields.
+	CatalogMeta map[string]json.RawMessage
 	// Effect is the highest admitted portable side-effect class. Empty defaults
 	// conservatively to execute; providers should set it when they can classify
 	// the tool more precisely.

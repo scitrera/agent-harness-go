@@ -249,7 +249,7 @@ func catalogEntry(providerID, registrationID, generation string, source tools.De
 	}
 	descriptor := spec.ToolDescriptor{
 		Name: name, Description: description, InputSchema: inputSchema,
-		Kind: kind, AwaitsResult: true,
+		Kind: kind, AwaitsResult: true, Meta: cloneCatalogMeta(source.CatalogMeta),
 	}
 	revision, err := catalogEntryRevision(descriptor, effect)
 	if err != nil {
@@ -268,6 +268,17 @@ func catalogEntry(providerID, registrationID, generation string, source tools.De
 		return spec.ToolCatalogEntry{}, fmt.Errorf("turn: invalid provider tool %q: %w", name, err)
 	}
 	return entry, nil
+}
+
+func cloneCatalogMeta(source map[string]json.RawMessage) map[string]json.RawMessage {
+	if len(source) == 0 {
+		return nil
+	}
+	out := make(map[string]json.RawMessage, len(source))
+	for key, value := range source {
+		out[key] = append(json.RawMessage(nil), value...)
+	}
+	return out
 }
 
 func catalogEntryRevision(descriptor spec.ToolDescriptor, effect spec.ToolEffect) (string, error) {
@@ -333,16 +344,16 @@ func bindCatalogToolCall(call protocol.ToolInvokeEnvelope, tt turnTools) (protoc
 	return call, nil
 }
 
-func (r *Runner) resolveCatalogInvocation(ctx context.Context, call protocol.ToolInvokeEnvelope, tt turnTools) error {
+func (r *Runner) resolveCatalogInvocation(ctx context.Context, call protocol.ToolInvokeEnvelope, tt turnTools) (spec.ToolCatalogEntry, error) {
 	if call.ToolRef == nil || r.toolCatalog == nil {
-		return fmt.Errorf("turn: provider tool %q has no live catalog reference", call.Name)
+		return spec.ToolCatalogEntry{}, fmt.Errorf("turn: provider tool %q has no live catalog reference", call.Name)
 	}
 	entry, err := r.toolCatalog.ResolveInvocation(ctx, tt.catalogBinding, *call.ToolRef)
 	if err != nil {
-		return fmt.Errorf("turn: resolve provider tool %q: %w", call.Name, err)
+		return spec.ToolCatalogEntry{}, fmt.Errorf("turn: resolve provider tool %q: %w", call.Name, err)
 	}
 	if entry.Ref.Name != call.Name {
-		return fmt.Errorf("turn: resolved catalog entry name %q does not match invocation %q", entry.Ref.Name, call.Name)
+		return spec.ToolCatalogEntry{}, fmt.Errorf("turn: resolved catalog entry name %q does not match invocation %q", entry.Ref.Name, call.Name)
 	}
-	return nil
+	return entry, nil
 }

@@ -92,10 +92,11 @@ func (r *Runner) invokeTool(ctx context.Context, session *harness.Session, addr 
 	call = bound
 	trust := tt.trustByTool[call.Name]
 	if p, ok := tt.providerByTool[call.Name]; ok {
-		if err := r.resolveCatalogInvocation(ctx, call, tt); err != nil {
+		entry, err := r.resolveCatalogInvocation(ctx, call, tt)
+		if err != nil {
 			return tools.Result{}, err
 		}
-		return r.invokeToolProvider(ctx, p, addr, call, trust)
+		return r.invokeToolProvider(ctx, p, addr, call, trust, entry.Descriptor.Meta)
 	}
 	return r.invokeWithApproval(ctx, session, addr, call, trust)
 }
@@ -111,7 +112,7 @@ func (r *Runner) invokeTool(ctx context.Context, session *harness.Session, addr 
 // is invoked directly (today's non-prompting bypass), while a stronger Trust, a
 // configured ToolPolicy, or a non-trivial safety authorizer can Deny or force a
 // prompt. A grant short-circuit (pre-authorized/durable) skips the policy.
-func (r *Runner) invokeToolProvider(ctx context.Context, p ToolProvider, addr protocol.MessageAddress, call protocol.ToolInvokeEnvelope, trust tools.TrustLevel) (result tools.Result, err error) {
+func (r *Runner) invokeToolProvider(ctx context.Context, p ToolProvider, addr protocol.MessageAddress, call protocol.ToolInvokeEnvelope, trust tools.TrustLevel, catalogMeta ...map[string]json.RawMessage) (result tools.Result, err error) {
 	in := AuthzInput{Call: call, Addr: addr, Trust: trust, ProviderID: p.ID()}
 	if d := r.authorizeToolProvider(ctx, in, trustBase(trust)); d.Outcome != Allow {
 		if ctx.Err() != nil {
@@ -120,6 +121,9 @@ func (r *Runner) invokeToolProvider(ctx context.Context, p ToolProvider, addr pr
 		return tools.Result{}, policyErrorFor(call.Name) // denied/expired → fed back to the model
 	}
 	req := tools.RequestFromEnvelope(call)
+	if len(catalogMeta) > 0 {
+		req.CatalogMeta = cloneCatalogMeta(catalogMeta[0])
+	}
 	if auth, ok := tools.MemoryAuthorityFrom(ctx); ok {
 		req.Authority = auth
 	}

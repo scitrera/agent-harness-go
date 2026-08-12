@@ -87,8 +87,10 @@ func TestAssembleTurnTools(t *testing.T) {
 	})
 
 	t.Run("merges discovered tools; static wins on collision", func(t *testing.T) {
+		upstreamRef := json.RawMessage(`{"provider_id":"tools-wss","registration_id":"office-1"}`)
 		r := newToolsRunner(static, &fakeDynamicProvider{descs: []tools.Descriptor{
-			{Name: "remote_x", Description: "x", Concurrency: tools.ConcurrencyParallelSafe},
+			{Name: "remote_x", Description: "x", Concurrency: tools.ConcurrencyParallelSafe,
+				CatalogMeta: map[string]json.RawMessage{"provider_tool_ref": upstreamRef}},
 			{Name: "dup", Description: "should be dropped"},      // collides with a static tool
 			{Name: "remote_x", Description: "duplicate dynamic"}, // intra-batch dup
 		}})
@@ -112,6 +114,18 @@ func TestAssembleTurnTools(t *testing.T) {
 		ref, ok := tt.refByTool["remote_x"]
 		if !ok || ref.ProviderID != "dynamic" || ref.Name != "remote_x" || ref.Revision == "" {
 			t.Errorf("remote_x exact catalog reference was not retained: %+v", ref)
+		}
+		call := protocol.ToolInvokeEnvelope{CallID: "call-1", Name: "remote_x"}
+		bound, err := bindCatalogToolCall(call, tt)
+		if err != nil {
+			t.Fatalf("bind catalog call: %v", err)
+		}
+		if _, err := r.invokeTool(context.Background(), nil, protocol.MessageAddress{}, bound, tt); err != nil {
+			t.Fatalf("invoke provider tool: %v", err)
+		}
+		provider := tt.providerByTool["remote_x"].(*fakeDynamicProvider)
+		if len(provider.invoked) != 1 || string(provider.invoked[0].CatalogMeta["provider_tool_ref"]) != string(upstreamRef) {
+			t.Fatalf("provider admitted catalog metadata = %+v", provider.invoked)
 		}
 	})
 
