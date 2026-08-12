@@ -99,6 +99,30 @@ func TestViewRegistryAssignsAnotherProjectItsOwnWorkspace(t *testing.T) {
 	}
 }
 
+func TestViewRegistryInstallsPublisherAfterLocalRegistration(t *testing.T) {
+	registry, err := NewViewRegistry(context.Background(), ViewRegistryConfig{
+		InitialWorkspaceID: "project-a", InitialRoot: t.TempDir(), StateDir: t.TempDir(),
+		ToolHostID: "ag::routing::worker::one", ExecutionSite: spec.ExecutionSiteWorker,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	publisher := &recordingViewPublisher{}
+	if err := registry.SetPublisher(context.Background(), publisher); err != nil {
+		t.Fatal(err)
+	}
+	if len(publisher.views) != 1 || publisher.observations[0].Sequence != 2 ||
+		publisher.observations[0].ToolHostID != "ag::routing::worker::one" {
+		t.Fatalf("published views=%+v observations=%+v", publisher.views, publisher.observations)
+	}
+	if err := registry.RenewRegisteredViews(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(publisher.views) != 2 || publisher.observations[1].Sequence != 3 {
+		t.Fatalf("renewed observations=%+v", publisher.observations)
+	}
+}
+
 func TestGitWorktreesShareWorkspaceButKeepDistinctViews(t *testing.T) {
 	repository := t.TempDir()
 	runGit(t, repository, "init")

@@ -173,6 +173,7 @@ type WorkerToolAccessRequest struct {
 	Binding   spec.ExecutionBinding
 	Policy    workspacepkg.ExecutionViewPolicy
 	ToolName  string
+	CallID    string
 	Address   spec.MessageAddress
 	Authority tools.MemoryAuthority
 }
@@ -243,6 +244,36 @@ func (h *WorkerToolHost) ScheduledExecutionBindingForDirectory(
 
 func (h *WorkerToolHost) Renew(ctx context.Context) error { return h.local.Renew(ctx) }
 
+// SetViewPublisher publishes existing local views and enables future lease
+// renewal. See workspace.ViewRegistry.SetPublisher for two-phase transports.
+func (h *WorkerToolHost) SetViewPublisher(ctx context.Context, publisher workspacepkg.ViewPublisher) error {
+	if h == nil || h.local == nil {
+		return errors.New("aether: worker workspace tool host is not configured")
+	}
+	return h.local.views.SetPublisher(ctx, publisher)
+}
+
+// BindScheduledExecutionScope validates one pinned worker view and installs
+// its exact local tool delegate on ctx. Embedding distributions use this when
+// they reuse the OSS scheduled executor with their own Aether transport.
+func (h *WorkerToolHost) BindScheduledExecutionScope(
+	ctx context.Context,
+	binding spec.ExecutionBinding,
+	policy ScheduledViewPolicy,
+) (context.Context, error) {
+	if err := h.validateScheduledBinding(ctx, binding, policy); err != nil {
+		return ctx, err
+	}
+	scope, err := workspacepkg.NewExecutionScope(binding, policy.executionViewPolicy())
+	if err != nil {
+		return ctx, err
+	}
+	ctx = workspacepkg.WithExecutionScope(ctx, scope)
+	return tools.WithToolDelegate(ctx, workerToolDelegate{
+		host: h, binding: binding, policy: policy,
+	}), nil
+}
+
 func (h *WorkerToolHost) validateScheduledBinding(
 	ctx context.Context,
 	binding spec.ExecutionBinding,
@@ -280,7 +311,8 @@ func (h *WorkerToolHost) invoke(
 	if h.accessAuthorizer != nil {
 		authority, _ := tools.MemoryAuthorityFrom(ctx)
 		if err := h.accessAuthorizer.AuthorizeWorkerTool(ctx, WorkerToolAccessRequest{
-			Binding: binding, Policy: viewPolicy, ToolName: req.Name, Address: req.Addr, Authority: authority,
+			Binding: binding, Policy: viewPolicy, ToolName: req.Name, CallID: req.CallID,
+			Address: req.Addr, Authority: authority,
 		}); err != nil {
 			return tools.Result{}, fmt.Errorf("worker tool access denied: %w", err)
 		}

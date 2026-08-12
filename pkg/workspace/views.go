@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -286,6 +287,50 @@ func (r *ViewRegistry) RenewRegisteredViews(ctx context.Context) error {
 			return err
 		}
 	}
+	return nil
+}
+
+// SetPublisher publishes every currently registered view, then installs the
+// publisher for future observations. It supports transports that must connect
+// before their remote MemoryLayer path is usable while still allowing worker
+// assignment handlers to be registered before that connection starts.
+func (r *ViewRegistry) SetPublisher(ctx context.Context, publisher ViewPublisher) error {
+	if publisher == nil {
+		return fmt.Errorf("workspace view registry: publisher is required")
+	}
+	r.publishMu.Lock()
+	defer r.publishMu.Unlock()
+	r.mu.RLock()
+	views := make([]View, 0, len(r.views))
+	for _, view := range r.views {
+		views = append(views, view)
+	}
+	r.mu.RUnlock()
+	sort.Slice(views, func(i, j int) bool { return views[i].Descriptor.ViewID < views[j].Descriptor.ViewID })
+	for _, view := range views {
+		view.VCS = observeGit(ctx, view.Root)
+		if view.VCS != nil {
+			view.Descriptor.Revision = view.VCS.HeadRevision
+		} else {
+			view.Descriptor.Revision = ""
+		}
+		r.mu.RLock()
+		sequence := r.sequence[view.Descriptor.ViewID] + 1
+		r.mu.RUnlock()
+		if err := publisher.PublishWorkspaceView(ctx, view, ViewObservation{
+			ObserverID: r.toolHostID, Generation: r.generation, Sequence: sequence,
+			ToolHostID: r.toolHostID, ExecutionSite: r.executionSite, RootRef: view.RootRef,
+			Capabilities: append([]string(nil), WorkspaceToolCapabilities...), VCS: view.VCS,
+			ExpiresAt: time.Now().Add(ViewObservationLeaseDuration),
+		}); err != nil {
+			return fmt.Errorf("publish registered workspace view: %w", err)
+		}
+		r.mu.Lock()
+		r.views[view.Descriptor.ViewID] = view
+		r.sequence[view.Descriptor.ViewID] = sequence
+		r.mu.Unlock()
+	}
+	r.publisher = publisher
 	return nil
 }
 

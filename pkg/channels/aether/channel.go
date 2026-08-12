@@ -167,7 +167,7 @@ type Channel struct {
 	scheduledTurns                *ScheduledTurnExecutor
 	scheduledTurnsMu              sync.RWMutex
 	scheduleReconcileMu           sync.Mutex
-	scheduleOps                   scheduleOperations
+	scheduleOps                   ScheduleOperations
 	scheduledTurnAuthority        ScheduledTurnAuthorityProvider
 	workerToolHost                *WorkerToolHost
 

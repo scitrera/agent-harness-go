@@ -196,6 +196,9 @@ func scheduledTurnMetadata(envelope scheduledTurnEnvelope) map[string]string {
 		"scitrera.view_id":              envelope.Binding.ViewID,
 		"scitrera.view_revision":        envelope.Binding.Revision,
 		"scitrera.execution_tool_host":  envelope.Binding.ToolHostID,
+		"turn_tool_host_id":             envelope.Binding.ToolHostID,
+		"turn_surface_kind":             "worker",
+		"turn_surface_instance_id":      envelope.Binding.ToolHostID,
 	}
 }
 
@@ -396,6 +399,20 @@ func (e *ScheduledTurnExecutor) ReplaceRegistrations(registrations []ScheduledTu
 	e.registrations = indexed
 	e.registrationsMu.Unlock()
 	return nil
+}
+
+// Registrations returns a source-independent copy of the executor's current
+// declaration set. It is used by embedding distributions to restore the
+// previous accepted set when a remote reconciliation fails.
+func (e *ScheduledTurnExecutor) Registrations() []ScheduledTurnRegistration {
+	e.registrationsMu.RLock()
+	registrations := make([]ScheduledTurnRegistration, 0, len(e.registrations))
+	for _, registration := range e.registrations {
+		registrations = append(registrations, registration)
+	}
+	e.registrationsMu.RUnlock()
+	sort.Slice(registrations, func(i, j int) bool { return registrations[i].ID < registrations[j].ID })
+	return registrations
 }
 
 func (e *ScheduledTurnExecutor) registration(id string) (ScheduledTurnRegistration, bool) {
@@ -626,10 +643,40 @@ func IsScheduledTurnMessage(message protocol.ChatMessage) bool {
 	return bytes.Equal(bytes.TrimSpace(message.Meta[scheduledTurnMessageMetaKey]), []byte("true"))
 }
 
-type scheduleOperations interface {
+// ScheduleOperations is the bounded WorkflowEngine SDK surface required by
+// scheduled-turn reconciliation. It is exported so distributions that already
+// own an Aether connection can reuse the exact OSS reconciler.
+type ScheduleOperations interface {
 	ListSchedulesAuthorized(context.Context, string, *pb.AuthorizationContext) (*sdk.WorkflowResponse, error)
 	UpsertScheduleWithOptions(context.Context, []byte, sdk.WorkflowScheduleOperationOptions) (*sdk.WorkflowResponse, error)
 	DeleteScheduleAuthorized(context.Context, string, string, *pb.AuthorizationContext) (*sdk.WorkflowResponse, error)
+}
+
+// ReconcileScheduledTurns converges Aether to one worker's desired declaration
+// set without constructing a second transport. Embedding distributions should
+// install their assignment executor before connecting, or reconcile before
+// connection, so a newly created schedule cannot race handler registration.
+func ReconcileScheduledTurns(
+	ctx context.Context,
+	operations ScheduleOperations,
+	routingWorkspace string,
+	assignedTo string,
+	registrations []ScheduledTurnRegistration,
+	provider ScheduledTurnAuthorityProvider,
+) error {
+	if operations == nil {
+		return errors.New("aether: scheduled workflow operations are not configured")
+	}
+	channel := &Channel{
+		workspace: routingWorkspace, scheduleOps: operations,
+		scheduledTurnAuthority: provider,
+	}
+	channel.scheduleReconcileMu.Lock()
+	defer channel.scheduleReconcileMu.Unlock()
+	if err := channel.validateScheduledTurnAuthorityRequirements(registrations); err != nil {
+		return err
+	}
+	return channel.reconcileScheduledTurnDefinitionsFor(ctx, assignedTo, registrations)
 }
 
 type ScheduledTurnAuthorityOperation string
@@ -710,32 +757,36 @@ func (c *Channel) UpdateScheduledTurns(ctx context.Context, registrations []Sche
 }
 
 func (c *Channel) reconcileScheduledTurnDefinitions(ctx context.Context, registrations []ScheduledTurnRegistration) error {
-	current, err := c.listScheduledWorkflowDefinitions(ctx)
+	return c.reconcileScheduledTurnDefinitionsFor(ctx, c.Topic(), registrations)
+}
+
+func (c *Channel) reconcileScheduledTurnDefinitionsFor(ctx context.Context, assignedTo string, registrations []ScheduledTurnRegistration) error {
+	current, err := c.listScheduledWorkflowDefinitionsFor(ctx, assignedTo)
 	if err != nil {
 		return fmt.Errorf("aether: load schedules for reconciliation: %w", err)
 	}
 	stale := map[string]struct{}{}
 	for _, definition := range current {
-		if ownedScheduledWorkflow(definition, c.workspace, c.Topic()) {
+		if ownedScheduledWorkflow(definition, c.workspace, assignedTo) {
 			stale[definition.ID] = struct{}{}
 		}
 	}
 	ordered := append([]ScheduledTurnRegistration(nil), registrations...)
 	sort.Slice(ordered, func(i, j int) bool { return ordered[i].ID < ordered[j].ID })
 	for _, registration := range ordered {
-		scheduleID := scheduledWorkflowID(c.workspace, c.Topic(), registration.ID)
+		scheduleID := scheduledWorkflowID(c.workspace, assignedTo, registration.ID)
 		if !registration.Enabled {
 			stale[scheduleID] = struct{}{}
 			continue
 		}
-		data, err := scheduledWorkflowData(c.workspace, c.Topic(), registration)
+		data, err := scheduledWorkflowData(c.workspace, assignedTo, registration)
 		if err != nil {
 			return err
 		}
 		registrationCopy := registration
 		authority, err := c.authorityForScheduledTurn(ctx, ScheduledTurnAuthorityRequest{
 			Operation: ScheduledTurnAuthorityUpsert, RoutingWorkspace: c.workspace,
-			WorkflowScheduleID: scheduleID, AssignedTo: c.Topic(), Registration: &registrationCopy,
+			WorkflowScheduleID: scheduleID, AssignedTo: assignedTo, Registration: &registrationCopy,
 		})
 		if err != nil {
 			return fmt.Errorf("aether: authorize schedule %q: %w", registration.ID, err)
@@ -759,7 +810,7 @@ func (c *Channel) reconcileScheduledTurnDefinitions(ctx context.Context, registr
 	for _, id := range deleteIDs {
 		authority, err := c.authorityForScheduledTurn(ctx, ScheduledTurnAuthorityRequest{
 			Operation: ScheduledTurnAuthorityDelete, RoutingWorkspace: c.workspace,
-			WorkflowScheduleID: id, AssignedTo: c.Topic(),
+			WorkflowScheduleID: id, AssignedTo: assignedTo,
 		})
 		if err != nil {
 			return fmt.Errorf("aether: authorize stale schedule %q deletion: %w", id, err)
@@ -788,11 +839,15 @@ func (c *Channel) validateScheduledTurnAuthorityRequirements(registrations []Sch
 }
 
 func (c *Channel) listScheduledWorkflowDefinitions(ctx context.Context) ([]scheduledWorkflowDefinition, error) {
+	return c.listScheduledWorkflowDefinitionsFor(ctx, c.Topic())
+}
+
+func (c *Channel) listScheduledWorkflowDefinitionsFor(ctx context.Context, assignedTo string) ([]scheduledWorkflowDefinition, error) {
 	if c == nil || c.scheduleOps == nil {
 		return nil, errors.New("scheduled workflow operations are not configured")
 	}
 	authority, err := c.authorityForScheduledTurn(ctx, ScheduledTurnAuthorityRequest{
-		Operation: ScheduledTurnAuthorityList, RoutingWorkspace: c.workspace, AssignedTo: c.Topic(),
+		Operation: ScheduledTurnAuthorityList, RoutingWorkspace: c.workspace, AssignedTo: assignedTo,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("authorize schedule list: %w", err)

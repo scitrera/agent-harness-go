@@ -189,7 +189,10 @@ func TestScheduledWorkflowDataTargetsExactWorkerWithJSONEnvelope(t *testing.T) {
 	}
 	if definition.Action.Metadata["scitrera.schedule_digest"] == "" ||
 		definition.Action.Metadata["scitrera.schedule_miss_policy"] != ScheduledMissPolicyFireOnce ||
-		definition.Action.Metadata["scitrera.view_revision"] != registration.Binding.Revision {
+		definition.Action.Metadata["scitrera.view_revision"] != registration.Binding.Revision ||
+		definition.Action.Metadata["turn_tool_host_id"] != registration.Binding.ToolHostID ||
+		definition.Action.Metadata["turn_surface_kind"] != "worker" ||
+		definition.Action.Metadata["turn_surface_instance_id"] != registration.Binding.ToolHostID {
 		t.Fatalf("schedule metadata = %#v", definition.Action.Metadata)
 	}
 }
