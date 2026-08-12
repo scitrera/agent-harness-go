@@ -571,6 +571,13 @@ continuation. The TUI only renders the worker response—it does not query or
 cache private scheduler state. Aether-free modes remain supported and report
 that distributed scheduled operations are unavailable.
 
+Embedded distributions can inject a `ScheduledTurnAuthorityProvider` into the
+Aether channel. It keeps workflow CRUD authorization and bounded scheduled-task
+authority on Aether's transport envelope; schedule YAML, action JSON, task
+payloads, metadata, and ecosystem messages remain credential-free. Direct
+schedules stay available without a provider, while declarations that set
+`require_task_authority` fail closed unless one is configured.
+
 ## Capabilities
 
 Native tool-calling turn loop with bounded tool iterations, streaming egress,

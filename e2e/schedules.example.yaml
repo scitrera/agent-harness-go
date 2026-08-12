@@ -22,6 +22,11 @@ schedules:
     # queue (default) persists exact-target work while this static worker is
     # offline. Other explicit choices are reject and orchestrate.
     offline_policy: queue
+    # Credentials never go in this file. Enterprise embeddings may inject a
+    # ScheduledTurnAuthorityProvider and enable the following policy flags.
+    # The stock OSS CLI leaves them false and creates a direct schedule.
+    require_task_authority: false
+    required_downstream_authority_hops: 0
     prompt: >-
       Review the current workspace, summarize material changes, and record any
       concrete follow-up tasks.

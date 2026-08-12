@@ -27,12 +27,17 @@ type recordingBoundTurnEnqueuer struct {
 }
 
 type fakeScheduleOperations struct {
-	schedules map[string]scheduledWorkflowDefinition
-	upserts   []string
-	deletes   []string
+	schedules            map[string]scheduledWorkflowDefinition
+	upserts              []string
+	deletes              []string
+	listAuthorization    *pb.AuthorizationContext
+	upsertOptions        []sdk.WorkflowScheduleOperationOptions
+	deleteWorkspaces     []string
+	deleteAuthorizations []*pb.AuthorizationContext
 }
 
-func (f *fakeScheduleOperations) ListSchedules(context.Context, string) (*sdk.WorkflowResponse, error) {
+func (f *fakeScheduleOperations) ListSchedulesAuthorized(_ context.Context, _ string, authorization *pb.AuthorizationContext) (*sdk.WorkflowResponse, error) {
+	f.listAuthorization = authorization
 	definitions := make([]scheduledWorkflowDefinition, 0, len(f.schedules))
 	for _, definition := range f.schedules {
 		definitions = append(definitions, definition)
@@ -41,20 +46,43 @@ func (f *fakeScheduleOperations) ListSchedules(context.Context, string) (*sdk.Wo
 	return &sdk.WorkflowResponse{Success: true, Data: data}, nil
 }
 
-func (f *fakeScheduleOperations) UpsertSchedule(_ context.Context, data []byte) (*sdk.WorkflowResponse, error) {
+func (f *fakeScheduleOperations) UpsertScheduleWithOptions(_ context.Context, data []byte, options sdk.WorkflowScheduleOperationOptions) (*sdk.WorkflowResponse, error) {
 	var definition scheduledWorkflowDefinition
 	if err := json.Unmarshal(data, &definition); err != nil {
 		return nil, err
 	}
 	f.schedules[definition.ID] = definition
 	f.upserts = append(f.upserts, definition.ID)
+	f.upsertOptions = append(f.upsertOptions, options)
 	return &sdk.WorkflowResponse{Success: true}, nil
 }
 
-func (f *fakeScheduleOperations) DeleteSchedule(_ context.Context, id string) (*sdk.WorkflowResponse, error) {
+func (f *fakeScheduleOperations) DeleteScheduleAuthorized(_ context.Context, workspace, id string, authorization *pb.AuthorizationContext) (*sdk.WorkflowResponse, error) {
 	delete(f.schedules, id)
 	f.deletes = append(f.deletes, id)
+	f.deleteWorkspaces = append(f.deleteWorkspaces, workspace)
+	f.deleteAuthorizations = append(f.deleteAuthorizations, authorization)
 	return &sdk.WorkflowResponse{Success: true}, nil
+}
+
+type recordingScheduledTurnAuthorityProvider struct {
+	requests            []ScheduledTurnAuthorityRequest
+	authorization       *pb.AuthorizationContext
+	scope               *pb.WorkflowScheduleAuthorityScope
+	scopeEveryOperation bool
+	err                 error
+}
+
+func (p *recordingScheduledTurnAuthorityProvider) AuthorityForScheduledTurn(_ context.Context, request ScheduledTurnAuthorityRequest) (ScheduledTurnAuthority, error) {
+	p.requests = append(p.requests, request)
+	if p.err != nil {
+		return ScheduledTurnAuthority{}, p.err
+	}
+	authority := ScheduledTurnAuthority{Authorization: p.authorization}
+	if request.Operation == ScheduledTurnAuthorityUpsert || p.scopeEveryOperation {
+		authority.AuthorityScope = p.scope
+	}
+	return authority, nil
 }
 
 func (e *recordingBoundTurnEnqueuer) EnqueueBoundTurn(
@@ -116,6 +144,22 @@ func TestScheduledViewPolicyRequiresDirtyOptInForWrites(t *testing.T) {
 	registration.ViewPolicy.WriteAccess = "read_only"
 	if err := registration.Validate(); err != nil {
 		t.Fatalf("read-only schedule: %v", err)
+	}
+}
+
+func TestScheduledTurnRegistrationValidatesAuthorityHopPolicy(t *testing.T) {
+	registration := scheduledRegistration()
+	registration.RequiredDownstreamAuthorityHops = 1
+	if err := registration.Validate(); err == nil {
+		t.Fatal("downstream authority without required task authority was accepted")
+	}
+	registration.RequireTaskAuthority = true
+	if err := registration.Validate(); err != nil {
+		t.Fatalf("valid authority policy: %v", err)
+	}
+	registration.RequiredDownstreamAuthorityHops = 2
+	if err := registration.Validate(); err == nil {
+		t.Fatal("unsupported downstream authority hop count was accepted")
 	}
 }
 
@@ -193,6 +237,152 @@ func TestScheduledTurnReconciliationDeletesOnlyOwnedStaleDefinitions(t *testing.
 	}
 	if _, ok := fake.schedules[foreign.ID]; !ok {
 		t.Fatal("foreign schedule was deleted during empty reconciliation")
+	}
+}
+
+func TestScheduledTurnReconciliationFailsClosedWithoutRequiredAuthorityProvider(t *testing.T) {
+	worker, _ := newTestChannel(t)
+	registration := scheduledRegistration()
+	registration.Binding.ToolHostID = worker.Topic()
+	registration.RequireTaskAuthority = true
+	fake := &fakeScheduleOperations{schedules: map[string]scheduledWorkflowDefinition{}}
+	worker.scheduleOps = fake
+	if err := worker.EnableScheduledTurns(context.Background(), []ScheduledTurnRegistration{registration}, nil, time.Second); err == nil ||
+		!strings.Contains(err.Error(), "no provider") {
+		t.Fatalf("required-authority enable error = %v", err)
+	}
+	if len(fake.upserts) != 0 {
+		t.Fatalf("required-authority schedule mutated Aether without provider: %+v", fake.upserts)
+	}
+	if worker.scheduledTurns != nil {
+		t.Fatal("failed required-authority enable installed an executor")
+	}
+}
+
+func TestScheduledTurnAuthorityProviderStaysOnTransportEnvelope(t *testing.T) {
+	provider := &recordingScheduledTurnAuthorityProvider{}
+	worker, err := New(Config{
+		ServerAddr: "127.0.0.1:1", Workspace: "routing", Specifier: "authority-test",
+		ScheduledTurnAuthority: provider,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	registration := scheduledRegistration()
+	registration.Binding.ToolHostID = worker.Topic()
+	registration.RequireTaskAuthority = true
+	registration.RequiredDownstreamAuthorityHops = 1
+	authorization := &pb.AuthorizationContext{
+		AuthorityMode: "on_behalf_of", GrantId: "source-grant",
+		Subject: &pb.PrincipalRef{PrincipalType: "user", PrincipalId: "alice"},
+	}
+	scope := &pb.WorkflowScheduleAuthorityScope{
+		WorkspaceScope: []string{worker.workspace}, OperationScope: []string{"task_create"},
+		MaxAccessLevel: 20, RequiredTaskAuthorityHops: 1,
+		PolicyVersion: sdk.WorkflowScheduleAuthorityPolicyVersion,
+	}
+	provider.authorization = authorization
+	provider.scope = scope
+	fake := &fakeScheduleOperations{schedules: map[string]scheduledWorkflowDefinition{}}
+	worker.scheduleOps = fake
+	if err := worker.EnableScheduledTurns(context.Background(), []ScheduledTurnRegistration{registration}, nil, time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if len(provider.requests) != 2 || provider.requests[0].Operation != ScheduledTurnAuthorityList ||
+		provider.requests[1].Operation != ScheduledTurnAuthorityUpsert || provider.requests[1].Registration == nil {
+		t.Fatalf("authority requests = %+v", provider.requests)
+	}
+	if len(fake.upsertOptions) != 1 || fake.upsertOptions[0].Authorization.GetGrantId() != "source-grant" ||
+		fake.upsertOptions[0].AuthorityScope.GetRequiredTaskAuthorityHops() != 1 {
+		t.Fatalf("upsert options = %+v", fake.upsertOptions)
+	}
+	definition := fake.schedules[scheduledWorkflowID(worker.workspace, worker.Topic(), registration.ID)]
+	if !definition.Action.RequireTaskAuthority || definition.Action.RequiredDownstreamAuthorityHops != 1 {
+		t.Fatalf("scheduled action authority policy = %+v", definition.Action)
+	}
+	encoded, err := json.Marshal(definition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "source-grant") || strings.Contains(string(encoded), "alice") {
+		t.Fatalf("transport authority leaked into schedule JSON: %s", encoded)
+	}
+	if err := worker.UpdateScheduledTurns(context.Background(), nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.deleteWorkspaces) != 1 || fake.deleteWorkspaces[0] != worker.workspace ||
+		fake.deleteAuthorizations[0].GetGrantId() != "source-grant" {
+		t.Fatalf("delete workspace/auth = %+v %+v", fake.deleteWorkspaces, fake.deleteAuthorizations)
+	}
+}
+
+func TestScheduledTurnAuthorityProviderRejectsInvalidShapes(t *testing.T) {
+	worker, _ := newTestChannel(t)
+	registration := scheduledRegistration()
+	registration.Binding.ToolHostID = worker.Topic()
+	registration.RequireTaskAuthority = true
+	registration.RequiredDownstreamAuthorityHops = 1
+	authorization := &pb.AuthorizationContext{
+		AuthorityMode: "on_behalf_of", GrantId: "source-grant",
+		Subject: &pb.PrincipalRef{PrincipalType: "user", PrincipalId: "alice"},
+	}
+	validScope := &pb.WorkflowScheduleAuthorityScope{
+		PolicyVersion:             sdk.WorkflowScheduleAuthorityPolicyVersion,
+		RequiredTaskAuthorityHops: 1,
+	}
+	for name, test := range map[string]struct {
+		request  ScheduledTurnAuthorityRequest
+		provider *recordingScheduledTurnAuthorityProvider
+	}{
+		"unknown operation": {
+			request:  ScheduledTurnAuthorityRequest{Operation: "future"},
+			provider: &recordingScheduledTurnAuthorityProvider{authorization: authorization},
+		},
+		"scope on list": {
+			request:  ScheduledTurnAuthorityRequest{Operation: ScheduledTurnAuthorityList},
+			provider: &recordingScheduledTurnAuthorityProvider{authorization: authorization, scope: validScope, scopeEveryOperation: true},
+		},
+		"missing authorization": {
+			request:  ScheduledTurnAuthorityRequest{Operation: ScheduledTurnAuthorityUpsert, Registration: &registration},
+			provider: &recordingScheduledTurnAuthorityProvider{scope: validScope},
+		},
+		"unknown policy version": {
+			request:  ScheduledTurnAuthorityRequest{Operation: ScheduledTurnAuthorityUpsert, Registration: &registration},
+			provider: &recordingScheduledTurnAuthorityProvider{authorization: authorization, scope: &pb.WorkflowScheduleAuthorityScope{RequiredTaskAuthorityHops: 1}},
+		},
+		"insufficient hops": {
+			request:  ScheduledTurnAuthorityRequest{Operation: ScheduledTurnAuthorityUpsert, Registration: &registration},
+			provider: &recordingScheduledTurnAuthorityProvider{authorization: authorization, scope: &pb.WorkflowScheduleAuthorityScope{PolicyVersion: sdk.WorkflowScheduleAuthorityPolicyVersion}},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			worker.scheduledTurnAuthority = test.provider
+			if _, err := worker.authorityForScheduledTurn(context.Background(), test.request); err == nil {
+				t.Fatal("invalid scheduled authority shape was accepted")
+			}
+		})
+	}
+}
+
+func TestScheduledTurnAuthorityProviderCannotMutateAuthorityPolicy(t *testing.T) {
+	worker, _ := newTestChannel(t)
+	registration := scheduledRegistration()
+	registration.RequireTaskAuthority = true
+	worker.scheduledTurnAuthority = ScheduledTurnAuthorityProviderFunc(func(
+		_ context.Context,
+		request ScheduledTurnAuthorityRequest,
+	) (ScheduledTurnAuthority, error) {
+		request.Registration.RequireTaskAuthority = false
+		return ScheduledTurnAuthority{}, nil
+	})
+	_, err := worker.authorityForScheduledTurn(context.Background(), ScheduledTurnAuthorityRequest{
+		Operation: ScheduledTurnAuthorityUpsert, Registration: &registration,
+	})
+	if err == nil || !strings.Contains(err.Error(), "required task authority") {
+		t.Fatalf("mutated authority policy error = %v", err)
+	}
+	if !registration.RequireTaskAuthority {
+		t.Fatal("provider mutated caller registration")
 	}
 }
 

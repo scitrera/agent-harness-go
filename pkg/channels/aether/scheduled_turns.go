@@ -17,6 +17,7 @@ import (
 	pb "github.com/scitrera/aether/api/proto"
 	sdk "github.com/scitrera/aether/sdk/go/aether"
 	spec "github.com/scitrera/ecosystem-messaging-spec/go"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/scitrera/agent-harness-go/pkg/authhandoff"
 	"github.com/scitrera/agent-harness-go/pkg/channel"
@@ -49,17 +50,19 @@ const (
 // declaration. A concrete worker binding is part of the declaration digest so
 // delayed tasks cannot drift to a replacement checkout or a new Git revision.
 type ScheduledTurnRegistration struct {
-	ID                  string                `json:"id"`
-	Name                string                `json:"name"`
-	ScheduleType        string                `json:"schedule_type"`
-	ScheduleExpression  string                `json:"schedule_expression"`
-	ThreadID            string                `json:"thread_id"`
-	Prompt              string                `json:"prompt"`
-	MissPolicy          string                `json:"miss_policy"`
-	TargetOfflinePolicy string                `json:"target_offline_policy"`
-	Enabled             bool                  `json:"enabled"`
-	Binding             spec.ExecutionBinding `json:"execution_binding"`
-	ViewPolicy          ScheduledViewPolicy   `json:"view_policy"`
+	ID                              string                `json:"id"`
+	Name                            string                `json:"name"`
+	ScheduleType                    string                `json:"schedule_type"`
+	ScheduleExpression              string                `json:"schedule_expression"`
+	ThreadID                        string                `json:"thread_id"`
+	Prompt                          string                `json:"prompt"`
+	MissPolicy                      string                `json:"miss_policy"`
+	TargetOfflinePolicy             string                `json:"target_offline_policy"`
+	Enabled                         bool                  `json:"enabled"`
+	RequireTaskAuthority            bool                  `json:"require_task_authority,omitempty"`
+	RequiredDownstreamAuthorityHops uint32                `json:"required_downstream_authority_hops,omitempty"`
+	Binding                         spec.ExecutionBinding `json:"execution_binding"`
+	ViewPolicy                      ScheduledViewPolicy   `json:"view_policy"`
 }
 
 func (r ScheduledTurnRegistration) Validate() error {
@@ -84,6 +87,12 @@ func (r ScheduledTurnRegistration) Validate() error {
 	}
 	if r.TargetOfflinePolicy != "queue" && r.TargetOfflinePolicy != "reject" && r.TargetOfflinePolicy != "orchestrate" {
 		return fmt.Errorf("aether: scheduled turn %q has unsupported target offline policy %q", r.ID, r.TargetOfflinePolicy)
+	}
+	if r.RequiredDownstreamAuthorityHops > 1 {
+		return fmt.Errorf("aether: scheduled turn %q supports at most one downstream authority hop", r.ID)
+	}
+	if r.RequiredDownstreamAuthorityHops > 0 && !r.RequireTaskAuthority {
+		return fmt.Errorf("aether: scheduled turn %q reserves downstream authority without requiring task authority", r.ID)
 	}
 	if err := r.Binding.Validate(); err != nil {
 		return fmt.Errorf("aether: scheduled turn %q binding: %w", r.ID, err)
@@ -200,15 +209,17 @@ func validateScheduledTurnMetadata(metadata map[string]string, envelope schedule
 }
 
 type scheduledWorkflowAction struct {
-	Type                string                `json:"type"`
-	TaskType            string                `json:"task_type"`
-	TargetAgentID       string                `json:"target_agent_id"`
-	TargetOfflinePolicy string                `json:"target_offline_policy"`
-	PayloadEncoding     string                `json:"payload_encoding"`
-	Payload             scheduledTurnEnvelope `json:"payload"`
-	Workspace           string                `json:"workspace"`
-	Metadata            map[string]string     `json:"metadata"`
-	Retry               map[string]any        `json:"retry"`
+	Type                            string                `json:"type"`
+	TaskType                        string                `json:"task_type"`
+	TargetAgentID                   string                `json:"target_agent_id"`
+	TargetOfflinePolicy             string                `json:"target_offline_policy"`
+	PayloadEncoding                 string                `json:"payload_encoding"`
+	Payload                         scheduledTurnEnvelope `json:"payload"`
+	Workspace                       string                `json:"workspace"`
+	Metadata                        map[string]string     `json:"metadata"`
+	Retry                           map[string]any        `json:"retry"`
+	RequireTaskAuthority            bool                  `json:"require_task_authority,omitempty"`
+	RequiredDownstreamAuthorityHops uint32                `json:"required_downstream_authority_hops,omitempty"`
 }
 
 type scheduledWorkflowDefinition struct {
@@ -293,7 +304,9 @@ func scheduledWorkflowData(routingWorkspace, assignedTo string, registration Sch
 			TargetAgentID: assignedTo, TargetOfflinePolicy: registration.TargetOfflinePolicy,
 			PayloadEncoding: "json", Payload: envelope,
 			Workspace: routingWorkspace, Metadata: scheduledTurnMetadata(envelope),
-			Retry: map[string]any{"max_attempts": 1},
+			Retry:                           map[string]any{"max_attempts": 1},
+			RequireTaskAuthority:            registration.RequireTaskAuthority,
+			RequiredDownstreamAuthorityHops: registration.RequiredDownstreamAuthorityHops,
 		},
 	}
 	return json.Marshal(definition)
@@ -614,9 +627,35 @@ func IsScheduledTurnMessage(message protocol.ChatMessage) bool {
 }
 
 type scheduleOperations interface {
-	ListSchedules(context.Context, string) (*sdk.WorkflowResponse, error)
-	UpsertSchedule(context.Context, []byte) (*sdk.WorkflowResponse, error)
-	DeleteSchedule(context.Context, string) (*sdk.WorkflowResponse, error)
+	ListSchedulesAuthorized(context.Context, string, *pb.AuthorizationContext) (*sdk.WorkflowResponse, error)
+	UpsertScheduleWithOptions(context.Context, []byte, sdk.WorkflowScheduleOperationOptions) (*sdk.WorkflowResponse, error)
+	DeleteScheduleAuthorized(context.Context, string, string, *pb.AuthorizationContext) (*sdk.WorkflowResponse, error)
+}
+
+type ScheduledTurnAuthorityOperation string
+
+const (
+	ScheduledTurnAuthorityList   ScheduledTurnAuthorityOperation = "list"
+	ScheduledTurnAuthorityUpsert ScheduledTurnAuthorityOperation = "upsert"
+	ScheduledTurnAuthorityDelete ScheduledTurnAuthorityOperation = "delete"
+)
+
+// ScheduledTurnAuthorityRequest is credential-free context for one schedule
+// management operation. Registration is present only for upsert and is a copy;
+// providers must derive credentials from their own authority source.
+type ScheduledTurnAuthorityRequest struct {
+	Operation          ScheduledTurnAuthorityOperation
+	RoutingWorkspace   string
+	WorkflowScheduleID string
+	AssignedTo         string
+	Registration       *ScheduledTurnRegistration
+}
+
+// ScheduledTurnAuthority remains on the Aether transport envelope. It is never
+// serialized into scheduledWorkflowDefinition, the task payload, or metadata.
+type ScheduledTurnAuthority struct {
+	Authorization  *pb.AuthorizationContext
+	AuthorityScope *pb.WorkflowScheduleAuthorityScope
 }
 
 // EnableScheduledTurns registers one mutable assignment handler, then applies
@@ -629,6 +668,9 @@ func (c *Channel) EnableScheduledTurns(
 ) error {
 	c.scheduleReconcileMu.Lock()
 	defer c.scheduleReconcileMu.Unlock()
+	if err := c.validateScheduledTurnAuthorityRequirements(registrations); err != nil {
+		return err
+	}
 	executor, err := NewScheduledTurnExecutor(
 		c.client, c.workspace, c.Topic(), registrations, c, handoff, timeout,
 	)
@@ -657,6 +699,9 @@ func (c *Channel) UpdateScheduledTurns(ctx context.Context, registrations []Sche
 	c.scheduledTurnsMu.RUnlock()
 	if executor == nil {
 		return errors.New("aether: scheduled turns are not enabled")
+	}
+	if err := c.validateScheduledTurnAuthorityRequirements(registrations); err != nil {
+		return err
 	}
 	if err := executor.ReplaceRegistrations(registrations); err != nil {
 		return err
@@ -687,7 +732,17 @@ func (c *Channel) reconcileScheduledTurnDefinitions(ctx context.Context, registr
 		if err != nil {
 			return err
 		}
-		response, err := c.scheduleOps.UpsertSchedule(ctx, data)
+		registrationCopy := registration
+		authority, err := c.authorityForScheduledTurn(ctx, ScheduledTurnAuthorityRequest{
+			Operation: ScheduledTurnAuthorityUpsert, RoutingWorkspace: c.workspace,
+			WorkflowScheduleID: scheduleID, AssignedTo: c.Topic(), Registration: &registrationCopy,
+		})
+		if err != nil {
+			return fmt.Errorf("aether: authorize schedule %q: %w", registration.ID, err)
+		}
+		response, err := c.scheduleOps.UpsertScheduleWithOptions(ctx, data, sdk.WorkflowScheduleOperationOptions{
+			Authorization: authority.Authorization, AuthorityScope: authority.AuthorityScope,
+		})
 		if err != nil {
 			return fmt.Errorf("aether: upsert schedule %q: %w", registration.ID, err)
 		}
@@ -702,7 +757,14 @@ func (c *Channel) reconcileScheduledTurnDefinitions(ctx context.Context, registr
 	}
 	sort.Strings(deleteIDs)
 	for _, id := range deleteIDs {
-		response, err := c.scheduleOps.DeleteSchedule(ctx, id)
+		authority, err := c.authorityForScheduledTurn(ctx, ScheduledTurnAuthorityRequest{
+			Operation: ScheduledTurnAuthorityDelete, RoutingWorkspace: c.workspace,
+			WorkflowScheduleID: id, AssignedTo: c.Topic(),
+		})
+		if err != nil {
+			return fmt.Errorf("aether: authorize stale schedule %q deletion: %w", id, err)
+		}
+		response, err := c.scheduleOps.DeleteScheduleAuthorized(ctx, c.workspace, id, authority.Authorization)
 		if err != nil {
 			return fmt.Errorf("aether: delete stale schedule %q: %w", id, err)
 		}
@@ -713,11 +775,29 @@ func (c *Channel) reconcileScheduledTurnDefinitions(ctx context.Context, registr
 	return nil
 }
 
+func (c *Channel) validateScheduledTurnAuthorityRequirements(registrations []ScheduledTurnRegistration) error {
+	if c.scheduledTurnAuthority != nil {
+		return nil
+	}
+	for _, registration := range registrations {
+		if registration.Enabled && registration.RequireTaskAuthority {
+			return fmt.Errorf("aether: scheduled turn %q requires task authority but no provider is configured", registration.ID)
+		}
+	}
+	return nil
+}
+
 func (c *Channel) listScheduledWorkflowDefinitions(ctx context.Context) ([]scheduledWorkflowDefinition, error) {
 	if c == nil || c.scheduleOps == nil {
 		return nil, errors.New("scheduled workflow operations are not configured")
 	}
-	response, err := c.scheduleOps.ListSchedules(ctx, c.workspace)
+	authority, err := c.authorityForScheduledTurn(ctx, ScheduledTurnAuthorityRequest{
+		Operation: ScheduledTurnAuthorityList, RoutingWorkspace: c.workspace, AssignedTo: c.Topic(),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("authorize schedule list: %w", err)
+	}
+	response, err := c.scheduleOps.ListSchedulesAuthorized(ctx, c.workspace, authority.Authorization)
 	if err != nil {
 		return nil, fmt.Errorf("list schedules: %w", err)
 	}
@@ -732,6 +812,64 @@ func (c *Channel) listScheduledWorkflowDefinitions(ctx context.Context) ([]sched
 		return nil, fmt.Errorf("decode schedules: %w", err)
 	}
 	return definitions, nil
+}
+
+func (c *Channel) authorityForScheduledTurn(ctx context.Context, request ScheduledTurnAuthorityRequest) (ScheduledTurnAuthority, error) {
+	switch request.Operation {
+	case ScheduledTurnAuthorityList, ScheduledTurnAuthorityUpsert, ScheduledTurnAuthorityDelete:
+	default:
+		return ScheduledTurnAuthority{}, fmt.Errorf("unsupported schedule authority operation %q", request.Operation)
+	}
+	provider := c.scheduledTurnAuthority
+	if provider == nil {
+		if request.Registration != nil && request.Registration.RequireTaskAuthority {
+			return ScheduledTurnAuthority{}, errors.New("required task authority provider is not configured")
+		}
+		return ScheduledTurnAuthority{}, nil
+	}
+	providerRequest := request
+	if request.Registration != nil {
+		registrationCopy := *request.Registration
+		providerRequest.Registration = &registrationCopy
+	}
+	authority, err := provider.AuthorityForScheduledTurn(ctx, providerRequest)
+	if err != nil {
+		return ScheduledTurnAuthority{}, err
+	}
+	if request.Operation != ScheduledTurnAuthorityUpsert {
+		if authority.AuthorityScope != nil {
+			return ScheduledTurnAuthority{}, errors.New("schedule authority scope is valid only for upsert")
+		}
+		return cloneScheduledTurnAuthority(authority), nil
+	}
+	if request.Registration == nil {
+		return ScheduledTurnAuthority{}, errors.New("schedule upsert authority requires a registration")
+	}
+	if request.Registration.RequireTaskAuthority {
+		if authority.Authorization == nil || authority.AuthorityScope == nil {
+			return ScheduledTurnAuthority{}, errors.New("required task authority needs authorization and a bounded scope")
+		}
+		if authority.AuthorityScope.GetPolicyVersion() != sdk.WorkflowScheduleAuthorityPolicyVersion {
+			return ScheduledTurnAuthority{}, fmt.Errorf("schedule authority policy version %d is unsupported", authority.AuthorityScope.GetPolicyVersion())
+		}
+		if authority.AuthorityScope.GetRequiredTaskAuthorityHops() < request.Registration.RequiredDownstreamAuthorityHops {
+			return ScheduledTurnAuthority{}, errors.New("schedule authority scope has insufficient downstream hops")
+		}
+	} else if authority.AuthorityScope != nil {
+		return ScheduledTurnAuthority{}, errors.New("provider returned task authority for a direct schedule")
+	}
+	return cloneScheduledTurnAuthority(authority), nil
+}
+
+func cloneScheduledTurnAuthority(authority ScheduledTurnAuthority) ScheduledTurnAuthority {
+	cloned := ScheduledTurnAuthority{}
+	if authority.Authorization != nil {
+		cloned.Authorization = proto.Clone(authority.Authorization).(*pb.AuthorizationContext)
+	}
+	if authority.AuthorityScope != nil {
+		cloned.AuthorityScope = proto.Clone(authority.AuthorityScope).(*pb.WorkflowScheduleAuthorityScope)
+	}
+	return cloned
 }
 
 // ListScheduledTurnScheduleStates returns Aether's current state for the

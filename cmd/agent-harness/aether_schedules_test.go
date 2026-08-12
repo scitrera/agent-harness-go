@@ -23,6 +23,8 @@ schedules:
     prompt: Review the current workspace.
     relative_directory: ""
     allow_mutable_view: true
+    require_task_authority: true
+    required_downstream_authority_hops: 1
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -43,6 +45,7 @@ schedules:
 	if !registration.Enabled || registration.Name != "workspace-review" ||
 		registration.ThreadID != "scheduled-workspace-review" || registration.MissPolicy != aetherchan.ScheduledMissPolicyFireOnce ||
 		registration.TargetOfflinePolicy != "queue" ||
+		!registration.RequireTaskAuthority || registration.RequiredDownstreamAuthorityHops != 1 ||
 		registration.Binding.ToolHostID != "worker-a" || registration.Binding.WorkspaceID != "project-a" {
 		t.Fatalf("registration = %+v", registration)
 	}

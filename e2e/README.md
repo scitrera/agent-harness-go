@@ -187,6 +187,17 @@ and removed entries delete only schedules demonstrably owned by this exact
 worker. `schedules: []` removes every owned schedule. `enabled: false` removes
 one declaration's deterministic Aether schedule.
 
+Schedule credentials never belong in this file. The OSS Aether channel exposes
+an operation-aware `ScheduledTurnAuthorityProvider` for distributions that need
+user/OBO execution: set `require_task_authority: true` and optionally
+`required_downstream_authority_hops: 1`, then inject a provider that supplies
+the transport-only authorization and bounded Aether scope. List, upsert, and
+delete each ask the provider independently. A required-authority declaration
+fails before reconciliation when no provider is configured, while the stock OSS
+CLI continues to support direct schedules without one. The one-hop option is
+for a scheduled turn that must delegate its task authority once more, such as
+to an authorized catalog or remote tool service.
+
 ## 4. Attach the host TUI
 
 In a second terminal, from the OSS repository root (`oss/`):

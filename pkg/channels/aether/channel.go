@@ -76,6 +76,32 @@ type ToolCallAuthorizationProvider interface {
 	) (*pb.AuthorizationContext, error)
 }
 
+// ScheduledTurnAuthorityProvider supplies transport-owned authorization for
+// WorkflowEngine schedule management. Implementations may use direct or OBO
+// authority, but must never place grants in a schedule declaration or action
+// JSON. A nil provider retains direct, non-authority scheduled turns.
+type ScheduledTurnAuthorityProvider interface {
+	AuthorityForScheduledTurn(
+		ctx context.Context,
+		request ScheduledTurnAuthorityRequest,
+	) (ScheduledTurnAuthority, error)
+}
+
+type ScheduledTurnAuthorityProviderFunc func(
+	context.Context,
+	ScheduledTurnAuthorityRequest,
+) (ScheduledTurnAuthority, error)
+
+func (f ScheduledTurnAuthorityProviderFunc) AuthorityForScheduledTurn(
+	ctx context.Context,
+	request ScheduledTurnAuthorityRequest,
+) (ScheduledTurnAuthority, error) {
+	if f == nil {
+		return ScheduledTurnAuthority{}, errors.New("aether: scheduled turn authority provider function is nil")
+	}
+	return f(ctx, request)
+}
+
 // Config configures the agent-side Aether transport.
 type Config struct {
 	// ServerAddr is the gateway address, e.g. "127.0.0.1:50051". Required.
@@ -102,6 +128,10 @@ type Config struct {
 	// only when task IDs name real Aether tasks whose recipients are subscribed;
 	// the default direct-reply path supports task-less OSS deployments.
 	PreferTaskMessageLanes bool
+	// ScheduledTurnAuthority optionally authorizes schedule CRUD and supplies a
+	// bounded private grant for scheduled task creation. Required-authority
+	// declarations fail closed when this is nil.
+	ScheduledTurnAuthority ScheduledTurnAuthorityProvider
 
 	// Credentials. All optional: an aetherlite gateway in dev mode accepts an
 	// unauthenticated connection, which is the zero-setup path.
@@ -138,6 +168,7 @@ type Channel struct {
 	scheduledTurnsMu              sync.RWMutex
 	scheduleReconcileMu           sync.Mutex
 	scheduleOps                   scheduleOperations
+	scheduledTurnAuthority        ScheduledTurnAuthorityProvider
 	workerToolHost                *WorkerToolHost
 
 	tasks  chan channel.Inbound
@@ -239,6 +270,7 @@ func New(cfg Config) (*Channel, error) {
 		sessionSubscribers:     map[string]map[string]*sessionSubscriber{},
 		assignmentRouter:       NewTaskAssignmentRouter(),
 		scheduleOps:            client.Workflow(),
+		scheduledTurnAuthority: cfg.ScheduledTurnAuthority,
 	}
 	if c.sessionWorkspace == "" {
 		c.sessionWorkspace = c.workspace

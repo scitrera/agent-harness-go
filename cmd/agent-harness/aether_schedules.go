@@ -32,16 +32,18 @@ type scheduledTurnConfigFile struct {
 }
 
 type scheduledTurnDeclaration struct {
-	ID                string                `yaml:"id"`
-	Name              string                `yaml:"name"`
-	Enabled           *bool                 `yaml:"enabled"`
-	Schedule          scheduledTurnSchedule `yaml:"schedule"`
-	ThreadID          string                `yaml:"thread_id"`
-	Prompt            string                `yaml:"prompt"`
-	RelativeDirectory string                `yaml:"relative_directory"`
-	AllowMutableView  bool                  `yaml:"allow_mutable_view"`
-	AllowDirtyView    bool                  `yaml:"allow_dirty_view"`
-	OfflinePolicy     string                `yaml:"offline_policy"`
+	ID                              string                `yaml:"id"`
+	Name                            string                `yaml:"name"`
+	Enabled                         *bool                 `yaml:"enabled"`
+	Schedule                        scheduledTurnSchedule `yaml:"schedule"`
+	ThreadID                        string                `yaml:"thread_id"`
+	Prompt                          string                `yaml:"prompt"`
+	RelativeDirectory               string                `yaml:"relative_directory"`
+	AllowMutableView                bool                  `yaml:"allow_mutable_view"`
+	AllowDirtyView                  bool                  `yaml:"allow_dirty_view"`
+	OfflinePolicy                   string                `yaml:"offline_policy"`
+	RequireTaskAuthority            bool                  `yaml:"require_task_authority"`
+	RequiredDownstreamAuthorityHops uint32                `yaml:"required_downstream_authority_hops"`
 }
 
 type scheduledTurnSchedule struct {
@@ -165,8 +167,10 @@ func prepareScheduledTurnDeclarations(
 			ScheduleType:       strings.ToLower(strings.TrimSpace(declaration.Schedule.Type)),
 			ScheduleExpression: strings.TrimSpace(declaration.Schedule.Expression),
 			MissPolicy:         missPolicy, ThreadID: threadID,
-			TargetOfflinePolicy: offlinePolicy,
-			Prompt:              strings.TrimSpace(declaration.Prompt), Binding: binding,
+			TargetOfflinePolicy:             offlinePolicy,
+			RequireTaskAuthority:            declaration.RequireTaskAuthority,
+			RequiredDownstreamAuthorityHops: declaration.RequiredDownstreamAuthorityHops,
+			Prompt:                          strings.TrimSpace(declaration.Prompt), Binding: binding,
 			ViewPolicy: aetherchan.ScheduledViewPolicy{
 				WriteAccess:      writeAccess,
 				AllowMutableView: declaration.AllowMutableView,
