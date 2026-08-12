@@ -13,7 +13,7 @@ import (
 
 // LiveStateSchemaVersion versions the backend record and retained-snapshot
 // representation independently of the portable ecosystem protocol.
-const LiveStateSchemaVersion = "1"
+const LiveStateSchemaVersion = "2"
 
 // LiveState is the backend-neutral, CAS-protected operational catalog state.
 // Publications contain only the current generation for each provider
@@ -47,15 +47,15 @@ type LiveStateRecord struct {
 // RetainedSnapshot is an immutable, authorization-bound query result retained
 // long enough to serve deterministic continuation cursors.
 type RetainedSnapshot struct {
-	SchemaVersion   string                  `json:"schema_version"`
-	SnapshotID      string                  `json:"snapshot_id"`
-	CatalogRevision string                  `json:"catalog_revision"`
-	BindingDigest   string                  `json:"binding_digest"`
-	QueryDigest     string                  `json:"query_digest"`
-	Limit           uint32                  `json:"limit"`
-	CreatedAt       string                  `json:"created_at"`
-	ExpiresAt       string                  `json:"expires_at"`
-	Entries         []spec.ToolCatalogEntry `json:"entries"`
+	SchemaVersion   string                 `json:"schema_version"`
+	SnapshotID      string                 `json:"snapshot_id"`
+	CatalogRevision string                 `json:"catalog_revision"`
+	BindingDigest   string                 `json:"binding_digest"`
+	QueryDigest     string                 `json:"query_digest"`
+	Limit           uint32                 `json:"limit"`
+	CreatedAt       string                 `json:"created_at"`
+	ExpiresAt       string                 `json:"expires_at"`
+	Records         []ResolvedCatalogEntry `json:"records"`
 }
 
 // LiveBackend is the complete storage contract needed by LiveService. State

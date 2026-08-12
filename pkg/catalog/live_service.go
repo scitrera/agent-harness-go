@@ -61,6 +61,28 @@ type QueryBinding struct {
 	Context     spec.ToolCatalogContext
 }
 
+// ResolvedCatalogEntry retains the authenticated publication context beside
+// an ecosystem catalog entry. The portable query page intentionally carries
+// only entries; service adapters need this backend-owned context to route an
+// exact invocation without copying provider routes into model-owned arguments.
+type ResolvedCatalogEntry struct {
+	Entry   spec.ToolCatalogEntry   `json:"entry"`
+	Context spec.ToolCatalogContext `json:"context"`
+}
+
+// ResolvedCatalogPage is the service-private projection of one deterministic
+// catalog page. AmbiguousNames is computed over the complete retained snapshot,
+// not merely this page, so a same-name collision that straddles a cursor
+// boundary can never be exposed as an apparently unique bare tool name.
+type ResolvedCatalogPage struct {
+	SchemaVersion   string                 `json:"schema_version"`
+	SnapshotID      string                 `json:"snapshot_id"`
+	CatalogRevision string                 `json:"catalog_revision"`
+	Records         []ResolvedCatalogEntry `json:"records"`
+	AmbiguousNames  []string               `json:"ambiguous_names,omitempty"`
+	NextCursor      string                 `json:"next_cursor,omitempty"`
+}
+
 // StandaloneQueryBinding supplies explicit single-user authority for the
 // dependency-free runtime while retaining the same snapshot/cursor boundary.
 func StandaloneQueryBinding(c spec.ToolCatalogContext) QueryBinding {
@@ -368,18 +390,37 @@ func (s *LiveService) Revoke(ctx context.Context, binding MutationBinding, reque
 // Query returns a deterministic authorized page. Continuations load the exact
 // retained snapshot and never merge it with current catalog state.
 func (s *LiveService) Query(ctx context.Context, binding QueryBinding, query spec.ToolCatalogQuery) (spec.ToolCatalogPage, error) {
+	resolved, err := s.QueryResolved(ctx, binding, query)
+	if err != nil {
+		return spec.ToolCatalogPage{}, err
+	}
+	entries := make([]spec.ToolCatalogEntry, 0, len(resolved.Records))
+	for _, record := range resolved.Records {
+		entries = append(entries, record.Entry)
+	}
+	return spec.ToolCatalogPage{
+		SchemaVersion: resolved.SchemaVersion, SnapshotID: resolved.SnapshotID,
+		CatalogRevision: resolved.CatalogRevision, Entries: entries,
+		NextCursor: resolved.NextCursor,
+	}, nil
+}
+
+// QueryResolved returns the same deterministic snapshot/cursor result as
+// Query while retaining each entry's trusted publication context for an edge
+// adapter. It is an internal service projection, not a new ecosystem message.
+func (s *LiveService) QueryResolved(ctx context.Context, binding QueryBinding, query spec.ToolCatalogQuery) (ResolvedCatalogPage, error) {
 	if query.SchemaVersion == "" {
 		query.SchemaVersion = spec.ToolCatalogSchemaVersion
 	}
 	if err := query.Validate(); err != nil {
-		return spec.ToolCatalogPage{}, invalidRequest(err.Error())
+		return ResolvedCatalogPage{}, invalidRequest(err.Error())
 	}
 	if err := validateQueryBinding(binding, query.Context); err != nil {
-		return spec.ToolCatalogPage{}, unauthorized(err.Error())
+		return ResolvedCatalogPage{}, unauthorized(err.Error())
 	}
 	bindingDigest, err := digestJSON(binding)
 	if err != nil {
-		return spec.ToolCatalogPage{}, err
+		return ResolvedCatalogPage{}, err
 	}
 	queryDigest, err := digestJSON(struct {
 		Context spec.ToolCatalogContext    `json:"context"`
@@ -387,58 +428,79 @@ func (s *LiveService) Query(ctx context.Context, binding QueryBinding, query spe
 		Extra   map[string]json.RawMessage `json:"extra,omitempty"`
 	}{query.Context, strings.TrimSpace(query.Query), query.Extra})
 	if err != nil {
-		return spec.ToolCatalogPage{}, err
+		return ResolvedCatalogPage{}, err
 	}
 
 	if query.Cursor != "" {
 		cursor, err := s.decodeCursor(query.Cursor)
 		if err != nil {
-			return spec.ToolCatalogPage{}, catalogProtocolError(CatalogErrorStaleCursor, "cursor is invalid or has been modified", true)
+			return ResolvedCatalogPage{}, catalogProtocolError(CatalogErrorStaleCursor, "cursor is invalid or has been modified", true)
 		}
 		if cursor.BindingDigest != bindingDigest || cursor.QueryDigest != queryDigest || cursor.Limit != query.Limit {
-			return spec.ToolCatalogPage{}, catalogProtocolError(CatalogErrorStaleCursor, "cursor does not match this subject, context, policy epoch, query, or limit", true)
+			return ResolvedCatalogPage{}, catalogProtocolError(CatalogErrorStaleCursor, "cursor does not match this subject, context, policy epoch, query, or limit", true)
 		}
 		snapshot, found, err := s.backend.LoadSnapshot(ctx, cursor.SnapshotID)
 		if err != nil {
-			return spec.ToolCatalogPage{}, fmt.Errorf("catalog: load retained snapshot: %w", err)
+			return ResolvedCatalogPage{}, fmt.Errorf("catalog: load retained snapshot: %w", err)
 		}
 		if !found {
-			return spec.ToolCatalogPage{}, catalogProtocolError(CatalogErrorStaleSnapshot, "retained catalog snapshot is no longer available", true)
+			return ResolvedCatalogPage{}, catalogProtocolError(CatalogErrorStaleSnapshot, "retained catalog snapshot is no longer available", true)
 		}
 		if err := validateRetainedSnapshot(snapshot); err != nil {
-			return spec.ToolCatalogPage{}, fmt.Errorf("catalog: invalid retained snapshot: %w", err)
+			return ResolvedCatalogPage{}, fmt.Errorf("catalog: invalid retained snapshot: %w", err)
 		}
 		if snapshot.BindingDigest != bindingDigest || snapshot.QueryDigest != queryDigest || snapshot.Limit != query.Limit {
-			return spec.ToolCatalogPage{}, catalogProtocolError(CatalogErrorStaleCursor, "cursor binding does not match retained snapshot", true)
+			return ResolvedCatalogPage{}, catalogProtocolError(CatalogErrorStaleCursor, "cursor binding does not match retained snapshot", true)
 		}
-		if !s.now().UTC().Before(mustCatalogTime(snapshot.ExpiresAt)) || cursor.Position < 0 || cursor.Position > len(snapshot.Entries) {
-			return spec.ToolCatalogPage{}, catalogProtocolError(CatalogErrorStaleSnapshot, "retained catalog snapshot has expired", true)
+		if !s.now().UTC().Before(mustCatalogTime(snapshot.ExpiresAt)) || cursor.Position < 0 || cursor.Position > len(snapshot.Records) {
+			return ResolvedCatalogPage{}, catalogProtocolError(CatalogErrorStaleSnapshot, "retained catalog snapshot has expired", true)
 		}
-		return s.page(snapshot, cursor.Position)
+		return s.resolvedPage(snapshot, cursor.Position)
 	}
 
 	snapshot, err := s.createQuerySnapshot(ctx, binding, bindingDigest, queryDigest, query)
 	if err != nil {
-		return spec.ToolCatalogPage{}, err
+		return ResolvedCatalogPage{}, err
 	}
-	return s.page(snapshot, 0)
+	return s.resolvedPage(snapshot, 0)
 }
 
 // Describe resolves one exact immutable reference, optionally within a
 // retained query snapshot, and independently authorizes describe access.
 func (s *LiveService) Describe(ctx context.Context, binding QueryBinding, request spec.ToolCatalogDescribeRequest) (spec.ToolCatalogDescribeResult, error) {
+	resolved, err := s.DescribeResolved(ctx, binding, request)
+	if err != nil {
+		return spec.ToolCatalogDescribeResult{}, err
+	}
+	return spec.ToolCatalogDescribeResult{
+		SchemaVersion: resolved.SchemaVersion, SnapshotID: resolved.SnapshotID,
+		CatalogRevision: resolved.CatalogRevision, Entry: resolved.Record.Entry,
+	}, nil
+}
+
+// ResolvedCatalogDescribeResult retains the trusted publication context for a
+// service adapter while preserving Describe's independent authorization.
+type ResolvedCatalogDescribeResult struct {
+	SchemaVersion   string               `json:"schema_version"`
+	SnapshotID      string               `json:"snapshot_id"`
+	CatalogRevision string               `json:"catalog_revision"`
+	Record          ResolvedCatalogEntry `json:"record"`
+}
+
+// DescribeResolved is Describe's service-private context-preserving form.
+func (s *LiveService) DescribeResolved(ctx context.Context, binding QueryBinding, request spec.ToolCatalogDescribeRequest) (ResolvedCatalogDescribeResult, error) {
 	if request.SchemaVersion == "" {
 		request.SchemaVersion = spec.ToolCatalogSchemaVersion
 	}
 	if err := request.Validate(); err != nil {
-		return spec.ToolCatalogDescribeResult{}, invalidRequest(err.Error())
+		return ResolvedCatalogDescribeResult{}, invalidRequest(err.Error())
 	}
 	if err := validateQueryBinding(binding, request.Context); err != nil {
-		return spec.ToolCatalogDescribeResult{}, unauthorized(err.Error())
+		return ResolvedCatalogDescribeResult{}, unauthorized(err.Error())
 	}
 	bindingDigest, err := digestJSON(binding)
 	if err != nil {
-		return spec.ToolCatalogDescribeResult{}, err
+		return ResolvedCatalogDescribeResult{}, err
 	}
 
 	var snapshot RetainedSnapshot
@@ -446,43 +508,44 @@ func (s *LiveService) Describe(ctx context.Context, binding QueryBinding, reques
 		var found bool
 		snapshot, found, err = s.backend.LoadSnapshot(ctx, request.SnapshotID)
 		if err != nil {
-			return spec.ToolCatalogDescribeResult{}, fmt.Errorf("catalog: load retained snapshot: %w", err)
+			return ResolvedCatalogDescribeResult{}, fmt.Errorf("catalog: load retained snapshot: %w", err)
 		}
 		if !found || !s.now().UTC().Before(mustCatalogTime(snapshot.ExpiresAt)) {
-			return spec.ToolCatalogDescribeResult{}, catalogProtocolError(CatalogErrorStaleSnapshot, "retained catalog snapshot is no longer available", true)
+			return ResolvedCatalogDescribeResult{}, catalogProtocolError(CatalogErrorStaleSnapshot, "retained catalog snapshot is no longer available", true)
 		}
 		if err := validateRetainedSnapshot(snapshot); err != nil {
-			return spec.ToolCatalogDescribeResult{}, fmt.Errorf("catalog: invalid retained snapshot: %w", err)
+			return ResolvedCatalogDescribeResult{}, fmt.Errorf("catalog: invalid retained snapshot: %w", err)
 		}
 		if snapshot.BindingDigest != bindingDigest {
-			return spec.ToolCatalogDescribeResult{}, unauthorized("snapshot belongs to a different subject, context, or policy epoch")
+			return ResolvedCatalogDescribeResult{}, unauthorized("snapshot belongs to a different subject, context, or policy epoch")
 		}
 	} else {
 		snapshot, err = s.createDescribeSnapshot(ctx, binding, bindingDigest, request)
 		if err != nil {
-			return spec.ToolCatalogDescribeResult{}, err
+			return ResolvedCatalogDescribeResult{}, err
 		}
 	}
 
-	entry, count := findExactEntry(snapshot.Entries, request.Ref)
+	record, count := findExactRecord(snapshot.Records, request.Ref)
 	if count == 0 {
-		return spec.ToolCatalogDescribeResult{}, catalogProtocolError(CatalogErrorStaleGeneration, "exact tool reference is not present in the selected snapshot", false)
+		return ResolvedCatalogDescribeResult{}, catalogProtocolError(CatalogErrorStaleGeneration, "exact tool reference is not present in the selected snapshot", false)
 	}
 	if count > 1 {
-		return spec.ToolCatalogDescribeResult{}, catalogProtocolError(CatalogErrorAmbiguousRef, "exact tool reference resolved more than once", false)
+		return ResolvedCatalogDescribeResult{}, catalogProtocolError(CatalogErrorAmbiguousRef, "exact tool reference resolved more than once", false)
 	}
+	entry := record.Entry
 	allowed, err := s.authorizer.AuthorizeCatalogEntry(ctx, CatalogActionDescribe, binding, entry)
 	if err != nil {
-		return spec.ToolCatalogDescribeResult{}, fmt.Errorf("catalog: authorize describe: %w", err)
+		return ResolvedCatalogDescribeResult{}, fmt.Errorf("catalog: authorize describe: %w", err)
 	}
 	if !allowed {
-		return spec.ToolCatalogDescribeResult{}, unauthorized("describe access denied")
+		return ResolvedCatalogDescribeResult{}, unauthorized("describe access denied")
 	}
-	return spec.ToolCatalogDescribeResult{
+	return ResolvedCatalogDescribeResult{
 		SchemaVersion:   spec.ToolCatalogSchemaVersion,
 		SnapshotID:      snapshot.SnapshotID,
 		CatalogRevision: snapshot.CatalogRevision,
-		Entry:           entry,
+		Record:          record,
 	}, nil
 }
 
@@ -491,22 +554,32 @@ func (s *LiveService) Describe(ctx context.Context, binding QueryBinding, reques
 // effect-specific invocation decision. It never falls back to a bare name,
 // another revision, or a retained discovery decision.
 func (s *LiveService) ResolveInvocation(ctx context.Context, binding QueryBinding, ref spec.ToolReference) (spec.ToolCatalogEntry, error) {
+	record, err := s.ResolveInvocationRecord(ctx, binding, ref)
+	if err != nil {
+		return spec.ToolCatalogEntry{}, err
+	}
+	return record.Entry, nil
+}
+
+// ResolveInvocationRecord performs exact current-generation invocation
+// resolution and returns the trusted publication context beside the entry.
+func (s *LiveService) ResolveInvocationRecord(ctx context.Context, binding QueryBinding, ref spec.ToolReference) (ResolvedCatalogEntry, error) {
 	if err := ref.Validate(); err != nil {
-		return spec.ToolCatalogEntry{}, invalidRequest(err.Error())
+		return ResolvedCatalogEntry{}, invalidRequest(err.Error())
 	}
 	if err := validateQueryBinding(binding, binding.Context); err != nil {
-		return spec.ToolCatalogEntry{}, unauthorized(err.Error())
+		return ResolvedCatalogEntry{}, unauthorized(err.Error())
 	}
 	record, err := s.backend.LoadState(ctx)
 	if err != nil {
-		return spec.ToolCatalogEntry{}, fmt.Errorf("catalog: load live state: %w", err)
+		return ResolvedCatalogEntry{}, fmt.Errorf("catalog: load live state: %w", err)
 	}
 	state, err := prepareState(record.State, record.Exists)
 	if err != nil {
-		return spec.ToolCatalogEntry{}, fmt.Errorf("catalog: invalid backend state: %w", err)
+		return ResolvedCatalogEntry{}, fmt.Errorf("catalog: invalid backend state: %w", err)
 	}
 	now := s.now().UTC()
-	entries := make([]spec.ToolCatalogEntry, 0, 1)
+	entries := make([]ResolvedCatalogEntry, 0, 1)
 	for _, publication := range state.Publications {
 		if !publicationLiveAt(publication, now) || !contextMatches(publication.Context, binding.Context) {
 			continue
@@ -514,7 +587,7 @@ func (s *LiveService) ResolveInvocation(ctx context.Context, binding QueryBindin
 		if s.liveness != nil {
 			routable, err := s.liveness.CatalogPublicationRoutable(ctx, publication)
 			if err != nil {
-				return spec.ToolCatalogEntry{}, fmt.Errorf("catalog: check publication liveness: %w", err)
+				return ResolvedCatalogEntry{}, fmt.Errorf("catalog: check publication liveness: %w", err)
 			}
 			if !routable {
 				continue
@@ -522,26 +595,26 @@ func (s *LiveService) ResolveInvocation(ctx context.Context, binding QueryBindin
 		}
 		for _, entry := range publication.Entries {
 			if refsEqual(entry.Ref, ref) {
-				entries = append(entries, entry)
+				entries = append(entries, ResolvedCatalogEntry{Entry: entry, Context: publication.Context})
 			}
 		}
 	}
 	if len(entries) == 0 {
-		return spec.ToolCatalogEntry{}, catalogProtocolError(CatalogErrorStaleGeneration, "exact tool reference is not currently live", false)
+		return ResolvedCatalogEntry{}, catalogProtocolError(CatalogErrorStaleGeneration, "exact tool reference is not currently live", false)
 	}
 	if len(entries) > 1 {
-		return spec.ToolCatalogEntry{}, catalogProtocolError(CatalogErrorAmbiguousRef, "exact tool reference resolved more than once", false)
+		return ResolvedCatalogEntry{}, catalogProtocolError(CatalogErrorAmbiguousRef, "exact tool reference resolved more than once", false)
 	}
-	action, err := InvocationCatalogAction(entries[0].Effect)
+	action, err := InvocationCatalogAction(entries[0].Entry.Effect)
 	if err != nil {
-		return spec.ToolCatalogEntry{}, err
+		return ResolvedCatalogEntry{}, err
 	}
-	allowed, err := s.authorizer.AuthorizeCatalogEntry(ctx, action, binding, entries[0])
+	allowed, err := s.authorizer.AuthorizeCatalogEntry(ctx, action, binding, entries[0].Entry)
 	if err != nil {
-		return spec.ToolCatalogEntry{}, fmt.Errorf("catalog: authorize invocation: %w", err)
+		return ResolvedCatalogEntry{}, fmt.Errorf("catalog: authorize invocation: %w", err)
 	}
 	if !allowed {
-		return spec.ToolCatalogEntry{}, unauthorized("invocation access denied")
+		return ResolvedCatalogEntry{}, unauthorized("invocation access denied")
 	}
 	return entries[0], nil
 }
@@ -575,7 +648,7 @@ func (s *LiveService) createQuerySnapshot(ctx context.Context, binding QueryBind
 		return RetainedSnapshot{}, fmt.Errorf("catalog: invalid backend state: %w", err)
 	}
 	now := s.now().UTC()
-	entries := make([]spec.ToolCatalogEntry, 0)
+	records := make([]ResolvedCatalogEntry, 0)
 	for _, publication := range state.Publications {
 		if !publicationLiveAt(publication, now) || !contextMatches(publication.Context, query.Context) {
 			continue
@@ -598,18 +671,18 @@ func (s *LiveService) createQuerySnapshot(ctx context.Context, binding QueryBind
 				return RetainedSnapshot{}, fmt.Errorf("catalog: authorize discovery: %w", err)
 			}
 			if allowed {
-				entries = append(entries, entry)
+				records = append(records, ResolvedCatalogEntry{Entry: entry, Context: publication.Context})
 			}
 		}
 	}
-	if err := sortAndCheckEntries(entries); err != nil {
+	if err := sortAndCheckRecords(records); err != nil {
 		return RetainedSnapshot{}, err
 	}
 	revision, err := stateRevision(state)
 	if err != nil {
 		return RetainedSnapshot{}, err
 	}
-	return s.retainSnapshot(ctx, revision, bindingDigest, queryDigest, query.Limit, entries, now)
+	return s.retainSnapshot(ctx, revision, bindingDigest, queryDigest, query.Limit, records, now)
 }
 
 func (s *LiveService) createDescribeSnapshot(ctx context.Context, binding QueryBinding, bindingDigest string, request spec.ToolCatalogDescribeRequest) (RetainedSnapshot, error) {
@@ -622,7 +695,7 @@ func (s *LiveService) createDescribeSnapshot(ctx context.Context, binding QueryB
 		return RetainedSnapshot{}, fmt.Errorf("catalog: invalid backend state: %w", err)
 	}
 	now := s.now().UTC()
-	entries := make([]spec.ToolCatalogEntry, 0, 1)
+	records := make([]ResolvedCatalogEntry, 0, 1)
 	for _, publication := range state.Publications {
 		if !publicationLiveAt(publication, now) || !contextMatches(publication.Context, request.Context) {
 			continue
@@ -638,11 +711,11 @@ func (s *LiveService) createDescribeSnapshot(ctx context.Context, binding QueryB
 		}
 		for _, entry := range publication.Entries {
 			if refsEqual(entry.Ref, request.Ref) {
-				entries = append(entries, entry)
+				records = append(records, ResolvedCatalogEntry{Entry: entry, Context: publication.Context})
 			}
 		}
 	}
-	if err := sortAndCheckEntries(entries); err != nil {
+	if err := sortAndCheckRecords(records); err != nil {
 		return RetainedSnapshot{}, err
 	}
 	queryDigest, err := digestJSON(struct {
@@ -655,11 +728,11 @@ func (s *LiveService) createDescribeSnapshot(ctx context.Context, binding QueryB
 	if err != nil {
 		return RetainedSnapshot{}, err
 	}
-	return s.retainSnapshot(ctx, revision, bindingDigest, queryDigest, 1, entries, now)
+	return s.retainSnapshot(ctx, revision, bindingDigest, queryDigest, 1, records, now)
 }
 
-func (s *LiveService) retainSnapshot(ctx context.Context, revision, bindingDigest, queryDigest string, limit uint32, entries []spec.ToolCatalogEntry, now time.Time) (RetainedSnapshot, error) {
-	snapshotID, err := retainedSnapshotID(revision, bindingDigest, queryDigest, limit, entries)
+func (s *LiveService) retainSnapshot(ctx context.Context, revision, bindingDigest, queryDigest string, limit uint32, records []ResolvedCatalogEntry, now time.Time) (RetainedSnapshot, error) {
+	snapshotID, err := retainedSnapshotID(revision, bindingDigest, queryDigest, limit, records)
 	if err != nil {
 		return RetainedSnapshot{}, err
 	}
@@ -672,7 +745,7 @@ func (s *LiveService) retainSnapshot(ctx context.Context, revision, bindingDiges
 		Limit:           limit,
 		CreatedAt:       now.Format(time.RFC3339Nano),
 		ExpiresAt:       now.Add(s.snapshotRetention).Format(time.RFC3339Nano),
-		Entries:         entries,
+		Records:         records,
 	}
 	retained, err := s.backend.StoreSnapshot(ctx, snapshot, s.snapshotRetention)
 	if err != nil {
@@ -684,22 +757,23 @@ func (s *LiveService) retainSnapshot(ctx context.Context, revision, bindingDiges
 	return retained, nil
 }
 
-func (s *LiveService) page(snapshot RetainedSnapshot, position int) (spec.ToolCatalogPage, error) {
-	if position < 0 || position > len(snapshot.Entries) {
-		return spec.ToolCatalogPage{}, catalogProtocolError(CatalogErrorStaleCursor, "cursor position is outside the retained snapshot", true)
+func (s *LiveService) resolvedPage(snapshot RetainedSnapshot, position int) (ResolvedCatalogPage, error) {
+	if position < 0 || position > len(snapshot.Records) {
+		return ResolvedCatalogPage{}, catalogProtocolError(CatalogErrorStaleCursor, "cursor position is outside the retained snapshot", true)
 	}
 	end := position + int(snapshot.Limit)
-	if end > len(snapshot.Entries) {
-		end = len(snapshot.Entries)
+	if end > len(snapshot.Records) {
+		end = len(snapshot.Records)
 	}
-	entries := append([]spec.ToolCatalogEntry(nil), snapshot.Entries[position:end]...)
-	page := spec.ToolCatalogPage{
+	records := append([]ResolvedCatalogEntry(nil), snapshot.Records[position:end]...)
+	page := ResolvedCatalogPage{
 		SchemaVersion:   spec.ToolCatalogSchemaVersion,
 		SnapshotID:      snapshot.SnapshotID,
 		CatalogRevision: snapshot.CatalogRevision,
-		Entries:         entries,
+		Records:         records,
+		AmbiguousNames:  ambiguousRecordNames(snapshot.Records),
 	}
-	if end < len(snapshot.Entries) {
+	if end < len(snapshot.Records) {
 		cursor, err := s.encodeCursor(catalogCursor{
 			Version:       cursorVersion,
 			SnapshotID:    snapshot.SnapshotID,
@@ -710,7 +784,7 @@ func (s *LiveService) page(snapshot RetainedSnapshot, position int) (spec.ToolCa
 			ExpiresAt:     snapshot.ExpiresAt,
 		})
 		if err != nil {
-			return spec.ToolCatalogPage{}, err
+			return ResolvedCatalogPage{}, err
 		}
 		page.NextCursor = cursor
 	}
@@ -980,26 +1054,41 @@ func entryMatchesQuery(entry spec.ToolCatalogEntry, query string) bool {
 	return true
 }
 
-func sortAndCheckEntries(entries []spec.ToolCatalogEntry) error {
-	sort.Slice(entries, func(i, j int) bool { return refKey(entries[i].Ref) < refKey(entries[j].Ref) })
-	for i := range entries {
-		if i > 0 && refKey(entries[i-1].Ref) == refKey(entries[i].Ref) {
+func sortAndCheckRecords(records []ResolvedCatalogEntry) error {
+	sort.Slice(records, func(i, j int) bool { return refKey(records[i].Entry.Ref) < refKey(records[j].Entry.Ref) })
+	for i := range records {
+		if i > 0 && refKey(records[i-1].Entry.Ref) == refKey(records[i].Entry.Ref) {
 			return catalogProtocolError(CatalogErrorAmbiguousRef, "exact tool reference appears in multiple live publications", false)
 		}
 	}
 	return nil
 }
 
-func findExactEntry(entries []spec.ToolCatalogEntry, ref spec.ToolReference) (spec.ToolCatalogEntry, int) {
-	var found spec.ToolCatalogEntry
+func findExactRecord(records []ResolvedCatalogEntry, ref spec.ToolReference) (ResolvedCatalogEntry, int) {
+	var found ResolvedCatalogEntry
 	count := 0
-	for _, entry := range entries {
-		if refsEqual(entry.Ref, ref) {
-			found = entry
+	for _, record := range records {
+		if refsEqual(record.Entry.Ref, ref) {
+			found = record
 			count++
 		}
 	}
 	return found, count
+}
+
+func ambiguousRecordNames(records []ResolvedCatalogEntry) []string {
+	counts := make(map[string]int, len(records))
+	for _, record := range records {
+		counts[record.Entry.Ref.Name]++
+	}
+	result := make([]string, 0)
+	for name, count := range counts {
+		if count > 1 {
+			result = append(result, name)
+		}
+	}
+	sort.Strings(result)
+	return result
 }
 
 func refsEqual(left, right spec.ToolReference) bool { return refKey(left) == refKey(right) }
@@ -1100,18 +1189,21 @@ func validateRetainedSnapshot(snapshot RetainedSnapshot) error {
 		return fmt.Errorf("snapshot expiry must follow creation")
 	}
 	previous := ""
-	for i, entry := range snapshot.Entries {
-		if err := entry.Validate(); err != nil {
-			return fmt.Errorf("entries[%d]: %w", i, err)
+	for i, record := range snapshot.Records {
+		if err := record.Entry.Validate(); err != nil {
+			return fmt.Errorf("records[%d].entry: %w", i, err)
 		}
-		key := refKey(entry.Ref)
+		if err := record.Context.Validate(); err != nil {
+			return fmt.Errorf("records[%d].context: %w", i, err)
+		}
+		key := refKey(record.Entry.Ref)
 		if i > 0 && key <= previous {
-			return fmt.Errorf("snapshot entries must be unique and canonically ordered")
+			return fmt.Errorf("snapshot records must have unique, canonically ordered refs")
 		}
 		previous = key
 	}
 	expectedID, err := retainedSnapshotID(
-		snapshot.CatalogRevision, snapshot.BindingDigest, snapshot.QueryDigest, snapshot.Limit, snapshot.Entries,
+		snapshot.CatalogRevision, snapshot.BindingDigest, snapshot.QueryDigest, snapshot.Limit, snapshot.Records,
 	)
 	if err != nil {
 		return err
@@ -1122,14 +1214,14 @@ func validateRetainedSnapshot(snapshot RetainedSnapshot) error {
 	return nil
 }
 
-func retainedSnapshotID(revision, bindingDigest, queryDigest string, limit uint32, entries []spec.ToolCatalogEntry) (string, error) {
+func retainedSnapshotID(revision, bindingDigest, queryDigest string, limit uint32, records []ResolvedCatalogEntry) (string, error) {
 	return digestJSON(struct {
-		Revision      string                  `json:"revision"`
-		BindingDigest string                  `json:"binding_digest"`
-		QueryDigest   string                  `json:"query_digest"`
-		Limit         uint32                  `json:"limit"`
-		Entries       []spec.ToolCatalogEntry `json:"entries"`
-	}{revision, bindingDigest, queryDigest, limit, entries})
+		Revision      string                 `json:"revision"`
+		BindingDigest string                 `json:"binding_digest"`
+		QueryDigest   string                 `json:"query_digest"`
+		Limit         uint32                 `json:"limit"`
+		Records       []ResolvedCatalogEntry `json:"records"`
+	}{revision, bindingDigest, queryDigest, limit, records})
 }
 
 type catalogCursor struct {
