@@ -33,6 +33,10 @@ type Request struct {
 	// the registry bypasses the policy gate for this single invocation. (Durable
 	// session/always grants are recorded separately in the policy.)
 	Approved bool
+	// ToolRef is the exact provider-qualified catalog entry selected for a
+	// dynamically surfaced tool. It is nil for the standalone static-registry
+	// path and older bare-name callers.
+	ToolRef *protocol.ToolReference
 }
 
 type Result struct {
@@ -65,7 +69,12 @@ func (f HandlerFunc) Invoke(ctx context.Context, req Request) (Result, error) {
 }
 
 func RequestFromEnvelope(env protocol.ToolInvokeEnvelope) Request {
-	return Request{CallID: env.CallID, Name: env.Name, Arguments: protocol.ArgsToRaw(env.Args), Addr: env.Addr}
+	var ref *protocol.ToolReference
+	if env.ToolRef != nil {
+		cloned := *env.ToolRef
+		ref = &cloned
+	}
+	return Request{CallID: env.CallID, Name: env.Name, Arguments: protocol.ArgsToRaw(env.Args), Addr: env.Addr, ToolRef: ref}
 }
 
 func NewJSONResult(callID string, name string, payload json.RawMessage) (Result, error) {

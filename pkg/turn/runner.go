@@ -8,11 +8,13 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/scitrera/agent-harness-go/pkg/approval"
 	"github.com/scitrera/agent-harness-go/pkg/authhandoff"
 	"github.com/scitrera/agent-harness-go/pkg/bootstrap"
+	"github.com/scitrera/agent-harness-go/pkg/catalog"
 	"github.com/scitrera/agent-harness-go/pkg/channel"
 	"github.com/scitrera/agent-harness-go/pkg/commands"
 	"github.com/scitrera/agent-harness-go/pkg/compaction"
@@ -175,6 +177,10 @@ type Runner struct {
 	dedupTrailingUser   bool
 
 	toolProviders   []ToolProvider
+	toolCatalog     *catalog.LiveService
+	toolCatalogBind ToolCatalogBindingFunc
+	toolCatalogGen  string
+	toolCatalogTurn atomic.Uint64
 	staticToolNames map[string]struct{}
 	attachments     AttachmentResolver
 
@@ -318,6 +324,11 @@ type turnTools struct {
 	// it through the provider's model-facing function schema. Missing entries are
 	// ConcurrencyUnspecified and therefore sequential.
 	concurrencyByTool map[string]tools.ConcurrencyClass
+	// refByTool binds a model-visible dynamic name to the exact catalog entry
+	// admitted for this turn. catalogBinding is the trusted subject/context used
+	// again for the independent invocation decision.
+	refByTool      map[string]protocol.ToolReference
+	catalogBinding catalog.QueryBinding
 }
 
 type Config struct {
@@ -500,6 +511,16 @@ type Config struct {
 	// wins over any provider. Optional; nil → providers-less.
 	ToolProviders []ToolProvider
 
+	// ToolCatalog is the common protocol-backed operational catalog used for
+	// provider-surfaced tools. nil constructs an in-process standalone catalog,
+	// preserving dependency-free OSS operation. A distribution may supply an
+	// Aether-backed service instead.
+	ToolCatalog *catalog.LiveService
+	// ToolCatalogBinding derives trusted subject/context/policy-epoch state for
+	// catalog query and invocation. nil uses the turn's MemoryAuthority/address,
+	// with an explicit single-user fallback.
+	ToolCatalogBinding ToolCatalogBindingFunc
+
 	// Attachments, when set, resolves multimodal parts the provider cannot fetch
 	// itself (vfs_ref-only image/file parts) into a model-deliverable carrier,
 	// applied to the assembled request just before each provider call. Optional;
@@ -639,6 +660,23 @@ func NewRunner(cfg Config) (*Runner, error) {
 	}
 	// Per-turn tool sources: copied so a later caller mutation can't reach the runner.
 	toolProviders := append([]ToolProvider(nil), cfg.ToolProviders...)
+	toolCatalog := cfg.ToolCatalog
+	toolCatalogGeneration := ""
+	if len(toolProviders) > 0 {
+		var err error
+		toolCatalogGeneration, err = ids.New("tool-catalog-")
+		if err != nil {
+			return nil, fmt.Errorf("turn: initialize tool catalog generation: %w", err)
+		}
+		if toolCatalog == nil {
+			toolCatalog, err = catalog.NewStandaloneLiveService(catalog.LiveServiceOptions{
+				Now: cfg.Now, MaxLease: turnToolCatalogLease,
+			})
+			if err != nil {
+				return nil, fmt.Errorf("turn: initialize standalone tool catalog: %w", err)
+			}
+		}
+	}
 	if cfg.Goals != nil && cfg.Rubric != nil {
 		cfg.Goals.SetVerifier(cfg.Rubric)
 	}
@@ -693,6 +731,9 @@ func NewRunner(cfg Config) (*Runner, error) {
 		toolPolicy:                cfg.ToolPolicy,
 		safetyAuthorizer:          cfg.SafetyAuthorizer,
 		toolProviders:             toolProviders,
+		toolCatalog:               toolCatalog,
+		toolCatalogBind:           cfg.ToolCatalogBinding,
+		toolCatalogGen:            toolCatalogGeneration,
 		staticToolNames:           staticNames,
 		attachments:               attachments,
 		notifier:                  cfg.Notifier,
@@ -715,11 +756,11 @@ func NewRunner(cfg Config) (*Runner, error) {
 // assembleTurnTools builds the model-visible tool set for a turn: the static
 // specs plus any tools the configured ToolProviders surface for this address/user
 // (e.g. the platform-bridge registry's top-N matches for the user's message). Each
-// provider is queried in order; its descriptors merge into the specs and populate
-// the route map keyed by tool name. Best-effort — a provider error is logged and
-// skipped (static-only continues). Static tools win a name collision so a provided
-// tool can never shadow a built-in; among providers, earlier-in-list wins. When no
-// provider contributes anything, the static set is returned with a nil route map.
+// provider is queried in order; its descriptors are published into the common
+// live catalog, queried under the turn's trusted binding, and only admitted exact
+// entries merge into the model-visible specs and route map. Best-effort provider
+// discovery errors are skipped. A catalog failure degrades to the static set.
+// Static tools win a name collision; among providers, earlier-in-list wins.
 func (r *Runner) assembleTurnTools(ctx context.Context, addr protocol.MessageAddress, user protocol.ChatMessage) (tt turnTools) {
 	// Per-turn tool exclusions (WithExcludedTools) are applied at every exit so a
 	// scoped-out tool is never advertised (invokeTool separately blocks execution).
@@ -750,8 +791,8 @@ func (r *Runner) assembleTurnTools(ctx context.Context, addr protocol.MessageAdd
 	if len(r.toolProviders) == 0 {
 		return
 	}
-	specs := append([]provider.ToolSpec(nil), r.toolSpecs...)
-	route := map[string]ToolProvider{}
+	claimed := map[string]struct{}{}
+	groups := make([]discoveredProviderTools, 0, len(r.toolProviders))
 	for _, p := range r.toolProviders {
 		descs, err := p.Tools(ctx, addr, user)
 		if err != nil {
@@ -759,28 +800,42 @@ func (r *Runner) assembleTurnTools(ctx context.Context, addr protocol.MessageAdd
 				slog.String("provider", p.ID()), slog.Any("err", err))
 			continue
 		}
+		accepted := make([]tools.Descriptor, 0, len(descs))
 		for _, d := range descs {
 			if _, isStatic := r.staticToolNames[d.Name]; isStatic {
 				continue // a built-in tool always wins the name
 			}
-			if _, dup := route[d.Name]; dup {
+			if _, dup := claimed[d.Name]; dup {
 				continue // an earlier provider (or intra-batch dup) already owns it
 			}
-			route[d.Name] = p
-			if d.Trust != tools.TrustDefault {
-				trust[d.Name] = d.Trust
-			}
-			if d.Concurrency != tools.ConcurrencyUnspecified {
-				concurrency[d.Name] = d.Concurrency
-			}
-			specs = append(specs, provider.ToolSpec{Name: d.Name, Description: d.Description, Parameters: d.Parameters})
+			claimed[d.Name] = struct{}{}
+			accepted = append(accepted, d)
+		}
+		if len(accepted) > 0 {
+			groups = append(groups, discoveredProviderTools{provider: p, descriptors: accepted})
 		}
 	}
-	if len(route) == 0 {
+	if len(groups) == 0 {
 		return // no provider contributed; static-only with nil route map
 	}
-	tt.specs = specs
-	tt.providerByTool = route
+	resolved, err := r.resolveProviderCatalog(ctx, addr, user, groups)
+	if err != nil {
+		slog.WarnContext(ctx, "provider tool catalog failed; using static tools only", slog.Any("err", err))
+		return
+	}
+	if len(resolved.providerByTool) == 0 {
+		return
+	}
+	tt.specs = append(append([]provider.ToolSpec(nil), r.toolSpecs...), resolved.specs...)
+	tt.providerByTool = resolved.providerByTool
+	tt.refByTool = resolved.refByTool
+	tt.catalogBinding = resolved.binding
+	for name, level := range resolved.trustByTool {
+		trust[name] = level
+	}
+	for name, class := range resolved.concurrency {
+		concurrency[name] = class
+	}
 	if len(trust) > 0 {
 		tt.trustByTool = trust
 	}
@@ -810,6 +865,7 @@ func (r *Runner) filterExcludedTools(ctx context.Context, tt turnTools) turnTool
 		delete(tt.providerByTool, name) // nil-map delete is a safe no-op
 		delete(tt.trustByTool, name)
 		delete(tt.concurrencyByTool, name)
+		delete(tt.refByTool, name)
 	}
 	return tt
 }

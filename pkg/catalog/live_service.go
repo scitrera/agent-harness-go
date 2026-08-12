@@ -728,6 +728,7 @@ func (s *LiveService) mutate(ctx context.Context, now time.Time, change func(*Li
 			return LiveState{}, fmt.Errorf("catalog: invalid backend state: %w", err)
 		}
 		pruneTombstones(&state, now)
+		pruneExpiredPublications(&state, now, s.tombstoneRetention)
 		if err := change(&state); err != nil {
 			return LiveState{}, err
 		}
@@ -744,6 +745,18 @@ func (s *LiveService) mutate(ctx context.Context, now time.Time, change func(*Li
 		}
 	}
 	return LiveState{}, catalogProtocolError(CatalogErrorConcurrentUpdate, "catalog changed too frequently; retry the mutation", false)
+}
+
+func pruneExpiredPublications(state *LiveState, now time.Time, retention time.Duration) {
+	live := state.Publications[:0]
+	for _, publication := range state.Publications {
+		if publicationLiveAt(publication, now) {
+			live = append(live, publication)
+			continue
+		}
+		appendTombstone(state, publication, now.Add(retention))
+	}
+	state.Publications = live
 }
 
 func prepareState(state LiveState, exists bool) (LiveState, error) {

@@ -17,6 +17,7 @@ type (
 	MessageRef              = spec.MessageRef
 	ContentPart             = spec.ContentPart
 	ToolInvokeEnvelope      = spec.ToolInvokeEnvelope
+	ToolReference           = spec.ToolReference
 	Role                    = spec.Role
 	ContentPartType         = spec.PartType
 	ToolCallPartBody        = spec.ToolCallPartBody

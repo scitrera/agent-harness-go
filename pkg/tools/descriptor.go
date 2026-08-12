@@ -3,6 +3,8 @@ package tools
 import (
 	"encoding/json"
 	"sort"
+
+	spec "github.com/scitrera/ecosystem-messaging-spec/go"
 )
 
 // TrustLevel is a tool's authorization hint carried on its Descriptor: how the
@@ -53,6 +55,14 @@ type Descriptor struct {
 	Name        string
 	Description string
 	Parameters  json.RawMessage // JSON-schema object; empty => {"type":"object"}
+	// CatalogKind is the portable descriptor kind for dynamically published
+	// tools. Empty defaults to "remote" in the ToolProvider compatibility
+	// adapter.
+	CatalogKind string
+	// Effect is the highest admitted portable side-effect class. Empty defaults
+	// conservatively to execute; providers should set it when they can classify
+	// the tool more precisely.
+	Effect spec.ToolEffect
 	// Trust is the authorization hint for the tool. Zero value (TrustDefault)
 	// leaves authorization to the runtime policy; a provider may stamp a stronger
 	// hint (a later stage — no local descriptor sets it today).

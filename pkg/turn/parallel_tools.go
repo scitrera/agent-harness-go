@@ -56,8 +56,16 @@ func (r *Runner) prepareParallelTool(ctx context.Context, session *harness.Sessi
 	if toolExcluded(ctx, call.Name) {
 		return nil, fmt.Errorf("%s is not available in this context", call.Name)
 	}
+	bound, err := bindCatalogToolCall(call, tt)
+	if err != nil {
+		return nil, err
+	}
+	call = bound
 	trust := tt.trustByTool[call.Name]
 	if provider, ok := tt.providerByTool[call.Name]; ok {
+		if err := r.resolveCatalogInvocation(ctx, call, tt); err != nil {
+			return nil, err
+		}
 		in := AuthzInput{Call: call, Addr: addr, Trust: trust, ProviderID: provider.ID()}
 		if decision := r.authorizeToolProvider(ctx, in, trustBase(trust)); decision.Outcome != Allow {
 			if ctx.Err() != nil {

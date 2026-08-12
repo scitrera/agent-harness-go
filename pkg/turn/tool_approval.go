@@ -85,8 +85,16 @@ func (r *Runner) invokeTool(ctx context.Context, session *harness.Session, addr 
 			IsError: true,
 		}, nil
 	}
+	bound, err := bindCatalogToolCall(call, tt)
+	if err != nil {
+		return tools.Result{}, err
+	}
+	call = bound
 	trust := tt.trustByTool[call.Name]
 	if p, ok := tt.providerByTool[call.Name]; ok {
+		if err := r.resolveCatalogInvocation(ctx, call, tt); err != nil {
+			return tools.Result{}, err
+		}
 		return r.invokeToolProvider(ctx, p, addr, call, trust)
 	}
 	return r.invokeWithApproval(ctx, session, addr, call, trust)

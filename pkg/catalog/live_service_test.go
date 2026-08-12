@@ -147,6 +147,16 @@ func TestLiveServiceExpiredGenerationCanBeReplacedWithoutTransitionGrant(t *test
 	if _, err := service.Publish(ctx, secondBinding, testPublication("provider", "registration", "gen-2", 1, now.Add(time.Second), catalogContext, "tool")); err != nil {
 		t.Fatalf("replace expired generation: %v", err)
 	}
+	record, err := service.backend.LoadState(ctx)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if len(record.State.Publications) != 1 || record.State.Publications[0].Generation != "gen-2" {
+		t.Fatalf("live publications after expiry pruning = %+v", record.State.Publications)
+	}
+	if findTombstone(record.State.Tombstones, "provider", "registration", "gen-1") < 0 {
+		t.Fatalf("expired generation tombstone missing: %+v", record.State.Tombstones)
+	}
 }
 
 func TestLiveServiceAuthorizationLivenessAndExactDescribe(t *testing.T) {

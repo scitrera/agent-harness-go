@@ -893,6 +893,9 @@ func filterSubagentTools(tt turnTools, req subagent.Request) turnTools {
 	}
 	specs := make([]provider.ToolSpec, 0, len(tt.specs))
 	route := make(map[string]ToolProvider, len(tt.providerByTool))
+	trust := make(map[string]tools.TrustLevel, len(tt.trustByTool))
+	concurrency := make(map[string]tools.ConcurrencyClass, len(tt.concurrencyByTool))
+	refs := make(map[string]protocol.ToolReference, len(tt.refByTool))
 	for _, spec := range tt.specs {
 		if readOnly && tools.ViewMutatingTool(spec.Name) {
 			continue
@@ -904,10 +907,28 @@ func filterSubagentTools(tt turnTools, req subagent.Request) turnTools {
 		if p, ok := tt.providerByTool[spec.Name]; ok {
 			route[spec.Name] = p
 		}
+		if level, ok := tt.trustByTool[spec.Name]; ok {
+			trust[spec.Name] = level
+		}
+		if class, ok := tt.concurrencyByTool[spec.Name]; ok {
+			concurrency[spec.Name] = class
+		}
+		if ref, ok := tt.refByTool[spec.Name]; ok {
+			refs[spec.Name] = ref
+		}
 	}
-	filtered := turnTools{specs: specs}
+	filtered := turnTools{specs: specs, catalogBinding: tt.catalogBinding}
 	if len(route) > 0 {
 		filtered.providerByTool = route
+	}
+	if len(trust) > 0 {
+		filtered.trustByTool = trust
+	}
+	if len(concurrency) > 0 {
+		filtered.concurrencyByTool = concurrency
+	}
+	if len(refs) > 0 {
+		filtered.refByTool = refs
 	}
 	return filtered
 }

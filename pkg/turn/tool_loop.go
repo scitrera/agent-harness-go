@@ -116,6 +116,12 @@ func (r *Runner) runProviderLoop(ctx context.Context, session *harness.Session, 
 		if err != nil {
 			return protocol.ChatMessage{}, err
 		}
+		for i := range calls {
+			calls[i], err = bindCatalogToolCall(calls[i], tt)
+			if err != nil {
+				return protocol.ChatMessage{}, err
+			}
+		}
 		if len(calls) == 0 {
 			// Terminal assistant of the turn: stamp the summed token usage so it
 			// persists (survives finalize, which preserves Meta).

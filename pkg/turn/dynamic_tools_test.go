@@ -5,7 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 
+	spec "github.com/scitrera/ecosystem-messaging-spec/go"
+
+	"github.com/scitrera/agent-harness-go/pkg/catalog"
 	"github.com/scitrera/agent-harness-go/pkg/contextpack"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 	"github.com/scitrera/agent-harness-go/pkg/provider"
@@ -61,6 +65,12 @@ func newToolsRunner(static []provider.ToolSpec, p ToolProvider) *Runner {
 	r := &Runner{toolSpecs: static, staticToolNames: names}
 	if p != nil {
 		r.toolProviders = []ToolProvider{p}
+		live, err := catalog.NewStandaloneLiveService(catalog.LiveServiceOptions{MaxLease: turnToolCatalogLease})
+		if err != nil {
+			panic(err)
+		}
+		r.toolCatalog = live
+		r.toolCatalogGen = "test-generation"
 	}
 	return r
 }
@@ -99,6 +109,10 @@ func TestAssembleTurnTools(t *testing.T) {
 		if tt.concurrencyByTool["remote_x"] != tools.ConcurrencyParallelSafe {
 			t.Errorf("remote_x concurrency contract was not retained: %+v", tt.concurrencyByTool)
 		}
+		ref, ok := tt.refByTool["remote_x"]
+		if !ok || ref.ProviderID != "dynamic" || ref.Name != "remote_x" || ref.Revision == "" {
+			t.Errorf("remote_x exact catalog reference was not retained: %+v", ref)
+		}
 	})
 
 	t.Run("discovery error degrades to static", func(t *testing.T) {
@@ -117,11 +131,8 @@ func TestAssembleTurnTools_MultipleProviders(t *testing.T) {
 	static := []provider.ToolSpec{{Name: "local_a"}}
 	p1 := &fakeToolProvider{id: "p1", descs: []tools.Descriptor{{Name: "alpha", Description: "a"}}}
 	p2 := &fakeToolProvider{id: "p2", descs: []tools.Descriptor{{Name: "beta", Description: "b"}}}
-	r := &Runner{
-		toolSpecs:       static,
-		staticToolNames: map[string]struct{}{"local_a": {}},
-		toolProviders:   []ToolProvider{p1, p2},
-	}
+	r := newToolsRunner(static, p1)
+	r.toolProviders = append(r.toolProviders, p2)
 
 	tt := r.assembleTurnTools(context.Background(), protocol.MessageAddress{}, protocol.ChatMessage{})
 	if len(tt.specs) != 3 {
@@ -149,11 +160,11 @@ func TestAssembleTurnTools_MultipleProviders(t *testing.T) {
 }
 
 func TestInvokeTool_RoutesDynamicWithAuthority(t *testing.T) {
-	fake := &fakeDynamicProvider{}
-	r := &Runner{}
+	fake := &fakeDynamicProvider{descs: []tools.Descriptor{{Name: "remote_x", Description: "remote"}}}
+	r := newToolsRunner(nil, fake)
 	ctx := tools.WithMemoryAuthority(context.Background(), tools.MemoryAuthority{SubjectType: "user", SubjectID: "alice", GrantID: "g1"})
 	call := protocol.ToolInvokeEnvelope{CallID: "c1", Name: "remote_x"}
-	tt := turnTools{providerByTool: map[string]ToolProvider{"remote_x": fake}}
+	tt := r.assembleTurnTools(ctx, protocol.MessageAddress{WorkspaceID: "ws1", ThreadID: "t1"}, protocol.ChatMessage{})
 
 	res, err := r.invokeTool(ctx, nil, protocol.MessageAddress{}, call, tt)
 	if err != nil {
@@ -167,6 +178,73 @@ func TestInvokeTool_RoutesDynamicWithAuthority(t *testing.T) {
 	}
 	if got := fake.invoked[0].Authority; got.SubjectID != "alice" || got.GrantID != "g1" {
 		t.Errorf("dynamic invoke authority = %+v, want subject=alice grant=g1", got)
+	}
+	if fake.invoked[0].ToolRef == nil || !toolReferencesEqual(*fake.invoked[0].ToolRef, tt.refByTool["remote_x"]) {
+		t.Errorf("dynamic invoke exact ref = %+v, want %+v", fake.invoked[0].ToolRef, tt.refByTool["remote_x"])
+	}
+}
+
+func TestInvokeTool_RejectsMismatchedCatalogReference(t *testing.T) {
+	fake := &fakeDynamicProvider{descs: []tools.Descriptor{{Name: "remote_x", Description: "remote"}}}
+	r := newToolsRunner(nil, fake)
+	tt := r.assembleTurnTools(context.Background(), protocol.MessageAddress{}, protocol.ChatMessage{})
+	wrong := tt.refByTool["remote_x"]
+	wrong.Revision = "sha256:not-the-admitted-revision"
+	_, err := r.invokeTool(context.Background(), nil, protocol.MessageAddress{}, protocol.ToolInvokeEnvelope{
+		CallID: "c1", Name: "remote_x", ToolRef: &wrong,
+	}, tt)
+	if err == nil {
+		t.Fatal("mismatched exact catalog reference should be rejected")
+	}
+	if len(fake.invoked) != 0 {
+		t.Fatalf("provider invoked despite mismatched exact ref: %+v", fake.invoked)
+	}
+}
+
+func TestAssembleTurnTools_CatalogDiscoveryDecisionIsIndependent(t *testing.T) {
+	fake := &fakeDynamicProvider{descs: []tools.Descriptor{{Name: "remote_x", Description: "remote"}}}
+	r := newToolsRunner(nil, fake)
+	live, err := catalog.NewStandaloneLiveService(catalog.LiveServiceOptions{
+		MaxLease: turnToolCatalogLease,
+		Authorizer: catalog.EntryAuthorizerFunc(func(_ context.Context, action string, _ catalog.QueryBinding, entry spec.ToolCatalogEntry) (bool, error) {
+			if entry.Effect != spec.ToolEffectExecute {
+				t.Errorf("default catalog effect = %q, want execute", entry.Effect)
+			}
+			return action != catalog.CatalogActionDiscover, nil
+		}),
+	})
+	if err != nil {
+		t.Fatalf("catalog: %v", err)
+	}
+	r.toolCatalog = live
+	tt := r.assembleTurnTools(context.Background(), protocol.MessageAddress{}, protocol.ChatMessage{})
+	if len(tt.specs) != 0 || len(tt.providerByTool) != 0 || len(tt.refByTool) != 0 {
+		t.Fatalf("discovery-denied provider tool was advertised: %+v", tt)
+	}
+}
+
+func TestInvokeTool_RejectsExpiredCatalogGeneration(t *testing.T) {
+	now := time.Date(2026, 8, 11, 12, 0, 0, 0, time.UTC)
+	fake := &fakeDynamicProvider{descs: []tools.Descriptor{{Name: "remote_x", Description: "remote"}}}
+	r := newToolsRunner(nil, fake)
+	live, err := catalog.NewStandaloneLiveService(catalog.LiveServiceOptions{
+		Now: func() time.Time { return now }, MaxLease: turnToolCatalogLease,
+	})
+	if err != nil {
+		t.Fatalf("catalog: %v", err)
+	}
+	r.toolCatalog = live
+	r.now = func() time.Time { return now }
+	tt := r.assembleTurnTools(context.Background(), protocol.MessageAddress{}, protocol.ChatMessage{})
+	now = now.Add(turnToolCatalogLease + time.Second)
+	_, err = r.invokeTool(context.Background(), nil, protocol.MessageAddress{}, protocol.ToolInvokeEnvelope{
+		CallID: "c1", Name: "remote_x",
+	}, tt)
+	if err == nil {
+		t.Fatal("expired catalog generation should be rejected")
+	}
+	if len(fake.invoked) != 0 {
+		t.Fatalf("provider invoked after catalog lease expiry: %+v", fake.invoked)
 	}
 }
 
@@ -217,6 +295,9 @@ func Test_Runner_Run_dynamic_tool_result_appended_to_history(t *testing.T) {
 	}
 	if len(dyn.invoked) != 1 {
 		t.Fatalf("expected dynamic tool invoked once, got %d", len(dyn.invoked))
+	}
+	if dyn.invoked[0].ToolRef == nil {
+		t.Fatal("dynamic tool invocation did not carry an exact catalog reference")
 	}
 	var toolResults int
 	for _, m := range store.messages {
