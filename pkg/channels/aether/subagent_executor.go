@@ -292,7 +292,7 @@ func assignedAuthority(auth *pb.AuthorizationContext) (grantID, subjectType, sub
 	}
 	mode := strings.TrimSpace(auth.GetAuthorityMode())
 	grantID = strings.TrimSpace(auth.GetGrantId())
-	subjectType = strings.TrimSpace(auth.GetSubject().GetPrincipalType())
+	subjectType = normalizeAuthoritySubjectType(auth.GetSubject().GetPrincipalType())
 	subjectID = strings.TrimSpace(auth.GetSubject().GetPrincipalId())
 	switch mode {
 	case "direct":

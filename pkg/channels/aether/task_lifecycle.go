@@ -104,7 +104,7 @@ func TaskInfoAuthority(info *sdk.TaskInfo) (tools.MemoryAuthority, error) {
 	case "on_behalf_of":
 		authority := tools.MemoryAuthority{
 			GrantID:     strings.TrimSpace(info.AuthorityGrantID),
-			SubjectType: strings.TrimSpace(info.SubjectType), SubjectID: strings.TrimSpace(info.SubjectID),
+			SubjectType: normalizeAuthoritySubjectType(info.SubjectType), SubjectID: strings.TrimSpace(info.SubjectID),
 		}
 		if authority.GrantID == "" || authority.SubjectType == "" || authority.SubjectID == "" {
 			return tools.MemoryAuthority{}, errors.New("aether: task has incomplete on-behalf-of authority")
@@ -112,5 +112,21 @@ func TaskInfoAuthority(info *sdk.TaskInfo) (tools.MemoryAuthority, error) {
 		return authority, nil
 	default:
 		return tools.MemoryAuthority{}, fmt.Errorf("aether: task has unsupported authority mode %q", info.AuthorityMode)
+	}
+}
+
+// normalizeAuthoritySubjectType projects Aether's authenticated principal
+// vocabulary onto the lowercase form used by MemoryLayer and the harness.
+// Aether's model-facing surfaces use title-case values such as "User", while
+// ACL/grant and ecosystem authority records use lowercase canonical values.
+func normalizeAuthoritySubjectType(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	switch value {
+	case "workflowengine":
+		return "workflow_engine"
+	case "metricsbridge":
+		return "metrics_bridge"
+	default:
+		return value
 	}
 }
