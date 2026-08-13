@@ -34,3 +34,20 @@ func TestEntryResourceIDUsesSentinelsForAbsentSurface(t *testing.T) {
 		t.Fatalf("resource = %q, want %q", got, want)
 	}
 }
+
+func TestProviderResourceAndMutationCorrelationMatchEntryFamily(t *testing.T) {
+	contextValue := spec.ToolCatalogContext{WorkspaceID: "workspace"}
+	provider, err := ProviderResourceID(contextValue, "documents")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "workspaces/workspace/threads/!/views/!/hosts/!/surfaces/!/instances/!/providers/documents"
+	if provider != want {
+		t.Fatalf("provider resource = %q, want %q", provider, want)
+	}
+	publish := MutationCorrelation("tool.catalog.publish", "documents", "primary", "generation-1", 7)
+	if publish != MutationCorrelation("tool.catalog.publish", "documents", "primary", "generation-1", 7) ||
+		publish == MutationCorrelation("tool.catalog.revoke", "documents", "primary", "generation-1", 7) {
+		t.Fatalf("mutation correlation is not deterministic and action-bound: %q", publish)
+	}
+}

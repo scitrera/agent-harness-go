@@ -13,16 +13,28 @@ import (
 
 // LiveStateSchemaVersion versions the backend record and retained-snapshot
 // representation independently of the portable ecosystem protocol.
-const LiveStateSchemaVersion = "2"
+const LiveStateSchemaVersion = "3"
 
 // LiveState is the backend-neutral, CAS-protected operational catalog state.
 // Publications contain only the current generation for each provider
 // registration. Tombstones reject delayed messages from replaced or revoked
 // generations during a bounded replay-retention window.
 type LiveState struct {
-	SchemaVersion string                        `json:"schema_version"`
-	Publications  []spec.ToolCatalogPublication `json:"publications"`
-	Tombstones    []GenerationTombstone         `json:"tombstones,omitempty"`
+	SchemaVersion  string                        `json:"schema_version"`
+	Publications   []spec.ToolCatalogPublication `json:"publications"`
+	ProviderRoutes []ProviderRouteBinding        `json:"provider_routes,omitempty"`
+	Tombstones     []GenerationTombstone         `json:"tombstones,omitempty"`
+}
+
+// ProviderRouteBinding is authenticated operational state for one live
+// provider generation. It is deliberately separate from the portable
+// ToolCatalogContext: availability selectors describe where a tool applies,
+// while ProviderRoute identifies the exact Aether recipient that executes it.
+type ProviderRouteBinding struct {
+	ProviderID     string `json:"provider_id"`
+	RegistrationID string `json:"registration_id"`
+	Generation     string `json:"generation"`
+	ProviderRoute  string `json:"provider_route"`
 }
 
 // GenerationTombstone remembers the final accepted sequence for a generation
@@ -31,6 +43,7 @@ type GenerationTombstone struct {
 	ProviderID     string `json:"provider_id"`
 	RegistrationID string `json:"registration_id"`
 	Generation     string `json:"generation"`
+	ProviderRoute  string `json:"provider_route,omitempty"`
 	Sequence       uint64 `json:"sequence"`
 	RetainUntil    string `json:"retain_until"`
 }
@@ -169,7 +182,7 @@ func (b *MemoryBackend) pruneSnapshots(now time.Time) {
 }
 
 func cloneLiveState(state LiveState) (LiveState, error) {
-	if state.SchemaVersion == "" && len(state.Publications) == 0 && len(state.Tombstones) == 0 {
+	if state.SchemaVersion == "" && len(state.Publications) == 0 && len(state.ProviderRoutes) == 0 && len(state.Tombstones) == 0 {
 		return LiveState{}, nil
 	}
 	data, err := json.Marshal(state)

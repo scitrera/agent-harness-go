@@ -62,9 +62,63 @@ The policy file's SHA-256 prefix is included in the effective catalog policy
 epoch. Changing the policy invalidates retained cursors after service restart,
 even if `TOOL_CATALOG_POLICY_EPOCH` itself is unchanged.
 
-The receiving tool host must still compare the trusted delivery target,
-binding ID, checked-access receipt, effective scope, caller subject, and its own
-local export policy before installing the forwarded authorization into the
-single invocation context. MemoryLayer, data-connectors, and other downstream
-services then perform their normal independent ACL checks.
+## Hosting tools from an Aether agent
 
+`pkg/channels/aether.CatalogToolHost` implements the receiving boundary. It
+publishes only the registry names explicitly listed in `Exports`; registering a
+tool locally does not expose it remotely. Each export requires an immutable
+revision and effect classification. Shell, credentials, control tools, and
+other capabilities therefore remain private unless an operator deliberately
+adds them.
+
+The host's `Context` contains availability selectors only. A workspace-wide
+tool can publish `ToolCatalogContext{WorkspaceID: "project-a"}` while its exact
+`ag::project-a::<implementation>::<specifier>` provider route is retained as
+private catalog state. A route can no longer take over another route's live
+registration merely because both agents have broad catalog ACLs.
+
+Typical wiring is:
+
+```go
+host, err := aetherchan.NewCatalogToolHost(aetherchan.CatalogToolHostConfig{
+    Route:          "ag::project-a::documents::primary",
+    ProviderID:     "documents",
+    RegistrationID: "primary",
+    Generation:     "generation-2026-08-13",
+    Context:        spec.ToolCatalogContext{WorkspaceID: "project-a"},
+    Registry:       registry,
+    Sender:         agentClient,
+    Exports: []aetherchan.CatalogToolExport{{
+        Name:     "research_to_vfs",
+        Revision: "sha256:reviewed-tool-revision",
+        Effect:   spec.ToolEffectWrite,
+        InvocationAuthority: &reviewedProfile,
+    }},
+})
+if err != nil { /* fail startup */ }
+
+agentClient.OnMessage(host.Handle)
+go func() { _ = host.RunLease(ctx) }()
+```
+
+The agent must have direct checked-send access to the canonical
+`tool-catalog/provider` resource for `catalog.publish`. `RunLease` publishes,
+renews before expiry, and performs a bounded revoke during graceful shutdown;
+the lease is the crash fallback. Direct agent mutations are bound to the exact
+gateway source route and receipt correlation. Browser and Office publishers
+continue through their authenticated Platform Bridge edge but populate the
+same private route field.
+
+At invocation, the host compares the delivery target, exact entry resource,
+effect operation, call correlation, source agent, caller subject, binding ID,
+root lineage, and effective continuation scope. If the local export has no
+reviewed profile, any forwarded grant is rejected. If it has one, a missing or
+mismatched grant is rejected. Only the validated child grant is installed as
+`tools.MemoryAuthority` on that invocation's context and request. MemoryLayer,
+data-connectors, and other downstream services still perform their normal
+independent ACL checks.
+
+Cancellation is another checked send for the same exact entry/call. It carries
+the parent caller authorization for the check but requests no second authority
+continuation. The host cancels only a matching source, subject, address, call,
+and receipt, then returns the terminal `tool_cancelled` result.

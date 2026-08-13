@@ -31,6 +31,7 @@ func TestServicePreservesContextAndReportsSnapshotWideBareNameAmbiguity(t *testi
 		request := PublishRequest{
 			Binding: MutationBinding{
 				ProviderID: provider, RegistrationID: "window-1", Generation: "generation-1",
+				ProviderRoute:   catalogContext.ToolHostID,
 				RequiredContext: catalogContext,
 			},
 			Publication: publication,
@@ -85,14 +86,17 @@ func TestServicePreservesContextAndReportsSnapshotWideBareNameAmbiguity(t *testi
 
 func TestServiceRejectsUntrustedMutationAndUnboundQuery(t *testing.T) {
 	service, err := NewService(newTestResolver(t), ServiceOptions{
-		MutationSourcePrefixes: []string{"sv::platform-bridge::"}, PolicyEpoch: "policy-1",
+		PolicyEpoch: "policy-1",
 	})
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
 	catalogContext := spec.ToolCatalogContext{WorkspaceID: "project-a", ToolHostID: "host-1"}
 	request := PublishRequest{
-		Binding:     MutationBinding{ProviderID: "provider", RegistrationID: "reg", Generation: "gen", RequiredContext: catalogContext},
+		Binding: MutationBinding{
+			ProviderID: "provider", RegistrationID: "reg", Generation: "gen",
+			ProviderRoute: "ag::project-a::provider::one", RequiredContext: catalogContext,
+		},
 		Publication: testPublication("provider", "reg", "gen", catalogContext, "tool"),
 	}
 	if _, err := service.HandleJSON(context.Background(), Caller{SourceTopic: "sv::untrusted::one"}, MethodPublish, mustJSON(t, request)); err == nil || !strings.Contains(err.Error(), "not a trusted catalog edge") {
@@ -128,6 +132,83 @@ func TestServiceRejectsTrailingJSONValue(t *testing.T) {
 	)
 	if err == nil || !strings.Contains(err.Error(), "multiple JSON values") {
 		t.Fatalf("trailing JSON error = %v", err)
+	}
+}
+
+func TestServiceAdmitsCheckedDirectAgentMutationAndRejectsRouteTakeover(t *testing.T) {
+	service, err := NewService(newTestResolver(t), ServiceOptions{
+		PolicyEpoch: "policy-1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalogContext := spec.ToolCatalogContext{WorkspaceID: "project-a"}
+	route := "ag::project-a::tool-host::one"
+	publication := testPublication("documents", "tool-host-one", "generation-1", catalogContext, "vfs_search")
+	request := PublishRequest{
+		Binding: MutationBinding{
+			ProviderID: publication.ProviderID, RegistrationID: publication.RegistrationID,
+			Generation: publication.Generation, ProviderRoute: route, RequiredContext: catalogContext,
+		},
+		Publication: publication,
+	}
+	caller := directAgentMutationCaller(t, route, "sv::tool-catalog::one", MethodPublish, request.Binding, publication.Sequence)
+	if _, err := service.HandleJSON(context.Background(), caller, MethodPublish, mustJSON(t, request)); err != nil {
+		t.Fatalf("checked direct publish: %v", err)
+	}
+
+	replacement := testPublication("documents", "tool-host-one", "generation-2", catalogContext, "vfs_search")
+	replacementBinding := MutationBinding{
+		ProviderID: replacement.ProviderID, RegistrationID: replacement.RegistrationID,
+		Generation: replacement.Generation, ProviderRoute: "ag::project-a::tool-host::other",
+		RequiredContext: catalogContext, GenerationReplacement: true,
+	}
+	replacementRequest := PublishRequest{Binding: replacementBinding, Publication: replacement}
+	replacementCaller := directAgentMutationCaller(
+		t, replacementBinding.ProviderRoute, "sv::tool-catalog::one",
+		MethodPublish, replacementBinding, replacement.Sequence,
+	)
+	_, err = service.HandleJSON(context.Background(), replacementCaller, MethodPublish, mustJSON(t, replacementRequest))
+	if err == nil || !strings.Contains(err.Error(), "owned by another authenticated route") {
+		t.Fatalf("route takeover error = %v", err)
+	}
+
+	caller.AccessReceipt.Request.CorrelationId = "forged"
+	_, err = service.HandleJSON(context.Background(), caller, MethodPublish, mustJSON(t, request))
+	if err == nil || !strings.Contains(err.Error(), "exact provider action") {
+		t.Fatalf("forged receipt error = %v", err)
+	}
+}
+
+func directAgentMutationCaller(
+	t *testing.T,
+	route string,
+	deliveryTarget string,
+	method string,
+	binding MutationBinding,
+	sequence uint64,
+) Caller {
+	t.Helper()
+	resourceID, err := catalog.ProviderResourceID(binding.RequiredContext, binding.ProviderID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return Caller{
+		SourceTopic: route, DeliveryTarget: deliveryTarget,
+		AccessReceipt: &pb.AccessDecisionReceipt{
+			Allowed: true, Decision: "ALLOW", EffectiveAccessLevel: 20,
+			Request: &pb.ResourceAccessRequest{
+				ResourceType: catalogProviderResourceType, ResourceId: resourceID,
+				Operation: catalogPublishOperation, Workspace: binding.RequiredContext.WorkspaceID,
+				RequiredAccessLevel: catalogMutationAccessLevel,
+				CorrelationId: catalog.MutationCorrelation(
+					method, binding.ProviderID, binding.RegistrationID, binding.Generation, sequence,
+				),
+			},
+			Actor:         &pb.PrincipalRef{PrincipalType: "agent", PrincipalId: route},
+			AuthorityMode: "direct", DeliveryTarget: deliveryTarget,
+			ExpiresAtMs: time.Now().Add(time.Minute).UnixMilli(),
+		},
 	}
 }
 

@@ -48,6 +48,7 @@ type MutationBinding struct {
 	ProviderID            string
 	RegistrationID        string
 	Generation            string
+	ProviderRoute         string
 	RequiredContext       spec.ToolCatalogContext
 	GenerationReplacement bool
 }
@@ -69,6 +70,7 @@ type QueryBinding struct {
 type ResolvedCatalogEntry struct {
 	Entry               spec.ToolCatalogEntry       `json:"entry"`
 	Context             spec.ToolCatalogContext     `json:"context"`
+	ProviderRoute       string                      `json:"provider_route,omitempty"`
 	InvocationAuthority *InvocationAuthorityProfile `json:"invocation_authority,omitempty"`
 }
 
@@ -291,6 +293,10 @@ func (s *LiveService) Publish(ctx context.Context, binding MutationBinding, publ
 		currentIndex := findPublication(state.Publications, publication.ProviderID, publication.RegistrationID)
 		if currentIndex >= 0 {
 			current := state.Publications[currentIndex]
+			currentRoute := providerRouteFor(*state, current.ProviderID, current.RegistrationID, current.Generation)
+			if currentRoute != binding.ProviderRoute {
+				return unauthorized("provider registration is owned by another authenticated route")
+			}
 			currentExpired := !now.Before(mustCatalogTime(current.LeaseExpiresAt))
 			if current.Generation == publication.Generation {
 				if currentExpired {
@@ -306,14 +312,27 @@ func (s *LiveService) Publish(ctx context.Context, binding MutationBinding, publ
 				if !currentExpired && !binding.GenerationReplacement {
 					return catalogProtocolError(CatalogErrorStaleGeneration, "a live provider generation already owns this registration", false)
 				}
-				appendTombstone(state, current, now.Add(s.tombstoneRetention))
+				appendTombstone(state, current, currentRoute, now.Add(s.tombstoneRetention))
 			}
 			state.Publications = append(state.Publications[:currentIndex], state.Publications[currentIndex+1:]...)
+			removeProviderRoute(state, current.ProviderID, current.RegistrationID, current.Generation)
 		}
-		if findTombstone(state.Tombstones, publication.ProviderID, publication.RegistrationID, publication.Generation) >= 0 {
+		if tombstoneIndex := findTombstone(state.Tombstones, publication.ProviderID, publication.RegistrationID, publication.Generation); tombstoneIndex >= 0 {
 			return catalogProtocolError(CatalogErrorStaleGeneration, "provider generation has been replaced or revoked", false)
 		}
+		for _, tombstone := range state.Tombstones {
+			if tombstone.ProviderID == publication.ProviderID && tombstone.RegistrationID == publication.RegistrationID &&
+				tombstone.ProviderRoute != "" && tombstone.ProviderRoute != binding.ProviderRoute {
+				return unauthorized("provider registration was recently owned by another authenticated route")
+			}
+		}
 		state.Publications = append(state.Publications, publication)
+		if binding.ProviderRoute != "" {
+			state.ProviderRoutes = append(state.ProviderRoutes, ProviderRouteBinding{
+				ProviderID: publication.ProviderID, RegistrationID: publication.RegistrationID,
+				Generation: publication.Generation, ProviderRoute: binding.ProviderRoute,
+			})
+		}
 		return nil
 	})
 	if err != nil {
@@ -346,6 +365,9 @@ func (s *LiveService) Renew(ctx context.Context, binding MutationBinding, reques
 		index := findPublication(state.Publications, request.ProviderID, request.RegistrationID)
 		if index < 0 || state.Publications[index].Generation != request.Generation {
 			return catalogProtocolError(CatalogErrorStaleGeneration, "provider generation is not current", false)
+		}
+		if providerRouteFor(*state, request.ProviderID, request.RegistrationID, request.Generation) != binding.ProviderRoute {
+			return unauthorized("provider registration is owned by another authenticated route")
 		}
 		current := &state.Publications[index]
 		if !now.Before(mustCatalogTime(current.LeaseExpiresAt)) {
@@ -386,12 +408,17 @@ func (s *LiveService) Revoke(ctx context.Context, binding MutationBinding, reque
 			return catalogProtocolError(CatalogErrorStaleGeneration, "provider generation is not current", false)
 		}
 		current := state.Publications[index]
+		currentRoute := providerRouteFor(*state, request.ProviderID, request.RegistrationID, request.Generation)
+		if currentRoute != binding.ProviderRoute {
+			return unauthorized("provider registration is owned by another authenticated route")
+		}
 		if request.Sequence <= current.Sequence {
 			return catalogProtocolError(CatalogErrorStaleSequence, "revoke sequence is not newer", false)
 		}
 		current.Sequence = request.Sequence
-		appendTombstone(state, current, now.Add(s.tombstoneRetention))
+		appendTombstone(state, current, currentRoute, now.Add(s.tombstoneRetention))
 		state.Publications = append(state.Publications[:index], state.Publications[index+1:]...)
+		removeProviderRoute(state, request.ProviderID, request.RegistrationID, request.Generation)
 		return nil
 	})
 	if err != nil {
@@ -608,7 +635,11 @@ func (s *LiveService) ResolveInvocationRecord(ctx context.Context, binding Query
 		}
 		for _, entry := range publication.Entries {
 			if refsEqual(entry.Ref, ref) {
-				resolved, resolveErr := s.resolveCatalogEntry(ctx, publication.Context, entry)
+				resolved, resolveErr := s.resolveCatalogEntry(
+					ctx, publication.Context,
+					providerRouteFor(state, publication.ProviderID, publication.RegistrationID, publication.Generation),
+					entry,
+				)
 				if resolveErr != nil {
 					return ResolvedCatalogEntry{}, resolveErr
 				}
@@ -683,7 +714,11 @@ func (s *LiveService) createQuerySnapshot(ctx context.Context, binding QueryBind
 			if !entryMatchesQuery(entry, query.Query) {
 				continue
 			}
-			resolved, resolveErr := s.resolveCatalogEntry(ctx, publication.Context, entry)
+			resolved, resolveErr := s.resolveCatalogEntry(
+				ctx, publication.Context,
+				providerRouteFor(state, publication.ProviderID, publication.RegistrationID, publication.Generation),
+				entry,
+			)
 			if resolveErr != nil {
 				return RetainedSnapshot{}, resolveErr
 			}
@@ -765,7 +800,11 @@ func (s *LiveService) createDescribeSnapshot(ctx context.Context, binding QueryB
 		}
 		for _, entry := range publication.Entries {
 			if refsEqual(entry.Ref, request.Ref) {
-				resolved, resolveErr := s.resolveCatalogEntry(ctx, publication.Context, entry)
+				resolved, resolveErr := s.resolveCatalogEntry(
+					ctx, publication.Context,
+					providerRouteFor(state, publication.ProviderID, publication.RegistrationID, publication.Generation),
+					entry,
+				)
 				if resolveErr != nil {
 					return RetainedSnapshot{}, resolveErr
 				}
@@ -789,8 +828,13 @@ func (s *LiveService) createDescribeSnapshot(ctx context.Context, binding QueryB
 	return s.retainSnapshot(ctx, revision, bindingDigest, queryDigest, 1, records, now)
 }
 
-func (s *LiveService) resolveCatalogEntry(ctx context.Context, catalogContext spec.ToolCatalogContext, entry spec.ToolCatalogEntry) (ResolvedCatalogEntry, error) {
-	record := ResolvedCatalogEntry{Entry: entry, Context: catalogContext}
+func (s *LiveService) resolveCatalogEntry(
+	ctx context.Context,
+	catalogContext spec.ToolCatalogContext,
+	providerRoute string,
+	entry spec.ToolCatalogEntry,
+) (ResolvedCatalogEntry, error) {
+	record := ResolvedCatalogEntry{Entry: entry, Context: catalogContext, ProviderRoute: providerRoute}
 	if s.invocationAuthority == nil {
 		return record, nil
 	}
@@ -906,14 +950,23 @@ func pruneExpiredPublications(state *LiveState, now time.Time, retention time.Du
 			live = append(live, publication)
 			continue
 		}
-		appendTombstone(state, publication, now.Add(retention))
+		appendTombstone(
+			state, publication,
+			providerRouteFor(*state, publication.ProviderID, publication.RegistrationID, publication.Generation),
+			now.Add(retention),
+		)
+		removeProviderRoute(state, publication.ProviderID, publication.RegistrationID, publication.Generation)
 	}
 	state.Publications = live
 }
 
 func prepareState(state LiveState, exists bool) (LiveState, error) {
 	if !exists {
-		return LiveState{SchemaVersion: LiveStateSchemaVersion, Publications: []spec.ToolCatalogPublication{}}, nil
+		return LiveState{
+			SchemaVersion:  LiveStateSchemaVersion,
+			Publications:   []spec.ToolCatalogPublication{},
+			ProviderRoutes: []ProviderRouteBinding{},
+		}, nil
 	}
 	if err := validateState(state); err != nil {
 		return LiveState{}, err
@@ -939,6 +992,20 @@ func validateState(state LiveState) error {
 		seenRegistrations[registration] = struct{}{}
 		seenGenerations[registration+"\x00"+publication.Generation] = struct{}{}
 	}
+	seenRoutes := make(map[string]struct{}, len(state.ProviderRoutes))
+	for i, route := range state.ProviderRoutes {
+		if err := validateProviderRouteBinding(route); err != nil {
+			return fmt.Errorf("provider_routes[%d]: %w", i, err)
+		}
+		key := route.ProviderID + "\x00" + route.RegistrationID + "\x00" + route.Generation
+		if _, exists := seenRoutes[key]; exists {
+			return fmt.Errorf("duplicate provider route binding")
+		}
+		if _, live := seenGenerations[key]; !live {
+			return fmt.Errorf("provider route binding has no live publication")
+		}
+		seenRoutes[key] = struct{}{}
+	}
 	for i, tombstone := range state.Tombstones {
 		request := spec.ToolCatalogRevokeRequest{
 			SchemaVersion: spec.ToolCatalogSchemaVersion,
@@ -950,6 +1017,9 @@ func validateState(state LiveState) error {
 		}
 		if _, err := parseCatalogTime(tombstone.RetainUntil); err != nil {
 			return fmt.Errorf("tombstones[%d].retain_until: %w", i, err)
+		}
+		if err := validateOptionalProviderRoute(tombstone.ProviderRoute); err != nil {
+			return fmt.Errorf("tombstones[%d].provider_route: %w", i, err)
 		}
 		key := tombstone.ProviderID + "\x00" + tombstone.RegistrationID + "\x00" + tombstone.Generation
 		if _, exists := seenGenerations[key]; exists {
@@ -965,6 +1035,9 @@ func normalizeState(state *LiveState) {
 	if state.Publications == nil {
 		state.Publications = []spec.ToolCatalogPublication{}
 	}
+	if state.ProviderRoutes == nil {
+		state.ProviderRoutes = []ProviderRouteBinding{}
+	}
 	sort.Slice(state.Publications, func(i, j int) bool {
 		left, right := state.Publications[i], state.Publications[j]
 		if left.ProviderID != right.ProviderID {
@@ -974,6 +1047,16 @@ func normalizeState(state *LiveState) {
 	})
 	sort.Slice(state.Tombstones, func(i, j int) bool {
 		left, right := state.Tombstones[i], state.Tombstones[j]
+		if left.ProviderID != right.ProviderID {
+			return left.ProviderID < right.ProviderID
+		}
+		if left.RegistrationID != right.RegistrationID {
+			return left.RegistrationID < right.RegistrationID
+		}
+		return left.Generation < right.Generation
+	})
+	sort.Slice(state.ProviderRoutes, func(i, j int) bool {
+		left, right := state.ProviderRoutes[i], state.ProviderRoutes[j]
 		if left.ProviderID != right.ProviderID {
 			return left.ProviderID < right.ProviderID
 		}
@@ -994,10 +1077,10 @@ func pruneTombstones(state *LiveState, now time.Time) {
 	state.Tombstones = retained
 }
 
-func appendTombstone(state *LiveState, publication spec.ToolCatalogPublication, retainUntil time.Time) {
+func appendTombstone(state *LiveState, publication spec.ToolCatalogPublication, providerRoute string, retainUntil time.Time) {
 	state.Tombstones = append(state.Tombstones, GenerationTombstone{
 		ProviderID: publication.ProviderID, RegistrationID: publication.RegistrationID,
-		Generation: publication.Generation, Sequence: publication.Sequence,
+		Generation: publication.Generation, ProviderRoute: providerRoute, Sequence: publication.Sequence,
 		RetainUntil: retainUntil.UTC().Format(time.RFC3339Nano),
 	})
 }
@@ -1012,6 +1095,47 @@ func validateMutationBinding(binding MutationBinding) error {
 	}
 	if err := binding.RequiredContext.Validate(); err != nil {
 		return fmt.Errorf("required context: %w", err)
+	}
+	if err := validateOptionalProviderRoute(binding.ProviderRoute); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateProviderRouteBinding(binding ProviderRouteBinding) error {
+	for field, value := range map[string]string{
+		"provider_id": binding.ProviderID, "registration_id": binding.RegistrationID,
+		"generation": binding.Generation,
+	} {
+		if strings.TrimSpace(value) == "" || strings.TrimSpace(value) != value || strings.ContainsRune(value, '\x00') {
+			return fmt.Errorf("%s must be a canonical non-empty identifier", field)
+		}
+	}
+	return validateRequiredProviderRoute(binding.ProviderRoute)
+}
+
+func validateOptionalProviderRoute(route string) error {
+	if route == "" {
+		return nil
+	}
+	return validateRequiredProviderRoute(route)
+}
+
+func validateRequiredProviderRoute(route string) error {
+	if strings.TrimSpace(route) == "" || strings.TrimSpace(route) != route || strings.ContainsRune(route, '\x00') {
+		return fmt.Errorf("provider_route must be a canonical non-empty route")
+	}
+	parts := strings.Split(route, "::")
+	if len(parts) < 3 || (parts[0] != "ag" && parts[0] != "sv" && parts[0] != "us") {
+		return fmt.Errorf("provider_route must be an exact Aether agent, service, or user-session route")
+	}
+	for _, part := range parts[1:] {
+		if part == "" || strings.ContainsAny(part, "*?[]") {
+			return fmt.Errorf("provider_route must not contain wildcards or empty route parts")
+		}
+	}
+	if (parts[0] == "ag" && len(parts) != 4) || (parts[0] != "ag" && len(parts) != 3) {
+		return fmt.Errorf("provider_route has the wrong number of route parts")
 	}
 	return nil
 }
@@ -1184,6 +1308,26 @@ func findPublication(publications []spec.ToolCatalogPublication, providerID, reg
 	return -1
 }
 
+func providerRouteFor(state LiveState, providerID, registrationID, generation string) string {
+	for _, route := range state.ProviderRoutes {
+		if route.ProviderID == providerID && route.RegistrationID == registrationID && route.Generation == generation {
+			return route.ProviderRoute
+		}
+	}
+	return ""
+}
+
+func removeProviderRoute(state *LiveState, providerID, registrationID, generation string) {
+	retained := state.ProviderRoutes[:0]
+	for _, route := range state.ProviderRoutes {
+		if route.ProviderID == providerID && route.RegistrationID == registrationID && route.Generation == generation {
+			continue
+		}
+		retained = append(retained, route)
+	}
+	state.ProviderRoutes = retained
+}
+
 func findTombstone(tombstones []GenerationTombstone, providerID, registrationID, generation string) int {
 	for i, tombstone := range tombstones {
 		if tombstone.ProviderID == providerID && tombstone.RegistrationID == registrationID && tombstone.Generation == generation {
@@ -1273,6 +1417,9 @@ func validateRetainedSnapshot(snapshot RetainedSnapshot) error {
 		}
 		if err := record.Context.Validate(); err != nil {
 			return fmt.Errorf("records[%d].context: %w", i, err)
+		}
+		if err := validateOptionalProviderRoute(record.ProviderRoute); err != nil {
+			return fmt.Errorf("records[%d].provider_route: %w", i, err)
 		}
 		key := refKey(record.Entry.Ref)
 		if i > 0 && key <= previous {

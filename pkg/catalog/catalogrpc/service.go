@@ -30,15 +30,19 @@ type Caller struct {
 	SourceTopic            string
 	SubjectID              string
 	ForwardedAuthorization *pb.ForwardedAuthorization
+	AccessReceipt          *pb.AccessDecisionReceipt
+	DeliveryTarget         string
 }
 
-// MutationBinding is the private JSON form of catalog.MutationBinding. The
-// authenticated edge supplies it only after binding a provider publication to
-// the actual connection route and checked mutation receipt.
+// MutationBinding is the private JSON form of catalog.MutationBinding. A
+// trusted edge supplies the provider route it authenticated; an exact agent
+// supplies its own route and the service compares it with gateway SourceTopic
+// plus the checked mutation receipt.
 type MutationBinding struct {
 	ProviderID            string                  `json:"provider_id"`
 	RegistrationID        string                  `json:"registration_id"`
 	Generation            string                  `json:"generation"`
+	ProviderRoute         string                  `json:"provider_route,omitempty"`
 	RequiredContext       spec.ToolCatalogContext `json:"required_context"`
 	GenerationReplacement bool                    `json:"generation_replacement,omitempty"`
 }
@@ -46,7 +50,7 @@ type MutationBinding struct {
 func (b MutationBinding) catalogBinding() catalog.MutationBinding {
 	return catalog.MutationBinding{
 		ProviderID: b.ProviderID, RegistrationID: b.RegistrationID,
-		Generation: b.Generation, RequiredContext: b.RequiredContext,
+		Generation: b.Generation, ProviderRoute: b.ProviderRoute, RequiredContext: b.RequiredContext,
 		GenerationReplacement: b.GenerationReplacement,
 	}
 }
@@ -104,9 +108,6 @@ func NewService(resolver WorkspaceResolver, options ServiceOptions) (*Service, e
 		}
 		prefixes = append(prefixes, prefix)
 	}
-	if len(prefixes) == 0 {
-		return nil, fmt.Errorf("catalogrpc: at least one trusted mutation source prefix is required")
-	}
 	policyEpoch := strings.TrimSpace(options.PolicyEpoch)
 	if policyEpoch == "" || strings.ContainsRune(policyEpoch, '\x00') {
 		return nil, fmt.Errorf("catalogrpc: policy epoch is required")
@@ -144,11 +145,11 @@ func (s *Service) HandleJSON(ctx context.Context, caller Caller, method string, 
 }
 
 func (s *Service) publish(ctx context.Context, caller Caller, payload json.RawMessage) (spec.ToolCatalogMutationResult, error) {
-	if err := s.authorizeMutationCaller(caller); err != nil {
-		return spec.ToolCatalogMutationResult{}, err
-	}
 	var request PublishRequest
 	if err := decodeRequest(payload, &request); err != nil {
+		return spec.ToolCatalogMutationResult{}, err
+	}
+	if err := s.authorizeMutationCaller(caller, MethodPublish, request.Binding, request.Publication.Sequence); err != nil {
 		return spec.ToolCatalogMutationResult{}, err
 	}
 	service, err := s.workspace(ctx, request.Publication.Context.WorkspaceID)
@@ -159,11 +160,11 @@ func (s *Service) publish(ctx context.Context, caller Caller, payload json.RawMe
 }
 
 func (s *Service) renew(ctx context.Context, caller Caller, payload json.RawMessage) (spec.ToolCatalogMutationResult, error) {
-	if err := s.authorizeMutationCaller(caller); err != nil {
-		return spec.ToolCatalogMutationResult{}, err
-	}
 	var request RenewRequest
 	if err := decodeRequest(payload, &request); err != nil {
+		return spec.ToolCatalogMutationResult{}, err
+	}
+	if err := s.authorizeMutationCaller(caller, MethodRenew, request.Binding, request.Request.Sequence); err != nil {
 		return spec.ToolCatalogMutationResult{}, err
 	}
 	service, err := s.workspace(ctx, request.Binding.RequiredContext.WorkspaceID)
@@ -174,11 +175,11 @@ func (s *Service) renew(ctx context.Context, caller Caller, payload json.RawMess
 }
 
 func (s *Service) revoke(ctx context.Context, caller Caller, payload json.RawMessage) (spec.ToolCatalogMutationResult, error) {
-	if err := s.authorizeMutationCaller(caller); err != nil {
-		return spec.ToolCatalogMutationResult{}, err
-	}
 	var request RevokeRequest
 	if err := decodeRequest(payload, &request); err != nil {
+		return spec.ToolCatalogMutationResult{}, err
+	}
+	if err := s.authorizeMutationCaller(caller, MethodRevoke, request.Binding, request.Request.Sequence); err != nil {
 		return spec.ToolCatalogMutationResult{}, err
 	}
 	service, err := s.workspace(ctx, request.Binding.RequiredContext.WorkspaceID)
@@ -243,13 +244,22 @@ func (s *Service) workspace(ctx context.Context, workspace string) (*catalog.Liv
 	return service, nil
 }
 
-func (s *Service) authorizeMutationCaller(caller Caller) error {
+func (s *Service) authorizeMutationCaller(caller Caller, method string, binding MutationBinding, sequence uint64) error {
 	for _, prefix := range s.mutationSourcePrefixes {
 		if strings.HasPrefix(caller.SourceTopic, prefix) {
+			if strings.TrimSpace(binding.ProviderRoute) == "" {
+				return fmt.Errorf("catalogrpc: trusted catalog edge did not bind an exact provider route")
+			}
 			return nil
 		}
 	}
-	return fmt.Errorf("catalogrpc: mutation caller %q is not a trusted catalog edge", caller.SourceTopic)
+	if !isExactAgentRoute(caller.SourceTopic) {
+		return fmt.Errorf("catalogrpc: mutation caller %q is not a trusted catalog edge or exact agent", caller.SourceTopic)
+	}
+	if binding.ProviderRoute != caller.SourceTopic {
+		return fmt.Errorf("catalogrpc: provider route does not match the authenticated agent")
+	}
+	return validateDirectAgentMutationReceipt(caller, method, binding, sequence)
 }
 
 func requireSubject(caller Caller) error {

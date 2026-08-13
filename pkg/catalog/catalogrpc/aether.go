@@ -53,7 +53,10 @@ func (h *AetherHandler) Handle(ctx context.Context, message *sdk.Message) error 
 	if err != nil {
 		return h.reply(message.SourceTopic, request, nil, err)
 	}
-	caller := Caller{SourceTopic: message.SourceTopic}
+	caller := Caller{
+		SourceTopic: message.SourceTopic, AccessReceipt: message.AccessReceipt,
+		DeliveryTarget: h.serviceTopic,
+	}
 	if message.OnBehalfSubject != nil && message.OnBehalfSubject.GetPrincipalType() == "user" {
 		caller.SubjectID = message.OnBehalfSubject.GetPrincipalId()
 	}

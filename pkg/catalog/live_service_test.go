@@ -66,6 +66,45 @@ func TestLiveServiceQueryRetainsDeterministicSnapshot(t *testing.T) {
 	}
 }
 
+func TestLiveServiceKeepsProviderRouteSeparateFromAvailabilityContext(t *testing.T) {
+	now := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
+	service := newTestLiveService(t, &now, LiveServiceOptions{})
+	catalogContext := spec.ToolCatalogContext{WorkspaceID: "project-a"}
+	publication := testPublication(
+		"documents", "tool-host-one", "generation-1", 1,
+		now.Add(time.Minute), catalogContext, "vfs_search",
+	)
+	route := "ag::project-a::tool-host::one"
+	publishTestCatalog(t, service, MutationBinding{
+		ProviderID: publication.ProviderID, RegistrationID: publication.RegistrationID,
+		Generation: publication.Generation, ProviderRoute: route, RequiredContext: catalogContext,
+	}, publication)
+	page, err := service.QueryResolved(context.Background(), QueryBinding{
+		SubjectID: "alice", PolicyEpoch: "policy-1", Context: catalogContext,
+	}, spec.ToolCatalogQuery{
+		SchemaVersion: spec.ToolCatalogSchemaVersion, Context: catalogContext, Limit: 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Records) != 1 || page.Records[0].ProviderRoute != route || page.Records[0].Context.ToolHostID != "" {
+		t.Fatalf("resolved route/context = %+v", page.Records)
+	}
+
+	replacement := testPublication(
+		"documents", "tool-host-one", "generation-2", 1,
+		now.Add(time.Minute), catalogContext, "vfs_search",
+	)
+	_, err = service.Publish(context.Background(), MutationBinding{
+		ProviderID: replacement.ProviderID, RegistrationID: replacement.RegistrationID,
+		Generation: replacement.Generation, ProviderRoute: "ag::project-a::tool-host::other",
+		RequiredContext: catalogContext, GenerationReplacement: true,
+	}, replacement)
+	if catalogErrorCode(err) != CatalogErrorUnauthorized {
+		t.Fatalf("route takeover error = %v", err)
+	}
+}
+
 func TestLiveServiceMutationOrderingLeaseAndReplayRules(t *testing.T) {
 	now := time.Date(2026, 8, 11, 18, 0, 0, 0, time.UTC)
 	backend := newMemoryBackend(func() time.Time { return now })
