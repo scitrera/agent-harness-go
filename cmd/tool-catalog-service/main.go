@@ -6,8 +6,11 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -34,6 +37,7 @@ func run() error {
 	implementation := flag.String("implementation", envOr("TOOL_CATALOG_IMPLEMENTATION", "tool-catalog"), "Aether service implementation")
 	specifier := flag.String("specifier", envOr("AETHER_SERVICE_SPECIFIER", hostname()), "Aether service specifier")
 	policyEpoch := flag.String("policy-epoch", envOr("TOOL_CATALOG_POLICY_EPOCH", "aether-entry-v1"), "authorization policy epoch bound into snapshots")
+	authorityPolicyFile := flag.String("invocation-authority-policy", os.Getenv("TOOL_CATALOG_INVOCATION_AUTHORITY_POLICY"), "optional JSON file mapping exact tool references to caller-OBO ceilings")
 	mutationSources := flag.String("mutation-source-prefixes", envOr("TOOL_CATALOG_MUTATION_SOURCE_PREFIXES", "sv::platform-bridge::"), "comma-separated trusted mutation source prefixes")
 	keyValue := flag.String("cursor-key", os.Getenv("TOOL_CATALOG_CURSOR_KEY"), "stable cursor HMAC key (raw or base64, at least 32 bytes)")
 	flag.Parse()
@@ -68,12 +72,18 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	authorityPolicy, authorityPolicyDigest, err := loadInvocationAuthorityPolicy(*authorityPolicyFile)
+	if err != nil {
+		return err
+	}
+	resolvedPolicyEpoch := strings.TrimSpace(*policyEpoch) + ":obo-" + authorityPolicyDigest
 	pool := &workspacePool{
 		kv: client.KV(), cursorKey: cursorKey, authorizer: authorizer,
-		services: make(map[string]*catalog.LiveService),
+		invocationAuthority: authorityPolicy,
+		services:            make(map[string]*catalog.LiveService),
 	}
 	service, err := catalogrpc.NewService(pool, catalogrpc.ServiceOptions{
-		MutationSourcePrefixes: splitCSV(*mutationSources), PolicyEpoch: strings.TrimSpace(*policyEpoch),
+		MutationSourcePrefixes: splitCSV(*mutationSources), PolicyEpoch: resolvedPolicyEpoch,
 	})
 	if err != nil {
 		return err
@@ -98,11 +108,12 @@ func run() error {
 }
 
 type workspacePool struct {
-	mu         sync.Mutex
-	kv         *sdk.KV
-	cursorKey  []byte
-	authorizer catalog.EntryAuthorizer
-	services   map[string]*catalog.LiveService
+	mu                  sync.Mutex
+	kv                  *sdk.KV
+	cursorKey           []byte
+	authorizer          catalog.EntryAuthorizer
+	invocationAuthority catalog.InvocationAuthorityResolver
+	services            map[string]*catalog.LiveService
 }
 
 func (p *workspacePool) ResolveCatalogWorkspace(_ context.Context, workspace string) (*catalog.LiveService, error) {
@@ -118,7 +129,7 @@ func (p *workspacePool) ResolveCatalogWorkspace(_ context.Context, workspace str
 		return nil, err
 	}
 	service, err := catalog.NewLiveService(backend, catalog.LiveServiceOptions{
-		Authorizer: p.authorizer, CursorKey: p.cursorKey,
+		Authorizer: p.authorizer, InvocationAuthority: p.invocationAuthority, CursorKey: p.cursorKey,
 		MaxLease: 30 * time.Minute,
 	})
 	if err != nil {
@@ -126,6 +137,39 @@ func (p *workspacePool) ResolveCatalogWorkspace(_ context.Context, workspace str
 	}
 	p.services[workspace] = service
 	return service, nil
+}
+
+type invocationAuthorityPolicyFile struct {
+	Profiles []catalog.InvocationAuthorityRule `json:"profiles"`
+}
+
+func loadInvocationAuthorityPolicy(path string) (catalog.InvocationAuthorityResolver, string, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil, "none", nil
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, "", fmt.Errorf("read invocation authority policy: %w", err)
+	}
+	decoder := json.NewDecoder(strings.NewReader(string(raw)))
+	decoder.DisallowUnknownFields()
+	var file invocationAuthorityPolicyFile
+	if err := decoder.Decode(&file); err != nil {
+		return nil, "", fmt.Errorf("decode invocation authority policy: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		if err == nil {
+			return nil, "", fmt.Errorf("decode invocation authority policy: multiple JSON values")
+		}
+		return nil, "", fmt.Errorf("decode invocation authority policy: %w", err)
+	}
+	policy, err := catalog.NewStaticInvocationAuthorityPolicy(file.Profiles)
+	if err != nil {
+		return nil, "", err
+	}
+	digest := sha256.Sum256(raw)
+	return policy, hex.EncodeToString(digest[:8]), nil
 }
 
 func loadTLSConfig() (*sdk.TLSConfig, error) {

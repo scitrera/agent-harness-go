@@ -67,8 +67,9 @@ type QueryBinding struct {
 // only entries; service adapters need this backend-owned context to route an
 // exact invocation without copying provider routes into model-owned arguments.
 type ResolvedCatalogEntry struct {
-	Entry   spec.ToolCatalogEntry   `json:"entry"`
-	Context spec.ToolCatalogContext `json:"context"`
+	Entry               spec.ToolCatalogEntry       `json:"entry"`
+	Context             spec.ToolCatalogContext     `json:"context"`
+	InvocationAuthority *InvocationAuthorityProfile `json:"invocation_authority,omitempty"`
 }
 
 // ResolvedCatalogPage is the service-private projection of one deterministic
@@ -144,28 +145,30 @@ func (f PublicationLivenessFunc) CatalogPublicationRoutable(ctx context.Context,
 // when omitted a process-local random key is generated (appropriate for
 // standalone mode only).
 type LiveServiceOptions struct {
-	Authorizer         EntryAuthorizer
-	Liveness           PublicationLiveness
-	CursorKey          []byte
-	MaxLease           time.Duration
-	TombstoneRetention time.Duration
-	SnapshotRetention  time.Duration
-	MaxCASRetries      int
-	Now                func() time.Time
+	Authorizer          EntryAuthorizer
+	Liveness            PublicationLiveness
+	InvocationAuthority InvocationAuthorityResolver
+	CursorKey           []byte
+	MaxLease            time.Duration
+	TombstoneRetention  time.Duration
+	SnapshotRetention   time.Duration
+	MaxCASRetries       int
+	Now                 func() time.Time
 }
 
 // LiveService implements the ecosystem tool-catalog publication, lease,
 // deterministic query/cursor, and exact describe semantics over LiveBackend.
 type LiveService struct {
-	backend            LiveBackend
-	authorizer         EntryAuthorizer
-	liveness           PublicationLiveness
-	cursorKey          []byte
-	maxLease           time.Duration
-	tombstoneRetention time.Duration
-	snapshotRetention  time.Duration
-	maxCASRetries      int
-	now                func() time.Time
+	backend             LiveBackend
+	authorizer          EntryAuthorizer
+	liveness            PublicationLiveness
+	invocationAuthority InvocationAuthorityResolver
+	cursorKey           []byte
+	maxLease            time.Duration
+	tombstoneRetention  time.Duration
+	snapshotRetention   time.Duration
+	maxCASRetries       int
+	now                 func() time.Time
 }
 
 // CatalogError projects a stable ecosystem catalog error while remaining a Go
@@ -232,15 +235,16 @@ func NewLiveService(backend LiveBackend, options LiveServiceOptions) (*LiveServi
 		return nil, fmt.Errorf("catalog: cursor key must be at least 32 bytes")
 	}
 	return &LiveService{
-		backend:            backend,
-		authorizer:         options.Authorizer,
-		liveness:           options.Liveness,
-		cursorKey:          cursorKey,
-		maxLease:           options.MaxLease,
-		tombstoneRetention: options.TombstoneRetention,
-		snapshotRetention:  options.SnapshotRetention,
-		maxCASRetries:      options.MaxCASRetries,
-		now:                options.Now,
+		backend:             backend,
+		authorizer:          options.Authorizer,
+		liveness:            options.Liveness,
+		invocationAuthority: options.InvocationAuthority,
+		cursorKey:           cursorKey,
+		maxLease:            options.MaxLease,
+		tombstoneRetention:  options.TombstoneRetention,
+		snapshotRetention:   options.SnapshotRetention,
+		maxCASRetries:       options.MaxCASRetries,
+		now:                 options.Now,
 	}, nil
 }
 
@@ -604,7 +608,11 @@ func (s *LiveService) ResolveInvocationRecord(ctx context.Context, binding Query
 		}
 		for _, entry := range publication.Entries {
 			if refsEqual(entry.Ref, ref) {
-				entries = append(entries, ResolvedCatalogEntry{Entry: entry, Context: publication.Context})
+				resolved, resolveErr := s.resolveCatalogEntry(ctx, publication.Context, entry)
+				if resolveErr != nil {
+					return ResolvedCatalogEntry{}, resolveErr
+				}
+				entries = append(entries, resolved)
 			}
 		}
 	}
@@ -675,7 +683,11 @@ func (s *LiveService) createQuerySnapshot(ctx context.Context, binding QueryBind
 			if !entryMatchesQuery(entry, query.Query) {
 				continue
 			}
-			candidates = append(candidates, ResolvedCatalogEntry{Entry: entry, Context: publication.Context})
+			resolved, resolveErr := s.resolveCatalogEntry(ctx, publication.Context, entry)
+			if resolveErr != nil {
+				return RetainedSnapshot{}, resolveErr
+			}
+			candidates = append(candidates, resolved)
 		}
 	}
 	entries := make([]spec.ToolCatalogEntry, len(candidates))
@@ -753,7 +765,11 @@ func (s *LiveService) createDescribeSnapshot(ctx context.Context, binding QueryB
 		}
 		for _, entry := range publication.Entries {
 			if refsEqual(entry.Ref, request.Ref) {
-				records = append(records, ResolvedCatalogEntry{Entry: entry, Context: publication.Context})
+				resolved, resolveErr := s.resolveCatalogEntry(ctx, publication.Context, entry)
+				if resolveErr != nil {
+					return RetainedSnapshot{}, resolveErr
+				}
+				records = append(records, resolved)
 			}
 		}
 	}
@@ -771,6 +787,26 @@ func (s *LiveService) createDescribeSnapshot(ctx context.Context, binding QueryB
 		return RetainedSnapshot{}, err
 	}
 	return s.retainSnapshot(ctx, revision, bindingDigest, queryDigest, 1, records, now)
+}
+
+func (s *LiveService) resolveCatalogEntry(ctx context.Context, catalogContext spec.ToolCatalogContext, entry spec.ToolCatalogEntry) (ResolvedCatalogEntry, error) {
+	record := ResolvedCatalogEntry{Entry: entry, Context: catalogContext}
+	if s.invocationAuthority == nil {
+		return record, nil
+	}
+	profile, err := s.invocationAuthority.ResolveInvocationAuthority(ctx, catalogContext, entry)
+	if err != nil {
+		return ResolvedCatalogEntry{}, fmt.Errorf("catalog: resolve invocation authority: %w", err)
+	}
+	if profile == nil {
+		return record, nil
+	}
+	if err := profile.Validate(); err != nil {
+		return ResolvedCatalogEntry{}, fmt.Errorf("catalog: invalid invocation authority policy: %w", err)
+	}
+	cloned := cloneInvocationAuthorityProfile(*profile)
+	record.InvocationAuthority = &cloned
+	return record, nil
 }
 
 func (s *LiveService) retainSnapshot(ctx context.Context, revision, bindingDigest, queryDigest string, limit uint32, records []ResolvedCatalogEntry, now time.Time) (RetainedSnapshot, error) {

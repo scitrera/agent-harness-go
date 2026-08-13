@@ -47,6 +47,9 @@ the browser, the terminal UI, or stdout in `--cli` mode).
 For the full OSS local stack—AetherLite transport, MemoryLayer persistence, a
 containerized agent worker, a host TUI, and a capability-aware multi-model
 `config/models.yaml`—follow the [OSS E2E getting-started guide](e2e/README.md).
+Operators deploying the Aether live tool catalog can configure reviewed,
+per-tool downstream caller authority using the
+[tool catalog service guide](docs/tool-catalog-service.md).
 
 ### Interfaces
 
