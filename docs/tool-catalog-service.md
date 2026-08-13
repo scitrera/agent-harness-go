@@ -122,3 +122,42 @@ Cancellation is another checked send for the same exact entry/call. It carries
 the parent caller authorization for the check but requests no second authority
 continuation. The host cancels only a matching source, subject, address, call,
 and receipt, then returns the terminal `tool_cancelled` result.
+
+## Consuming the catalog from an Aether agent
+
+`pkg/channels/aether.CatalogClient` is the matching reusable consumer. Sahara
+uses this package rather than carrying a distribution-private copy, and another
+agent can use the same query/describe/invoke/cancel behavior:
+
+```go
+catalogClient, err := aetherchan.NewCatalogClient(aetherchan.CatalogClientConfig{
+    Route:  agentClient.Topic(),
+    Sender: agentClient,
+})
+if err != nil { /* fail startup */ }
+
+agentClient.OnMessage(func(_ context.Context, message *aethersdk.Message) error {
+    catalogClient.TryHandle(message)
+    return nil
+})
+
+page, err := catalogClient.QueryCatalog(ctx, query, callerAuthority)
+```
+
+The client requires a typed user OBO grant for the current path. It binds every
+waiter to both the request ID and gateway-authenticated expected source, derives
+the exact catalog-entry access request from the admitted reference, and asks
+Aether for an invocation-bound attenuated child only when the catalog's private
+record contains a reviewed authority profile. Fully autonomous direct-agent
+authority remains a separate policy mode; this client does not manufacture a
+user subject or fall back to the agent's direct identity.
+
+The OSS E2E compose stack deploys `tool-catalog-service` with a single immutable
+test-only authority rule. `TestLiveAetherCatalogAgentMemoryLayerOBO` is opt-in
+and model-free: it connects a caller agent and provider agent to the real
+gateway, publishes the provider, discovers and invokes it, then verifies the
+fresh provider child grant is used on a real `sv::memorylayer` request.
+Each run uses a fresh workspace so replay-protecting generation tombstones are
+not weakened for test convenience. It temporarily provisions only the exact
+required ACL rules through the loopback AetherLite dev admin API and restores
+the previous state. This fixture is not a production ACL provisioning model.

@@ -113,6 +113,30 @@ services:
       retries: 20
     restart: unless-stopped
 
+  # ── Deterministic live tool catalog ──────────────────────────────────────
+  #
+  # The catalog and agent worker share the locally built Go image but run
+  # separate binaries and Aether identities. The checked-in policy contains
+  # only the immutable model-free E2E provider used by the opt-in authority
+  # test; normal providers still forward no caller authority by default.
+  tool-catalog:
+    image: ${AGENT_HARNESS_IMAGE:-agent-harness:local}
+    entrypoint: ["tool-catalog-service"]
+    environment:
+      # Stable only within this loopback development stack. Real deployments
+      # must inject a secret shared by every catalog replica.
+      TOOL_CATALOG_CURSOR_KEY: agent-harness-oss-e2e-catalog-key-v1
+    command:
+      - --aether=aether:50051
+      - --specifier=e2e
+      - --invocation-authority-policy=/etc/agent-harness/catalog-authority-policy.json
+    volumes:
+      - ./config/catalog-authority-policy.json:/etc/agent-harness/catalog-authority-policy.json:ro
+    depends_on:
+      aether:
+        condition: service_healthy
+    restart: unless-stopped
+
   # ── The agent worker ──────────────────────────────────────────────────────
   agent:
     image: ${AGENT_HARNESS_IMAGE:-agent-harness:local}

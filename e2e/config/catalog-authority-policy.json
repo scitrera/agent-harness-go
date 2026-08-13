@@ -1,0 +1,24 @@
+{
+  "profiles": [
+    {
+      "ref": {
+        "provider_id": "memorylayer-e2e-provider",
+        "registration_id": "primary",
+        "generation": "generation-1",
+        "name": "remember_to_vfs",
+        "revision": "sha256:remember-to-vfs-v1"
+      },
+      "profile": {
+        "mode": "caller_obo",
+        "resource_scope": [
+          {
+            "resource_type": "memories",
+            "patterns": ["*"]
+          }
+        ],
+        "operation_scope": ["write"],
+        "max_access_level": 20
+      }
+    }
+  ]
+}

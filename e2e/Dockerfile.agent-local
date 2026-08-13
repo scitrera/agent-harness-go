@@ -23,7 +23,9 @@ RUN go mod download
 COPY . .
 
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
-    go build -ldflags="-s -w" -o /out/agent-harness ./cmd/agent-harness
+    go build -ldflags="-s -w" -o /out/agent-harness ./cmd/agent-harness && \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build -ldflags="-s -w" -o /out/tool-catalog-service ./cmd/tool-catalog-service
 
 FROM alpine:3.23.4
 
@@ -33,6 +35,7 @@ RUN apk add --no-cache ca-certificates tzdata python3 && \
     mkdir -p /workspace && chown harness:harness /workspace
 
 COPY --from=builder /out/agent-harness /usr/local/bin/agent-harness
+COPY --from=builder /out/tool-catalog-service /usr/local/bin/tool-catalog-service
 
 USER harness
 WORKDIR /workspace

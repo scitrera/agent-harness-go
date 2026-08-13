@@ -79,6 +79,10 @@ func TestAetherEntryAuthorizerChunksAndPreservesOrderedDecisions(t *testing.T) {
 	if first.GetResourceId() != wantResource {
 		t.Fatalf("resource id = %q, want %q", first.GetResourceId(), wantResource)
 	}
+	if first.GetCorrelationId() != catalogAccessCorrelation(catalog.CatalogActionDiscover, wantResource) ||
+		len(first.GetCorrelationId()) > 128 {
+		t.Fatalf("correlation id = %q", first.GetCorrelationId())
+	}
 }
 
 func TestAetherEntryAuthorizerFailsClosedOnMissingLineageAndMalformedBatch(t *testing.T) {

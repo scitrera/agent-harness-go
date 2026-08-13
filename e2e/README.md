@@ -244,6 +244,11 @@ arrives with the exact worker/view binding. Neither scenario invokes a model.
 Finally, it appends a failed refinement record through `sv::memorylayer` and
 asserts that the deployed worker returns it through `/refinements --attention`
 without entering the model path.
+The catalog scenario uses a fresh logical workspace on every run and installs
+only short-lived exact provider, entry, catalog-KV, and reply-routing ACL rules
+through AetherLite's loopback-only dev admin API. It restores every prior rule
+afterward, then verifies that the provider receives a newly derived user-OBO
+child and uses it for a real MemoryLayer write.
 
 ## 5. Exercise model capabilities
 
@@ -295,13 +300,27 @@ when testing provider separation.
   MemoryLayer view, declaration digest, and revision remain pinned at ingress;
 - the worker can browse the bounded MemoryLayer-authoritative refinement audit
   through `/refinements` without relying on a model response or client cache;
+- the opt-in model-free catalog test can publish an arbitrary provider agent,
+  derive a per-invocation caller-OBO child, and use it on a real MemoryLayer
+  request without routing the invocation through Sahara or Platform Bridge;
 - the OSS executable loads `config/models.yaml`, supports `/model` pins, routes
   images by declared capability, and can resolve a provider per model;
 - the build consumes the untagged sibling source graph used during development.
 
 It does not prove production authentication, semantic retrieval quality with the
 default lexical embedder, model execution for a scheduled prompt, or recovery
-across a deliberately interrupted scheduled turn.
+across a deliberately interrupted scheduled turn. The catalog test returns a
+VFS-shaped reference stored as MemoryLayer metadata; it does not replace the
+enterprise data-connector/materialization E2E.
+
+Run that focused live test after `up` has rebuilt the local agent image:
+
+```bash
+AETHER_CATALOG_E2E=1 AETHER_E2E_ADDR=127.0.0.1:50051 \
+  AETHER_E2E_ADMIN_URL=http://127.0.0.1:31880 \
+  /home/drew/sdk/go1.25.10/bin/go test ./pkg/channels/aether \
+  -run TestLiveAetherCatalogAgentMemoryLayerOBO -count=1 -v
+```
 
 ## Services
 
@@ -309,6 +328,7 @@ across a deliberately interrupted scheduled turn.
 |---|---|---|
 | `aether` | 50051, 31880 | AetherLite in dev mode — the broker between UI(s) and agent |
 | `memorylayer` | 61001 | threads, transcripts, and the memories distilled from them |
+| `tool-catalog` | — | deterministic catalog service with one reviewed model-free E2E authority profile |
 | `agent` | — | the harness, `--serve`; dials out, exposes nothing |
 | `embed-server` | — | opt-in, real embeddings (`--profile embed`) |
 

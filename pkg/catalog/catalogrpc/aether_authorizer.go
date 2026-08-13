@@ -2,6 +2,8 @@ package catalogrpc
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 
 	pb "github.com/scitrera/aether/api/proto"
@@ -68,7 +70,7 @@ func (a *AetherEntryAuthorizer) AuthorizeCatalogEntries(ctx context.Context, act
 			requests[i-start] = &pb.ResourceAccessRequest{
 				ResourceType: "tool-catalog/entry", ResourceId: resourceID,
 				Operation: action, Workspace: binding.Context.WorkspaceID,
-				RequiredAccessLevel: requiredLevel,
+				RequiredAccessLevel: requiredLevel, CorrelationId: catalogAccessCorrelation(action, resourceID),
 			}
 		}
 		receipts, checkErr := a.checker.BatchCheckAccess(ctx, requests, forwarded.GetAuthorization())
@@ -86,6 +88,11 @@ func (a *AetherEntryAuthorizer) AuthorizeCatalogEntries(ctx context.Context, act
 		}
 	}
 	return decisions, nil
+}
+
+func catalogAccessCorrelation(action, resourceID string) string {
+	digest := sha256.Sum256([]byte(action + "\x00" + resourceID))
+	return "catalog.access." + hex.EncodeToString(digest[:])
 }
 
 func catalogActionAccessLevel(action string) (int32, error) {
