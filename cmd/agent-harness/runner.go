@@ -49,6 +49,9 @@ func buildRunner(cfg appConfig, st stores, pub channel.Publisher, approvals appr
 	if err != nil {
 		return nil, nil, fmt.Errorf("workspace: %w", err)
 	}
+	if err := ws.AddReadRoots(cfg.systemSkillsDirs...); err != nil {
+		return nil, nil, fmt.Errorf("system skill roots: %w", err)
+	}
 	exa, err := localtools.NewExaClient("https://api.exa.ai/search", os.Getenv("EXA_API_KEY"), true, nil)
 	if err != nil {
 		return nil, nil, fmt.Errorf("exa: %w", err)
@@ -121,7 +124,12 @@ func buildRunner(cfg appConfig, st stores, pub channel.Publisher, approvals appr
 		return nil, nil, fmt.Errorf("provider: %w", err)
 	}
 
-	skillSpecs, skillWarnings, _ := skills.DiscoverWithWarnings(cfg.workspaceRoot, []string{"skills", ".agent-harness-skills"})
+	workspaceSkillDirs := cfg.skillsDirs
+	if workspaceSkillDirs == nil {
+		workspaceSkillDirs = []string{"skills", ".agent-harness-skills"}
+	}
+	skillDirs := append(append([]string{}, workspaceSkillDirs...), cfg.systemSkillsDirs...)
+	skillSpecs, skillWarnings, _ := skills.DiscoverWithWarnings(cfg.workspaceRoot, skillDirs)
 	// Register load_skill so the model loads a skill by name — resolving its file
 	// and any prerequisite skills — instead of read_file'ing the path. The same
 	// mechanism the sahara distribution uses; nothing about it is distribution-specific.
@@ -130,7 +138,12 @@ func buildRunner(cfg appConfig, st stores, pub channel.Publisher, approvals appr
 		return nil, nil, fmt.Errorf("register load_skill: %w", err)
 	}
 	reg.Describe(skills.LoadDescriptor())
-	cmdSpecs, _ := commands.Discover(cfg.workspaceRoot, []string{"commands", ".agent-harness-commands"})
+	workspaceCommandDirs := cfg.commandsDirs
+	if workspaceCommandDirs == nil {
+		workspaceCommandDirs = []string{"commands", ".agent-harness-commands"}
+	}
+	commandDirs := append(append([]string{}, workspaceCommandDirs...), cfg.systemCommandsDirs...)
+	cmdSpecs, _ := commands.Discover(cfg.workspaceRoot, commandDirs)
 
 	// MemoryLayer catalogs are resolved only after the turn's logical workspace
 	// has been defaulted. Successful skill registries and MCP managers are cached

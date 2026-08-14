@@ -75,3 +75,30 @@ func TestDiscoverEmptyRoot(t *testing.T) {
 		t.Fatalf("empty root should yield nil, got %#v err=%v", cmds, err)
 	}
 }
+
+func TestDiscoverAbsoluteRootAndWorkspacePrecedence(t *testing.T) {
+	workspace := t.TempDir()
+	system := t.TempDir()
+	writeFile(t, filepath.Join(workspace, "commands", "review.md"), "workspace review")
+	writeFile(t, filepath.Join(system, "review.md"), "system review")
+	writeFile(t, filepath.Join(system, "host.md"), "host command")
+
+	cmds, err := Discover(workspace, []string{"commands", system})
+	if err != nil {
+		t.Fatalf("discover: %v", err)
+	}
+	byName := map[string]Command{}
+	for _, cmd := range cmds {
+		byName[cmd.Name] = cmd
+	}
+	if got := byName["review"].Body; got != "workspace review" {
+		t.Fatalf("workspace command did not shadow system command: %q", got)
+	}
+	host, ok := byName["host"]
+	if !ok || host.Body != "host command" {
+		t.Fatalf("absolute host command = %#v", host)
+	}
+	if want := filepath.Join(system, "host.md"); host.Path != want {
+		t.Fatalf("absolute command path = %q, want %q", host.Path, want)
+	}
+}

@@ -34,7 +34,12 @@ func runTUIClient(cfg appConfig) error {
 	// malformed or unavailable client-side registry must not prevent attachment;
 	// /model remains the authoritative remote view.
 	statusModel := cfg.model
-	if registry, registryErr := loadAppModelRegistry(cfg.workspaceRoot); registryErr != nil {
+	registry := cfg.modelRegistry
+	var registryErr error
+	if registry == nil {
+		registry, registryErr = loadAppModelRegistry(cfg.workspaceRoot, "")
+	}
+	if registryErr != nil {
 		fmt.Fprintln(os.Stderr, "warning: client model status registry:", registryErr)
 	} else {
 		statusModel = resolveAppModel(statusModel, registry)

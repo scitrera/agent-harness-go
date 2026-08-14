@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/scitrera/agent-harness-go/pkg/configpath"
 	modelpkg "github.com/scitrera/agent-harness-go/pkg/model"
 	"github.com/scitrera/agent-harness-go/pkg/telemetry/otlpexport"
 	"github.com/scitrera/agent-harness-go/pkg/version"
@@ -25,7 +26,12 @@ func main() {
 	thread := flag.String("thread", "cli", "chat thread id (CLI/TUI mode)")
 	baseURL := flag.String("base-url", os.Getenv("SAHARA_LLM_BASE_URL"), "OpenAI-compatible base URL")
 	model := flag.String("model", env("SAHARA_LLM_MODEL", "gpt-4o-mini"), "model id")
+	modelsFile := flag.String("models-file", os.Getenv("SAHARA_MODELS_FILE"), "model registry file (absolute or workspace-relative; default config/models.yaml)")
 	llmFormat := flag.String("llm-format", env("SAHARA_LLM_FORMAT", "openai"), "provider request format: openai or native")
+	skillsDirs := flag.String("skills-dirs", env("SAHARA_SKILLS_DIRS", "skills,.agent-harness-skills"), "comma-separated workspace-relative skill roots (ordered, first name wins)")
+	systemSkillsDirs := flag.String("system-skills-dirs", os.Getenv("SAHARA_SYSTEM_SKILLS_DIRS"), "comma-separated absolute operator skill roots appended after workspace roots")
+	commandsDirs := flag.String("commands-dirs", env("SAHARA_COMMANDS_DIRS", "commands,.agent-harness-commands"), "comma-separated workspace-relative command roots (ordered, first name wins)")
+	systemCommandsDirs := flag.String("system-commands-dirs", os.Getenv("SAHARA_SYSTEM_COMMANDS_DIRS"), "comma-separated absolute operator command roots appended after workspace roots")
 	seed := flag.Bool("seed", true, "seed default workspace files when missing")
 	cliMode := flag.Bool("cli", false, "run the stdin REPL")
 	tuiMode := flag.Bool("tui", false, "run the terminal UI (default)")
@@ -80,6 +86,26 @@ func main() {
 	if *showVersion {
 		fmt.Printf("agent-harness %s\n", version.String())
 		return
+	}
+	parsedSkillsDirs := configpath.ParseList(*skillsDirs)
+	parsedSystemSkillsDirs := configpath.ParseList(*systemSkillsDirs)
+	parsedCommandsDirs := configpath.ParseList(*commandsDirs)
+	parsedSystemCommandsDirs := configpath.ParseList(*systemCommandsDirs)
+	if err := configpath.ValidateRelative("workspace skills", parsedSkillsDirs); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(2)
+	}
+	if err := configpath.ValidateAbsolute("system skills", parsedSystemSkillsDirs); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(2)
+	}
+	if err := configpath.ValidateRelative("workspace commands", parsedCommandsDirs); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(2)
+	}
+	if err := configpath.ValidateAbsolute("system commands", parsedSystemCommandsDirs); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(2)
 	}
 	parsedScheduleReloadInterval := 2 * time.Second
 	if strings.TrimSpace(*scheduleConfig) != "" {
@@ -172,8 +198,8 @@ func main() {
 		os.Exit(2)
 	}
 	var modelRegistry *modelpkg.Registry
-	if selectedMode.runsTurnsLocally(*aetherAddr) {
-		modelRegistry, err = loadAppModelRegistry(*workspace)
+	if selectedMode.runsTurnsLocally(*aetherAddr) || strings.TrimSpace(*modelsFile) != "" {
+		modelRegistry, err = loadAppModelRegistry(*workspace, *modelsFile)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "error: load model registry:", err)
 			os.Exit(2)
@@ -197,15 +223,20 @@ func main() {
 		workspaceIndexDir: *workspaceIndexDir,
 		dynamicWorkspaces: workspaceResolution.Source == workspacepkg.SourceGitRoot ||
 			workspaceResolution.Source == workspacepkg.SourceDirectory,
-		visibleWorkspaces: parseVisibleWorkspaces(*visibleWorkspaces),
-		stateDir:          stateDir,
-		thread:            *thread,
-		baseURL:           *baseURL,
-		model:             resolveAppModel(*model, modelRegistry),
-		modelRegistry:     modelRegistry,
-		llmFormat:         *llmFormat,
-		seed:              *seed,
-		record:            *record,
+		visibleWorkspaces:  parseVisibleWorkspaces(*visibleWorkspaces),
+		stateDir:           stateDir,
+		thread:             *thread,
+		baseURL:            *baseURL,
+		model:              resolveAppModel(*model, modelRegistry),
+		modelRegistry:      modelRegistry,
+		modelsFile:         strings.TrimSpace(*modelsFile),
+		llmFormat:          *llmFormat,
+		seed:               *seed,
+		record:             *record,
+		skillsDirs:         parsedSkillsDirs,
+		systemSkillsDirs:   parsedSystemSkillsDirs,
+		commandsDirs:       parsedCommandsDirs,
+		systemCommandsDirs: parsedSystemCommandsDirs,
 
 		aetherAddr:                  *aetherAddr,
 		aetherWorkspace:             effectiveWorkspace(*aetherWorkspace, workspaceResolution.WorkspaceID),

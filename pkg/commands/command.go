@@ -31,5 +31,5 @@ type Command struct {
 	Model        string   // optional per-turn model override (frontmatter model)
 	AllowedTools []string // from frontmatter allowed-tools (display only for now)
 	Body         string   // prompt template (frontmatter stripped)
-	Path         string   // workspace-relative source path
+	Path         string   // workspace-relative or absolute operator source path
 }

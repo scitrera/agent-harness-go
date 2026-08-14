@@ -4,13 +4,14 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	modelpkg "github.com/scitrera/agent-harness-go/pkg/model"
 )
 
 func TestLoadAppModelRegistryMissingKeepsSingleModel(t *testing.T) {
-	registry, err := loadAppModelRegistry(t.TempDir())
+	registry, err := loadAppModelRegistry(t.TempDir(), "")
 	if err != nil {
 		t.Fatalf("load missing registry: %v", err)
 	}
@@ -42,7 +43,7 @@ models:
 		t.Fatal(err)
 	}
 
-	registry, err := loadAppModelRegistry(root)
+	registry, err := loadAppModelRegistry(root, "")
 	if err != nil {
 		t.Fatalf("load registry: %v", err)
 	}
@@ -67,9 +68,34 @@ func TestLoadAppModelRegistryRejectsMalformedFile(t *testing.T) {
 	if err := os.WriteFile(path, []byte("models: [\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	_, err := loadAppModelRegistry(root)
+	_, err := loadAppModelRegistry(root, "")
 	if !errors.Is(err, modelpkg.ErrInvalidRegistryFile) {
 		t.Fatalf("error = %v, want ErrInvalidRegistryFile", err)
+	}
+}
+
+func TestLoadAppModelRegistryExplicitRelativePath(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "operator", "registry.yaml")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("default: host\nmodels:\n  - name: host\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	registry, err := loadAppModelRegistry(root, "operator/registry.yaml")
+	if err != nil {
+		t.Fatalf("load explicit relative registry: %v", err)
+	}
+	if registry.DefaultName() != "host" {
+		t.Fatalf("default = %q, want host", registry.DefaultName())
+	}
+}
+
+func TestLoadAppModelRegistryExplicitMissingFails(t *testing.T) {
+	_, err := loadAppModelRegistry(t.TempDir(), "missing/models.yaml")
+	if err == nil || !strings.Contains(err.Error(), "explicit models file") {
+		t.Fatalf("missing explicit registry error = %v", err)
 	}
 }
 

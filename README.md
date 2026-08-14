@@ -65,6 +65,11 @@ per-tool downstream caller authority using the
 | `--workspace-id` | `SAHARA_WORKSPACE_ID` | — | pin a logical workspace ID and enable composite workspace/thread state |
 | `--visible-workspaces` | `SAHARA_VISIBLE_WORKSPACES` | — | comma-separated additional logical workspaces clients may explicitly address |
 | `--workspace-index-dir` | `SAHARA_WORKSPACE_INDEX_DIR` | user config dir | shared canonical project-path to workspace-ID index used by project mode |
+| `--skills-dirs` | `SAHARA_SKILLS_DIRS` | `skills,.agent-harness-skills` | comma-separated replacement list of workspace-relative skill roots |
+| `--system-skills-dirs` | `SAHARA_SYSTEM_SKILLS_DIRS` | — | comma-separated absolute operator skill roots, appended after workspace roots with read-only access |
+| `--commands-dirs` | `SAHARA_COMMANDS_DIRS` | `commands,.agent-harness-commands` | comma-separated replacement list of workspace-relative slash-command roots |
+| `--system-commands-dirs` | `SAHARA_SYSTEM_COMMANDS_DIRS` | — | comma-separated absolute operator command roots appended after workspace roots |
+| `--models-file` | `SAHARA_MODELS_FILE` | `config/models.yaml` | explicit absolute or workspace-relative model registry; an explicitly selected missing file is an error |
 | `--serve` | — | `false` | run as a headless agent worker over Aether |
 | `--aether` | `AETHER_ADDR` | — | Aether gateway address, e.g. `127.0.0.1:50051` |
 | `--aether-standalone` | — | `false` | run the worker and the terminal UI in one process |
@@ -79,6 +84,33 @@ per-tool downstream caller authority using the
 | `--agent-specifications-authority` | `SAHARA_AGENT_SPECIFICATIONS_AUTHORITY` | `local` | reusable subagent-definition authority: `off`, local workspace files, or typed MemoryLayer resources |
 | `--memory-recall` | — | `true` | inject MemoryLayer memories relevant to each message |
 | `--goal-max-continuations` | — | `3` | maximum automatic follow-up turns for one durable goal; `0` disables follow-ups |
+
+### Operator-provided skills, commands, and model metadata
+
+Workspace and operator roots are intentionally separate. `SAHARA_SKILLS_DIRS`
+and `SAHARA_COMMANDS_DIRS` are ordered, comma-separated replacement lists whose
+entries must remain relative to the selected workspace. Their `SYSTEM`
+counterparts accept only absolute paths and are appended after every workspace
+root, so a project-local skill or slash command wins a same-name collision.
+Missing system roots are skipped. System skill roots are registered as
+read-only file-tool roots; system command bodies are eagerly loaded and do not
+receive a filesystem grant.
+
+For example, a launcher can contribute versioned assets without writing into a
+user's checkout:
+
+```bash
+export SAHARA_SYSTEM_SKILLS_DIRS="$XDG_CACHE_HOME/my-launcher/skills/v1"
+export SAHARA_SYSTEM_COMMANDS_DIRS="$XDG_CACHE_HOME/my-launcher/commands/v1"
+export SAHARA_MODELS_FILE="$XDG_CACHE_HOME/my-launcher/models/intent.yaml"
+agent-harness --workspace-mode project --workspace /path/to/project
+```
+
+An absolute `SAHARA_MODELS_FILE` is read in place; a relative value resolves
+against the workspace. The conventional `config/models.yaml` remains optional,
+but an explicit flag/env path fails fast when missing so an operator typo cannot
+silently restore single-model behavior. These inputs are process-local
+configuration and do not add ecosystem messaging protocol fields.
 
 ### Project workspaces
 

@@ -30,10 +30,11 @@ var ReservedNames = map[string]string{
 	"ledger":      "Browse branch-aware execution events.",
 }
 
-// Discover scans each dir (relative to workspaceRoot) for "<name>.md" command
-// files plus one level of namespace dirs ("<ns>/<name>.md" -> "<ns>:<name>").
-// Missing dirs are skipped. Commands are de-duplicated by canonical name (first
-// occurrence wins; dirs are scanned in order). Reserved names are skipped.
+// Discover scans each workspace-relative or absolute dir for "<name>.md"
+// command files plus one level of namespace dirs
+// ("<ns>/<name>.md" -> "<ns>:<name>"). Missing dirs are skipped. Commands are
+// de-duplicated by canonical name (first occurrence wins; dirs are scanned in
+// order). Reserved names are skipped.
 func Discover(workspaceRoot string, dirs []string) ([]Command, error) {
 	if workspaceRoot == "" {
 		return nil, nil
@@ -57,14 +58,17 @@ func Discover(workspaceRoot string, dirs []string) ([]Command, error) {
 	return out, nil
 }
 
-func scanDir(root, relDir string, seen map[string]bool) ([]Command, error) {
-	absDir := filepath.Join(root, relDir)
+func scanDir(root, dir string, seen map[string]bool) ([]Command, error) {
+	absDir := dir
+	if !filepath.IsAbs(dir) {
+		absDir = filepath.Join(root, dir)
+	}
 	entries, err := os.ReadDir(absDir)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("read commands dir %s: %w", relDir, err)
+		return nil, fmt.Errorf("read commands dir %s: %w", dir, err)
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
 	var out []Command
@@ -72,7 +76,7 @@ func scanDir(root, relDir string, seen map[string]bool) ([]Command, error) {
 		name := e.Name()
 		if e.IsDir() {
 			// One level of namespacing: "<dir>/<ns>/<cmd>.md" -> "<ns>:<cmd>".
-			subRel := filepath.Join(relDir, name)
+			subPath := filepath.Join(dir, name)
 			subEntries, err := os.ReadDir(filepath.Join(absDir, name))
 			if err != nil {
 				continue
@@ -83,7 +87,7 @@ func scanDir(root, relDir string, seen map[string]bool) ([]Command, error) {
 					continue
 				}
 				base := strings.TrimSuffix(se.Name(), commandExt)
-				if cmd, ok := loadCommand(root, filepath.Join(subRel, se.Name()), name+":"+base, seen); ok {
+				if cmd, ok := loadCommand(root, filepath.Join(subPath, se.Name()), name+":"+base, seen); ok {
 					out = append(out, cmd)
 				}
 			}
@@ -93,7 +97,7 @@ func scanDir(root, relDir string, seen map[string]bool) ([]Command, error) {
 			continue
 		}
 		base := strings.TrimSuffix(name, commandExt)
-		if cmd, ok := loadCommand(root, filepath.Join(relDir, name), base, seen); ok {
+		if cmd, ok := loadCommand(root, filepath.Join(dir, name), base, seen); ok {
 			out = append(out, cmd)
 		}
 	}
@@ -112,7 +116,11 @@ func loadCommand(root, rel, rawName string, seen map[string]bool) (Command, bool
 	if seen[key] {
 		return Command{}, false
 	}
-	content, err := readCapped(filepath.Join(root, rel))
+	path := rel
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(root, path)
+	}
+	content, err := readCapped(path)
 	if err != nil {
 		return Command{}, false
 	}
