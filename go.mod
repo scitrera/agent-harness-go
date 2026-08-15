@@ -9,6 +9,8 @@ require (
 	charm.land/lipgloss/v2 v2.0.4
 	github.com/charmbracelet/x/ansi v0.11.7
 	github.com/scitrera/ecosystem-messaging-spec/go v1.3.0
+	github.com/scitrera/llm-client-go v0.1.0
+	github.com/scitrera/llm-protocol-go v0.2.0
 	github.com/scitrera/memorylayer/memorylayer-sdk-go v0.2.0
 	github.com/scitrera/memorylayer/memorylayer-sdk-go/aether v0.0.0
 	go.opentelemetry.io/otel v1.43.0
@@ -21,6 +23,11 @@ require (
 
 // Local integration until ecosystem-messaging-spec v1.3.0 is published.
 replace github.com/scitrera/ecosystem-messaging-spec/go => ../../scitrera-ecosystem-messaging-spec/go
+
+// Local integration until the standalone Apache LLM modules are published.
+replace github.com/scitrera/llm-client-go => ../../llm-gateway/llm-client-go
+
+replace github.com/scitrera/llm-protocol-go => ../../llm-gateway/llm-protocol-go
 
 // Local integration until the typed prompt-note SDK surface is published.
 replace github.com/scitrera/memorylayer/memorylayer-sdk-go => ../../../scitrera-memorylayer-ai-cc/oss/memorylayer-sdk-go
@@ -74,7 +81,7 @@ require (
 	google.golang.org/genproto/googleapis/api v0.0.0-20260526163538-3dc84a4a5aaa // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260526163538-3dc84a4a5aaa // indirect
 	google.golang.org/grpc v1.82.1 // indirect
-	google.golang.org/protobuf v1.36.11 // indirect
+	google.golang.org/protobuf v1.36.11
 )
 
 // Local integration until the current Aether SDK/API changes are published.
