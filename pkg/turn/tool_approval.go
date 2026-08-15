@@ -195,9 +195,21 @@ func policyErrorFor(name string) error {
 
 // emitApproval upserts an approval_request part (pending first, then the
 // resolved status) on the current message stream so the user can answer and the
-// resolved prompt persists. No-op without an emitter.
+// resolved prompt persists.
+//
+// A missing emitter is an ERROR, not a no-op. This part IS the approval prompt:
+// without it the turn goes on to block in approvals.Await for a decision the
+// user was never asked to make, and the only symptom is a chat that sits there
+// producing nothing. It used to return silently, which meant the one condition
+// guaranteeing a hung turn was also the one condition that logged nothing at
+// all — on either the harness or the platform side.
 func (r *Runner) emitApproval(ctx context.Context, emitter tools.PartEmitter, reqID string, call protocol.ToolInvokeEnvelope, scopes []string, status spec.ApprovalStatus, reason string) {
 	if emitter == nil {
+		slog.ErrorContext(ctx, "no part emitter: approval request cannot reach the user",
+			slog.String("tool", call.Name),
+			slog.String("call_id", reqID),
+			slog.String("status", string(status)),
+		)
 		return
 	}
 	part := spec.NewApprovalRequestPart(spec.ApprovalRequestPart{
@@ -210,6 +222,19 @@ func (r *Runner) emitApproval(ctx context.Context, emitter tools.PartEmitter, re
 		Reason:  reason,
 	})
 	if err := emitter.UpsertPart(ctx, part); err != nil {
-		slog.WarnContext(ctx, "emit approval_request failed", slog.Any("err", err))
+		// A failed PENDING emit is the same outcome as no emitter: the prompt
+		// never reaches the user and the turn blocks until the approval
+		// timeout. A failed RESOLVED emit only loses the record of a decision
+		// already made, so it stays a warning.
+		if status == spec.ApprovalPending {
+			slog.ErrorContext(ctx, "approval request emit failed; the user will never see this prompt",
+				slog.String("tool", call.Name),
+				slog.String("call_id", reqID),
+				slog.Any("err", err),
+			)
+			return
+		}
+		slog.WarnContext(ctx, "emit approval_request failed",
+			slog.String("status", string(status)), slog.Any("err", err))
 	}
 }

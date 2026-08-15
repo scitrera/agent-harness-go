@@ -234,7 +234,16 @@ func (g grantAuthorizer) Authorize(ctx context.Context, in AuthzInput) AuthzDeci
 	}
 	granted, err := r.grantStore.IsGranted(ctx, in.Addr.WorkspaceID, in.Call.Name)
 	if err != nil {
-		slog.WarnContext(ctx, "durable grant lookup failed", slog.String("tool", in.Call.Name), slog.Any("err", err))
+		// Abstaining sends the call to the interactive authorizer, so an
+		// unreadable grant store turns EVERY tool into a user prompt. When the
+		// cause is systemic — an ACL denial or a timeout on the KV read rather
+		// than a missing key — that is indistinguishable from "nothing is
+		// pre-authorized", and the turn stalls on a prompt the user may never
+		// be shown. Say what actually happened.
+		slog.WarnContext(ctx, "durable grant lookup failed; falling back to interactive approval",
+			slog.String("tool", in.Call.Name),
+			slog.String("workspace", in.Addr.WorkspaceID),
+			slog.Any("err", err))
 		return AuthzDecision{Outcome: Abstain}
 	}
 	if !granted {
@@ -259,7 +268,15 @@ func (ia interactiveAuthorizer) Authorize(ctx context.Context, in AuthzInput) Au
 	call := in.Call
 	addr := in.Addr
 	reqID := call.CallID
-	emitter, _ := tools.PartEmitterFrom(ctx)
+	// The discarded ok here used to hide a guaranteed hang: with no emitter in
+	// ctx the approval prompt cannot be rendered, yet the code below still
+	// blocks in approvals.Await waiting for the answer. emitApproval reports it
+	// now, so this only needs to not throw the signal away.
+	emitter, hasEmitter := tools.PartEmitterFrom(ctx)
+	if !hasEmitter {
+		slog.WarnContext(ctx, "authorizing a tool with no part emitter in context",
+			slog.String("tool", call.Name), slog.String("call_id", reqID))
+	}
 	scopes := r.approvalScopes
 	if in.Trust == tools.TrustRequiresFreshApproval {
 		scopes = []string{"once"}
