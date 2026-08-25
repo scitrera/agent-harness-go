@@ -29,6 +29,7 @@ type (
 	WorkspaceViewDescriptor = spec.WorkspaceViewDescriptor
 	ImagePart               = spec.ImagePart
 	FilePart                = spec.FilePart
+	ReasoningPart           = spec.ReasoningPart
 	SubagentPart            = spec.SubagentPart
 	SubagentStatus          = spec.SubagentStatus
 )
@@ -106,6 +107,11 @@ const (
 // (ContentPart, error) signature; the spec constructor cannot fail.
 func NewTextPart(text string) (ContentPart, error) {
 	return spec.NewTextPart(text), nil
+}
+
+// NewReasoningPart builds a model-reasoning content part.
+func NewReasoningPart(text string, redacted bool) (ContentPart, error) {
+	return spec.NewReasoningPart(text, redacted), nil
 }
 
 // NewToolResultPart builds a spec tool_result part; the payload is carried in

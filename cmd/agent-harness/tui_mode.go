@@ -78,6 +78,7 @@ func runTUI(cfg appConfig) error {
 		InitialThreadID:    cfg.thread,
 		InitialWorkspaceID: cfg.workspaceID,
 		WorkspaceRoot:      cfg.workspaceRoot,
+		RetainReasoning:    cfg.tuiRetainReasoning,
 	})
 	stop()
 	select {

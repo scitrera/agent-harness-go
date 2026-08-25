@@ -9,9 +9,16 @@ import (
 )
 
 func rowsFromHistory(messages []protocol.ChatMessage) []chatRow {
+	return rowsFromHistoryWithReasoning(messages, false)
+}
+
+func rowsFromHistoryWithReasoning(messages []protocol.ChatMessage, retainReasoning bool) []chatRow {
 	rows := make([]chatRow, 0, len(messages))
 	for _, message := range messages {
-		for _, row := range rowsForMessage(message) {
+		for _, row := range rawRowsForMessage(message) {
+			if !retainReasoning && rowConsumesReasoning(row) {
+				rows = removeReasoningRows(rows, row.TaskID)
+			}
 			rows = appendOrReplaceToolRow(rows, row)
 		}
 	}
@@ -19,6 +26,17 @@ func rowsFromHistory(messages []protocol.ChatMessage) []chatRow {
 }
 
 func rowsForMessage(message protocol.ChatMessage) []chatRow {
+	rows := make([]chatRow, 0, len(message.Content)+1)
+	for _, row := range rawRowsForMessage(message) {
+		if rowConsumesReasoning(row) {
+			rows = removeReasoningRows(rows, row.TaskID)
+		}
+		rows = appendOrReplaceToolRow(rows, row)
+	}
+	return rows
+}
+
+func rawRowsForMessage(message protocol.ChatMessage) []chatRow {
 	switch message.Role {
 	case protocol.RoleUser:
 		return []chatRow{{Kind: rowUser, ID: message.ID, TaskID: message.Addr.TaskID, Text: messageText(message)}}
@@ -27,7 +45,7 @@ func rowsForMessage(message protocol.ChatMessage) []chatRow {
 	case protocol.RoleSystem:
 		return []chatRow{{Kind: rowSystem, ID: message.ID, TaskID: message.Addr.TaskID, Text: messageText(message)}}
 	default:
-		return assistantRowsForMessage(message)
+		return rawAssistantRowsForMessage(message)
 	}
 }
 
@@ -75,9 +93,15 @@ func messageText(message protocol.ChatMessage) string {
 	return strings.TrimSpace(out.String())
 }
 
-func assistantRowsForMessage(message protocol.ChatMessage) []chatRow {
+func rawAssistantRowsForMessage(message protocol.ChatMessage) []chatRow {
 	rows := make([]chatRow, 0, len(message.Content)+1)
 	for i, part := range message.Content {
+		if reasoning, ok := reasoningPartText(part); ok {
+			if strings.TrimSpace(reasoning.Text) != "" {
+				rows = append(rows, chatRow{Kind: rowReasoning, ID: assistantPartRowID(message.ID, i), TaskID: message.Addr.TaskID, Text: reasoning.Text})
+			}
+			continue
+		}
 		if text, ok := part.AsText(); ok {
 			if strings.TrimSpace(text.Text) != "" {
 				rows = append(rows, chatRow{Kind: rowAssistant, ID: assistantPartRowID(message.ID, i), TaskID: message.Addr.TaskID, Text: text.Text})
@@ -97,6 +121,32 @@ func assistantRowsForMessage(message protocol.ChatMessage) []chatRow {
 		rows = append(rows, chatRow{Kind: rowSystem, ID: terminalStatusRowID(message), TaskID: message.Addr.TaskID, Text: status})
 	}
 	return rows
+}
+
+func reasoningPartText(part protocol.ContentPart) (protocol.ReasoningPart, bool) {
+	if part.Type() != protocol.ContentReasoning {
+		return protocol.ReasoningPart{}, false
+	}
+	var reasoning protocol.ReasoningPart
+	if err := part.Decode(&reasoning); err != nil {
+		return protocol.ReasoningPart{}, false
+	}
+	return reasoning, true
+}
+
+func rowConsumesReasoning(row chatRow) bool {
+	return row.Kind == rowAssistant || row.Kind == rowTool
+}
+
+func removeReasoningRows(rows []chatRow, taskID string) []chatRow {
+	filtered := rows[:0]
+	for _, row := range rows {
+		if row.Kind == rowReasoning && row.TaskID == taskID {
+			continue
+		}
+		filtered = append(filtered, row)
+	}
+	return filtered
 }
 
 func terminalStatusRowID(message protocol.ChatMessage) string {

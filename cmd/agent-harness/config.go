@@ -53,16 +53,17 @@ type appConfig struct {
 	dynamicWorkspaces bool
 	// visibleWorkspaces are additional logical workspaces this host permits an
 	// explicit client to address. The selected/default workspace is implicit.
-	visibleWorkspaces []string
-	stateDir          string
-	thread            string
-	baseURL           string
-	model             string
-	modelRegistry     *modelpkg.Registry
-	modelsFile        string
-	llmFormat         string
-	seed              bool
-	record            string // --record path: opt-in per-LLM-call JSONL trace log ("" = off)
+	visibleWorkspaces  []string
+	stateDir           string
+	thread             string
+	baseURL            string
+	model              string
+	modelRegistry      *modelpkg.Registry
+	modelsFile         string
+	llmFormat          string
+	tuiRetainReasoning bool
+	seed               bool
+	record             string // --record path: opt-in per-LLM-call JSONL trace log ("" = off)
 	// Workspace roots are ordered before absolute system/operator roots, so a
 	// project can shadow host-contributed skills and commands by name.
 	skillsDirs         []string

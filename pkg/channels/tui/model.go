@@ -46,6 +46,7 @@ type model struct {
 	workspaceSwitching bool
 	workspaceRoot      string
 	cwd                string
+	retainReasoning    bool
 
 	threadID string
 	threads  []threadindex.Session
@@ -124,7 +125,8 @@ func newModel(ctx context.Context, cfg Config) (model, error) {
 		cwd:                workspaceRoot,
 		threadID:           threadID,
 		threads:            threads,
-		rows:               rowsFromHistory(messages),
+		rows:               rowsFromHistoryWithReasoning(messages, cfg.RetainReasoning),
+		retainReasoning:    cfg.RetainReasoning,
 		pendingApprovals:   map[string]approvalRequest{},
 		tools:              map[string]toolEntry{},
 		subagents:          map[string]subagentActivity{},

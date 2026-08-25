@@ -123,6 +123,10 @@ type Config struct {
 	InitialThreadID    string
 	InitialWorkspaceID string
 	WorkspaceRoot      string
+	// RetainReasoning keeps reasoning rows after a subsequent assistant action
+	// consumes them. The default false presents reasoning only while it is the
+	// model's latest activity.
+	RetainReasoning bool
 }
 
 func Run(ctx context.Context, cfg Config) error {

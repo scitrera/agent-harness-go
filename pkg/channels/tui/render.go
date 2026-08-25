@@ -12,6 +12,7 @@ import (
 var (
 	styleUser      = lipgloss.NewStyle().Foreground(lipgloss.Color("39")).Bold(true)
 	styleAssistant = lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
+	styleReasoning = lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Italic(true)
 	styleThinking  = lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Italic(true)
 	styleSystem    = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
 	styleTool      = lipgloss.NewStyle().Foreground(lipgloss.Color("151"))
@@ -138,6 +139,9 @@ func (m model) renderRow(row chatRow) string {
 	case rowAssistant:
 		prefix = "assistant"
 		style = styleAssistant
+	case rowReasoning:
+		prefix = "reasoning"
+		style = styleReasoning
 	case rowThinking:
 		prefix = "assistant"
 		style = styleThinking

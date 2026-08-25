@@ -28,6 +28,7 @@ func main() {
 	model := flag.String("model", env("SAHARA_LLM_MODEL", "gpt-4o-mini"), "model id")
 	modelsFile := flag.String("models-file", os.Getenv("SAHARA_MODELS_FILE"), "model registry file (absolute or workspace-relative; default config/models.yaml)")
 	llmFormat := flag.String("llm-format", env("SAHARA_LLM_FORMAT", "openai"), "provider request format: openai or native")
+	tuiRetainReasoning := flag.Bool("tui-retain-reasoning", strings.EqualFold(strings.TrimSpace(os.Getenv("SAHARA_TUI_RETAIN_REASONING")), "true"), "retain reasoning traces in TUI history after the next assistant action")
 	skillsDirs := flag.String("skills-dirs", env("SAHARA_SKILLS_DIRS", "skills,.agent-harness-skills"), "comma-separated workspace-relative skill roots (ordered, first name wins)")
 	systemSkillsDirs := flag.String("system-skills-dirs", os.Getenv("SAHARA_SYSTEM_SKILLS_DIRS"), "comma-separated absolute operator skill roots appended after workspace roots")
 	commandsDirs := flag.String("commands-dirs", env("SAHARA_COMMANDS_DIRS", "commands,.agent-harness-commands"), "comma-separated workspace-relative command roots (ordered, first name wins)")
@@ -231,6 +232,7 @@ func main() {
 		modelRegistry:      modelRegistry,
 		modelsFile:         strings.TrimSpace(*modelsFile),
 		llmFormat:          *llmFormat,
+		tuiRetainReasoning: *tuiRetainReasoning,
 		seed:               *seed,
 		record:             *record,
 		skillsDirs:         parsedSkillsDirs,

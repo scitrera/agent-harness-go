@@ -37,8 +37,13 @@ func (m *model) applyEvent(event channel.Event) {
 	case channel.EventMessageStarted:
 		m.markTurnAt(event.Addr.TaskID, eventWorkspaceID, event.Addr.ThreadID, "thinking")
 	case channel.EventTokenDelta:
-		m.markTurnAt(event.Addr.TaskID, eventWorkspaceID, event.Addr.ThreadID, "responding")
-		m.appendAssistantDelta(event.MessageID, event.Index, event.Delta)
+		kind := m.appendAssistantDelta(event.MessageID, event.Index, event.Addr.TaskID, event.Delta)
+		if kind == rowReasoning {
+			m.markTurnAt(event.Addr.TaskID, eventWorkspaceID, event.Addr.ThreadID, "reasoning")
+		} else {
+			m.consumeReasoning(event.Addr.TaskID)
+			m.markTurnAt(event.Addr.TaskID, eventWorkspaceID, event.Addr.ThreadID, "responding")
+		}
 	case channel.EventPartAppended:
 		m.applyPartAppended(event)
 	case channel.EventPartUpdated:
@@ -85,6 +90,15 @@ func (m *model) applyPartAppended(event channel.Event) {
 		return
 	}
 	part := *event.Part
+	if reasoning, ok := reasoningPartText(part); ok {
+		m.upsertReasoningPart(event.MessageID, event.Index, event.Addr.TaskID, reasoning.Text, true)
+		m.markTurnAt(event.Addr.TaskID, event.Addr.WorkspaceID, event.Addr.ThreadID, "reasoning")
+		return
+	}
+	// Reasoning describes the decision leading to the next visible action. Once
+	// that action arrives it is no longer the current transcript item unless the
+	// user explicitly opted into retaining traces.
+	m.consumeReasoning(event.Addr.TaskID)
 	if approval, ok := part.AsApprovalRequest(); ok {
 		m.recordApproval(event.Addr.TaskID, approval.ID, approval.Tool, string(approval.Status), approval.Reason)
 		m.refreshApprovalSelector()
@@ -95,7 +109,8 @@ func (m *model) applyPartAppended(event channel.Event) {
 		return
 	}
 	if text, ok := part.AsText(); ok {
-		m.upsertAssistantPart(event.MessageID, event.Index, text.Text, true)
+		m.upsertAssistantPart(event.MessageID, event.Index, event.Addr.TaskID, text.Text, true)
+		m.markTurnAt(event.Addr.TaskID, event.Addr.WorkspaceID, event.Addr.ThreadID, "responding")
 		return
 	}
 	if call, ok := part.AsToolCall(); ok {
@@ -159,6 +174,7 @@ func (m *model) applyToolLifecycle(event channel.Event) {
 	}
 	switch entry.Event.Status {
 	case tools.ToolEventQueued, tools.ToolEventStarted:
+		m.consumeReasoning(event.Addr.TaskID)
 		phase := "tool " + entry.Event.ToolName
 		if entry.Event.ToolName == tools.SubagentToolName {
 			phase = "subagent working"
@@ -199,7 +215,7 @@ func (m *model) recordApproval(taskID, requestID, tool, status, reason string) {
 	delete(m.pendingApprovals, requestID)
 }
 
-func (m *model) upsertAssistantPart(id string, index int, text string, streaming bool) {
+func (m *model) upsertAssistantPart(id string, index int, taskID, text string, streaming bool) {
 	rowID := assistantPartRowID(id, index)
 	if text == "" && !streaming {
 		return
@@ -210,25 +226,62 @@ func (m *model) upsertAssistantPart(id string, index int, text string, streaming
 				m.rows[i].Text = text
 			}
 			m.rows[i].Streaming = streaming
+			if m.rows[i].TaskID == "" {
+				m.rows[i].TaskID = taskID
+			}
 			return
 		}
 	}
-	m.rows = append(m.rows, chatRow{Kind: rowAssistant, ID: rowID, TaskID: "", Text: text, Streaming: streaming})
+	m.rows = append(m.rows, chatRow{Kind: rowAssistant, ID: rowID, TaskID: taskID, Text: text, Streaming: streaming})
 }
 
-func (m *model) appendAssistantDelta(id string, index int, delta string) {
-	if delta == "" {
+func (m *model) upsertReasoningPart(id string, index int, taskID, text string, streaming bool) {
+	rowID := assistantPartRowID(id, index)
+	if text == "" && !streaming {
 		return
 	}
+	for i := range m.rows {
+		if m.rows[i].ID != rowID || (m.rows[i].Kind != rowReasoning && m.rows[i].Kind != rowAssistant) {
+			continue
+		}
+		m.rows[i].Kind = rowReasoning
+		if text != "" || !streaming {
+			m.rows[i].Text = text
+		}
+		m.rows[i].Streaming = streaming
+		m.rows[i].TaskID = taskID
+		return
+	}
+	m.rows = append(m.rows, chatRow{Kind: rowReasoning, ID: rowID, TaskID: taskID, Text: text, Streaming: streaming})
+}
+
+func (m *model) appendAssistantDelta(id string, index int, taskID, delta string) rowKind {
 	rowID := assistantPartRowID(id, index)
 	for i := range m.rows {
-		if m.rows[i].Kind == rowAssistant && m.rows[i].ID == rowID {
+		if (m.rows[i].Kind == rowAssistant || m.rows[i].Kind == rowReasoning) && m.rows[i].ID == rowID {
+			if delta == "" {
+				return m.rows[i].Kind
+			}
 			m.rows[i].Text += delta
 			m.rows[i].Streaming = true
-			return
+			if m.rows[i].TaskID == "" {
+				m.rows[i].TaskID = taskID
+			}
+			return m.rows[i].Kind
 		}
 	}
-	m.rows = append(m.rows, chatRow{Kind: rowAssistant, ID: rowID, Text: delta, Streaming: true})
+	if delta == "" {
+		return rowAssistant
+	}
+	m.rows = append(m.rows, chatRow{Kind: rowAssistant, ID: rowID, TaskID: taskID, Text: delta, Streaming: true})
+	return rowAssistant
+}
+
+func (m *model) consumeReasoning(taskID string) {
+	if m.retainReasoning {
+		return
+	}
+	m.rows = removeReasoningRows(m.rows, taskID)
 }
 
 func (m *model) upsertToolishRow(id, text string) {
@@ -261,8 +314,13 @@ func (m *model) ensureToolishRow(id, text string) {
 
 func (m *model) applyFinalMessage(message protocol.ChatMessage) {
 	for i, part := range message.Content {
+		if reasoning, ok := reasoningPartText(part); ok {
+			m.upsertReasoningPart(message.ID, i, message.Addr.TaskID, reasoning.Text, false)
+			continue
+		}
+		m.consumeReasoning(message.Addr.TaskID)
 		if text, ok := part.AsText(); ok {
-			m.upsertAssistantPart(message.ID, i, text.Text, false)
+			m.upsertAssistantPart(message.ID, i, message.Addr.TaskID, text.Text, false)
 			continue
 		}
 		if call, ok := part.AsToolCall(); ok {

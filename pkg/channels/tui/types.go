@@ -11,6 +11,7 @@ const (
 	rowSystem    rowKind = "system"
 	rowUser      rowKind = "user"
 	rowAssistant rowKind = "assistant"
+	rowReasoning rowKind = "reasoning"
 	rowThinking  rowKind = "thinking"
 	rowTool      rowKind = "tool"
 )

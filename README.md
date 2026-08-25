@@ -70,6 +70,7 @@ per-tool downstream caller authority using the
 | `--commands-dirs` | `SAHARA_COMMANDS_DIRS` | `commands,.agent-harness-commands` | comma-separated replacement list of workspace-relative slash-command roots |
 | `--system-commands-dirs` | `SAHARA_SYSTEM_COMMANDS_DIRS` | — | comma-separated absolute operator command roots appended after workspace roots |
 | `--models-file` | `SAHARA_MODELS_FILE` | `config/models.yaml` | explicit absolute or workspace-relative model registry; an explicitly selected missing file is an error |
+| `--tui-retain-reasoning` | `SAHARA_TUI_RETAIN_REASONING` | `false` | retain `reasoning>` rows after the response or tool action they led to; by default they are visible only while current |
 | `--serve` | — | `false` | run as a headless agent worker over Aether |
 | `--aether` | `AETHER_ADDR` | — | Aether gateway address, e.g. `127.0.0.1:50051` |
 | `--aether-standalone` | — | `false` | run the worker and the terminal UI in one process |

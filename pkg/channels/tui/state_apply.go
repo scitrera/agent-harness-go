@@ -27,7 +27,7 @@ func (m *model) applyHistoryLoaded(msg historyLoadedMsg) {
 		return
 	}
 	m.threadID = msg.ThreadID
-	m.rows = rowsFromHistory(msg.Messages)
+	m.rows = rowsFromHistoryWithReasoning(msg.Messages, m.retainReasoning)
 	m.renderedRows = map[string]renderedRowCache{}
 	m.threads = m.listThreads()
 	m.status = "thread " + msg.ThreadID
