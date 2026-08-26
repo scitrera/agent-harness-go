@@ -19,16 +19,17 @@ name: agent-harness-e2e
 services:
   # ── One-shot: make the data volumes writable ─────────────────────────────
   #
-  # Docker creates a named volume's mount point root-owned, but both servers run
-  # as uid 1000 and would fail their first write ("permission denied" opening the
-  # database). Fixing it here keeps the images unprivileged rather than running
-  # them as root.
+  # Docker creates a named volume's mount point root-owned, but the services run
+  # as uid 1000 and would fail their first write ("permission denied" opening a
+  # database or credential store). Fixing it here keeps the images unprivileged
+  # rather than running them as root.
   init-perms:
     image: busybox:1.37
-    command: ["sh", "-c", "chown -R 1000:1000 /aether-data /memorylayer-data"]
+    command: ["sh", "-c", "chown -R 1000:1000 /aether-data /memorylayer-data /sahara-auth && chmod 0700 /sahara-auth"]
     volumes:
       - aether-data:/aether-data
       - memorylayer-data:/memorylayer-data
+      - sahara-auth:/sahara-auth
 
   # ── Aether: the broker between the UI(s) and the agent ────────────────────
   #
@@ -155,6 +156,9 @@ services:
       SAHARA_LLM_MODEL: ${SAHARA_LLM_MODEL:-gpt-4o-mini}
       SAHARA_LLM_FORMAT: ${SAHARA_LLM_FORMAT:-openai}
       SAHARA_SCHEDULE_CONFIG: ${SAHARA_SCHEDULE_CONFIG:-}
+      # The CLI auth wrapper and worker share this named-volume credential
+      # store, so refresh-token rotation survives agent recreation.
+      SAHARA_AUTH_DIR: /sahara-auth
       # Optional named-provider credentials for config/models.yaml. Keep secrets
       # in .env and refer to them with api_key_env; never put keys in the YAML.
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
@@ -168,6 +172,9 @@ services:
       # Bind-mounted so you can drop in skills, edit AGENTS.md, and read what the
       # agent writes.
       - ./workspace:/workspace
+      # Contains OAuth access, refresh, and ID tokens. Never expose this volume
+      # to the workspace or copy it into an image.
+      - sahara-auth:/sahara-auth
     depends_on:
       aether:
         condition: service_healthy
@@ -210,4 +217,5 @@ services:
 volumes:
   aether-data:
   memorylayer-data:
+  sahara-auth:
   hf-cache:

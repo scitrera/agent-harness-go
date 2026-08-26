@@ -18,11 +18,6 @@ const (
 	minComposerHeight        = 1
 	maxComposerHeight        = 3
 	maxComposerContentHeight = 1000
-	// DEC private mode 1007 asks compatible terminals to translate wheel input
-	// into cursor Up/Down while the alternate screen is active. Unlike mouse
-	// reporting modes 1000/1002, it leaves drag selection owned by the terminal.
-	alternateScrollModeOn  = "\x1b[?1007h"
-	alternateScrollModeOff = "\x1b[?1007l"
 )
 
 type model struct {
@@ -34,6 +29,7 @@ type model struct {
 	approvals          ApprovalResolver
 	canceller          Canceller
 	modelStatus        ModelStatus
+	observedModels     map[string]string
 	commandSource      CommandProvider
 	taskStore          TaskStore
 	teamStore          TeamStore
@@ -47,6 +43,10 @@ type model struct {
 	workspaceRoot      string
 	cwd                string
 	retainReasoning    bool
+	userID             string
+	shellTriggerAgent  bool
+	shellPreferences   ShellPreferenceStore
+	runShell           shellRunnerFunc
 
 	threadID string
 	threads  []threadindex.Session
@@ -63,6 +63,14 @@ type model struct {
 	clearingThreads  map[string]struct{}
 	deferredSendFor  string
 	lastTaskID       string
+	pendingMessages  []queuedMessage
+	nextPendingID    uint64
+	inputHistory     []string
+	historyIndex     int
+	historyDraft     string
+	historyDraftAtts []pendingAttachment
+	editingPendingID uint64
+	cancelPendingID  string
 	status           string
 	drawer           drawerMode
 	drawerContent    string
@@ -112,6 +120,7 @@ func newModel(ctx context.Context, cfg Config) (model, error) {
 		approvals:          cfg.Approvals,
 		canceller:          cfg.Canceller,
 		modelStatus:        cfg.ModelStatus,
+		observedModels:     map[string]string{},
 		commandSource:      cfg.Commands,
 		taskStore:          cfg.TaskStore,
 		teamStore:          cfg.TeamStore,
@@ -123,10 +132,16 @@ func newModel(ctx context.Context, cfg Config) (model, error) {
 		workspaceID:        workspaceID,
 		workspaceRoot:      workspaceRoot,
 		cwd:                workspaceRoot,
+		userID:             strings.TrimSpace(cfg.UserID),
+		shellTriggerAgent:  cfg.ShellTriggerAgent,
+		shellPreferences:   cfg.ShellPreferences,
+		runShell:           runShellCommand,
 		threadID:           threadID,
 		threads:            threads,
 		rows:               rowsFromHistoryWithReasoning(messages, cfg.RetainReasoning),
 		retainReasoning:    cfg.RetainReasoning,
+		inputHistory:       inputHistoryFromMessages(messages),
+		historyIndex:       0,
 		pendingApprovals:   map[string]approvalRequest{},
 		tools:              map[string]toolEntry{},
 		subagents:          map[string]subagentActivity{},
@@ -137,6 +152,7 @@ func newModel(ctx context.Context, cfg Config) (model, error) {
 		viewport:           viewport.New(),
 		composer:           newComposer(),
 	}
+	m.observeModelHistory(workspaceID, threadID, messages)
 	m.status = "ready"
 	m.refreshViewport()
 	return m, nil
@@ -184,7 +200,7 @@ func newComposer() textarea.Model {
 }
 
 func (m model) Init() tea.Cmd {
-	return tea.Batch(m.composer.Focus(), waitEvent(m.ctx, m.events), setTerminalTitleCmd(m.terminalTitle()), tea.Raw(alternateScrollModeOn))
+	return tea.Batch(m.composer.Focus(), waitEvent(m.ctx, m.events), setTerminalTitleCmd(m.terminalTitle()))
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -203,14 +219,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case streamEventMsg:
 		rowStructure := rowStructureKey(m.rows)
 		m.applyEvent(msg.Event)
-		next := waitEvent(m.ctx, m.events)
+		next := tea.Batch(waitEvent(m.ctx, m.events), m.retryPendingCancel(msg.Event.Addr.TaskID), m.dispatchNextPending())
 		if rowStructureKey(m.rows) != rowStructure || msg.Event.Type == channel.EventMessageFinal {
 			next = repaint(next)
 		}
 		return m, m.ensureThinkingTick(next)
 	case sendResultMsg:
 		m.applySendResult(msg)
-		return m, m.ensureThinkingTick(setTerminalTitleCmd(m.terminalTitle()))
+		next := tea.Batch(setTerminalTitleCmd(m.terminalTitle()), m.retryPendingCancel(msg.TaskID), m.dispatchNextPending())
+		return m, m.ensureThinkingTick(next)
+	case shellResultMsg:
+		return m.finishShellCommand(msg)
 	case thinkingTickMsg:
 		if !m.advanceThinking() {
 			m.thinkingTicking = false

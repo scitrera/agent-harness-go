@@ -3,6 +3,7 @@ package hooks
 import (
 	"context"
 	"encoding/json"
+	"time"
 
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 	"github.com/scitrera/agent-harness-go/pkg/tools"
@@ -20,7 +21,26 @@ const (
 	PhaseCompacted          TurnPhase = "compacted"
 	PhaseResourceReferenced TurnPhase = "resource_referenced"
 	PhaseRecoveryStarted    TurnPhase = "recovery_started"
-	PhaseTurnFinished       TurnPhase = "turn_finished"
+	// PhaseProviderRetry fires when a provider call failed and the runner has
+	// decided to try again — before the wait, so an observer can show the user
+	// what is happening while it happens. Distinct from PhaseRecoveryStarted,
+	// which is about resuming a turn after a process restart.
+	PhaseProviderRetry TurnPhase = "provider_retry"
+	PhaseTurnFinished  TurnPhase = "turn_finished"
+)
+
+// RetryStrategy names what the runner is about to do about a failed provider
+// call. It is the discriminator a renderer needs to word the notice: a model
+// switch is a different user-facing story from waiting out a rate limit.
+type RetryStrategy string
+
+const (
+	// RetryTrimContext drops the oldest history and retries the same model.
+	RetryTrimContext RetryStrategy = "trim_context"
+	// RetryBackoff waits RetryIn and retries the same model.
+	RetryBackoff RetryStrategy = "backoff"
+	// RetryFallbackModel switches to a different model; RetryIn is zero.
+	RetryFallbackModel RetryStrategy = "fallback_model"
 )
 
 // TurnEvent is a turn-lifecycle signal delivered to TurnObservers. It carries
@@ -38,6 +58,23 @@ type TurnEvent struct {
 	// branch. Reference points at an authority-owned record without copying it.
 	OperationID string
 	Reference   *tools.ResultReference
+
+	// Attempt is the 1-based ordinal of the retry about to be made, within its
+	// own strategy's budget. Set on PhaseProviderRetry.
+	Attempt int
+	// RetryIn is the wait the runner will observe before retrying. Zero for
+	// strategies that retry immediately. Set on PhaseProviderRetry.
+	RetryIn time.Duration
+	// Strategy is what the runner is about to do about the failure. Set on
+	// PhaseProviderRetry.
+	Strategy RetryStrategy
+	// FailureKind is the classified provider failure ("rate_limit",
+	// "context_overflow", …), empty when the error was not a classified
+	// ProviderError. Set on PhaseProviderRetry.
+	FailureKind string
+	// NextModel is the model the runner is switching to. Set only for
+	// RetryFallbackModel.
+	NextModel string
 }
 
 type executionBranchKey struct{}
@@ -77,6 +114,14 @@ func ExecutionLedgerDisabled(ctx context.Context) bool {
 // stream events by a "phase"/"event" field.
 type TurnObserver interface {
 	ObserveTurn(ctx context.Context, ev TurnEvent)
+}
+
+// ToolResultObserver is an optional richer companion to ToolObserver. The turn
+// loop calls it only after an admitted tool actually ran, allowing evidence and
+// provenance consumers to inspect bounded result metadata without changing the
+// existing lifecycle interface or receiving tool payload content.
+type ToolResultObserver interface {
+	ToolResult(ctx context.Context, call ToolCall, result tools.Result, err error)
 }
 
 // NotifyTurn fans an event out to every observer, best-effort (nil-safe).
@@ -130,6 +175,15 @@ func turnEventInput(ev TurnEvent) json.RawMessage {
 	}
 	if ev.Err != nil {
 		env["error"] = ev.Err.Error()
+	}
+	if ev.Phase == PhaseProviderRetry {
+		env["attempt"] = ev.Attempt
+		env["retry_in_ms"] = ev.RetryIn.Milliseconds()
+		env["strategy"] = string(ev.Strategy)
+		env["failure_kind"] = ev.FailureKind
+		if ev.NextModel != "" {
+			env["next_model"] = ev.NextModel
+		}
 	}
 	raw, err := json.Marshal(env)
 	if err != nil {

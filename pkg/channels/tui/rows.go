@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
+	"github.com/scitrera/agent-harness-go/pkg/shellcontext"
 )
 
 func rowsFromHistory(messages []protocol.ChatMessage) []chatRow {
@@ -39,6 +40,9 @@ func rowsForMessage(message protocol.ChatMessage) []chatRow {
 func rawRowsForMessage(message protocol.ChatMessage) []chatRow {
 	switch message.Role {
 	case protocol.RoleUser:
+		if record, ok := shellcontext.FromMessage(message); ok {
+			return []chatRow{{Kind: rowShell, ID: message.ID, TaskID: message.Addr.TaskID, Text: shellcontext.DisplayText(record)}}
+		}
 		return []chatRow{{Kind: rowUser, ID: message.ID, TaskID: message.Addr.TaskID, Text: messageText(message)}}
 	case protocol.RoleTool, protocol.RoleToolResult:
 		return toolRowsForMessage(message)
@@ -202,7 +206,7 @@ func toolRowsForMessage(message protocol.ChatMessage) []chatRow {
 	if len(rows) > 0 {
 		return rows
 	}
-	return []chatRow{{Kind: rowTool, ID: message.ID, TaskID: message.Addr.TaskID, Text: messageText(message)}}
+	return []chatRow{{Kind: rowTool, ID: message.ID, TaskID: message.Addr.TaskID, Text: messageText(message), ToolCall: true}}
 }
 
 func appendOrReplaceToolRow(rows []chatRow, row chatRow) []chatRow {
@@ -214,6 +218,7 @@ func appendOrReplaceToolRow(rows []chatRow, row chatRow) []chatRow {
 			if strings.TrimSpace(row.Text) != "" {
 				rows[i].Text = row.Text
 			}
+			rows[i].ToolCall = rows[i].ToolCall || row.ToolCall
 			return rows
 		}
 	}
@@ -226,6 +231,7 @@ func (m *model) upsertToolPartRow(id, text, toolName string) {
 	}
 	for i := range m.rows {
 		if m.rows[i].Kind == rowTool && m.rows[i].ID == id {
+			m.rows[i].ToolCall = true
 			if isToolLifecycleText(m.rows[i].Text, toolName) {
 				return
 			}
@@ -233,7 +239,7 @@ func (m *model) upsertToolPartRow(id, text, toolName string) {
 			return
 		}
 	}
-	m.rows = append(m.rows, chatRow{Kind: rowTool, ID: id, Text: text})
+	m.rows = append(m.rows, chatRow{Kind: rowTool, ID: id, Text: text, ToolCall: true})
 }
 
 func isToolLifecycleText(text, toolName string) bool {
@@ -247,10 +253,10 @@ func isToolLifecycleText(text, toolName string) bool {
 
 func toolRowFromPart(message protocol.ChatMessage, part protocol.ContentPart) (chatRow, bool) {
 	if call, ok := part.AsToolCall(); ok {
-		return chatRow{Kind: rowTool, ID: call.ID, TaskID: message.Addr.TaskID, Text: toolCallText(call)}, true
+		return chatRow{Kind: rowTool, ID: call.ID, TaskID: message.Addr.TaskID, Text: toolCallText(call), ToolCall: true}, true
 	}
 	if result, ok := part.AsToolResult(); ok {
-		return chatRow{Kind: rowTool, ID: result.CallID, TaskID: message.Addr.TaskID, Text: toolResultText(result)}, true
+		return chatRow{Kind: rowTool, ID: result.CallID, TaskID: message.Addr.TaskID, Text: toolResultText(result), ToolCall: true}, true
 	}
 	if approval, ok := part.AsApprovalRequest(); ok {
 		return chatRow{Kind: rowTool, ID: approval.ID, TaskID: message.Addr.TaskID, Text: approvalText(approval.Tool, string(approval.Status))}, true

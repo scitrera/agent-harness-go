@@ -1,16 +1,11 @@
 package tui
 
 import (
-	"context"
-	"fmt"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/scitrera/agent-harness-go/pkg/approval"
-	"github.com/scitrera/agent-harness-go/pkg/channel"
-	"github.com/scitrera/agent-harness-go/pkg/protocol"
-	"github.com/scitrera/agent-harness-go/pkg/threadindex"
 )
 
 func (m model) handleSlash(input string) (tea.Model, tea.Cmd) {
@@ -28,11 +23,12 @@ func (m model) handleSlash(input string) (tea.Model, tea.Cmd) {
 	case "/quit", "/exit":
 		return m, tea.Quit
 	case "/cancel":
-		m.cancelActive()
-		return m, nil
+		return m, m.cancelActive()
 	case "/status":
 		m.addSystem(m.statusSummary())
 		return m, nil
+	case "/shell-response":
+		return m.handleShellResponse(fields), nil
 	case "/model", "/models", "/schedules", "/runs", "/refinements", "/ledger":
 		return m.enqueueMetaCommand(input)
 	case "/pwd", "/cd":
@@ -73,81 +69,162 @@ func (m model) handleSlash(input string) (tea.Model, tea.Cmd) {
 	return m.enqueueCommand(input)
 }
 
+func (m model) handleShellResponse(fields []string) tea.Model {
+	if len(fields) == 1 || strings.EqualFold(fields[1], "status") {
+		m.addSystem(m.shellResponseSummary())
+		return m
+	}
+	if m.shellPreferences == nil {
+		m.addSystem("shell response preferences are not writable; use --tui-shell-trigger-agent for the global default")
+		return m
+	}
+	scope := "thread"
+	valueIndex := 1
+	if strings.EqualFold(fields[1], "user") {
+		scope = "user"
+		valueIndex = 2
+	}
+	if len(fields) <= valueIndex {
+		m.addSystem("usage: /shell-response [status|on|off|default|user on|off|default]")
+		return m
+	}
+	value, ok := shellPreferenceValue(fields[valueIndex])
+	if !ok || len(fields) != valueIndex+1 {
+		m.addSystem("usage: /shell-response [status|on|off|default|user on|off|default]")
+		return m
+	}
+	var err error
+	if scope == "user" {
+		err = m.shellPreferences.SetUser(m.userID, value)
+	} else {
+		err = m.shellPreferences.SetThread(m.userID, m.workspaceID, m.threadID, value)
+	}
+	if err != nil {
+		m.addSystem("shell response preference failed: " + err.Error())
+		return m
+	}
+	m.addSystem(m.shellResponseSummary())
+	return m
+}
+
+func shellPreferenceValue(value string) (*bool, bool) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "on", "true", "yes":
+		return boolPointer(true), true
+	case "off", "false", "no":
+		return boolPointer(false), true
+	case "default", "inherit":
+		return nil, true
+	default:
+		return nil, false
+	}
+}
+
+func (m model) shellResponseSummary() string {
+	resolution := m.resolveShellPreference(m.workspaceID, m.threadID)
+	return "idle shell response: " + onOff(resolution.Effective) +
+		" (source=" + resolution.Source +
+		", global=" + onOff(resolution.Global) +
+		", user=" + optionalOnOff(resolution.User) +
+		", thread=" + optionalOnOff(resolution.Thread) + ")"
+}
+
+func onOff(value bool) string {
+	if value {
+		return "on"
+	}
+	return "off"
+}
+
+func optionalOnOff(value *bool) string {
+	if value == nil {
+		return "default"
+	}
+	return onOff(*value)
+}
+
 // enqueueMetaCommand sends a runner-owned command without presenting it as a
 // conversational user turn. Remote TUIs still need to round-trip through the
 // worker that owns model state, but commands such as /model should not rename
 // the thread or display a misleading model-generation placeholder.
 func (m model) enqueueMetaCommand(text string) (tea.Model, tea.Cmd) {
-	taskID, err := threadindex.NewID("task-")
+	pending, err := m.prepareQueuedMessage(outboundMetaCommand, text, nil)
 	if err != nil {
-		m.addSystem("could not create task id: " + err.Error())
+		m.addSystem("could not prepare command: " + err.Error())
 		return m, nil
 	}
-	if strings.HasPrefix(text, "/models") {
-		text = "/model" + strings.TrimPrefix(text, "/models")
-	}
-	part, err := protocol.NewTextPart(text)
-	if err != nil {
-		m.addSystem("could not create command message: " + err.Error())
-		return m, nil
-	}
-	addr := protocol.MessageAddress{WorkspaceID: m.workspaceID, ThreadID: m.threadID, TaskID: taskID}
-	message := protocol.ChatMessage{ID: "user-" + taskID, Role: protocol.RoleUser, Addr: addr, Content: []protocol.ContentPart{part}}
-	if err := m.scopeMessage(&addr, &message); err != nil {
-		m.addSystem("could not scope command: " + err.Error())
-		return m, nil
-	}
-	m.lastTaskID = taskID
-	m.markTurn(taskID, m.threadID, "queued")
-	m.refreshViewport()
-	return m, sendMetaCommandCmd(m.ctx, m.channel, m.workspaceID, addr, message)
+	return m.submitPreparedMessage(pending)
 }
 
 func (m model) enqueueCommand(text string) (tea.Model, tea.Cmd) {
-	taskID, err := threadindex.NewID("task-")
+	pending, err := m.prepareQueuedMessage(outboundCommand, text, m.attachments)
 	if err != nil {
-		m.addSystem("could not create task id: " + err.Error())
+		m.addSystem("could not prepare command: " + err.Error())
 		return m, nil
 	}
-	content, err := m.takeMessageContent(text)
-	if err != nil {
-		m.addSystem("could not create command message: " + err.Error())
-		return m, nil
-	}
-	addr := protocol.MessageAddress{WorkspaceID: m.workspaceID, ThreadID: m.threadID, TaskID: taskID}
-	message := protocol.ChatMessage{ID: "user-" + taskID, Role: protocol.RoleUser, Addr: addr, Content: content}
-	if err := m.scopeMessage(&addr, &message); err != nil {
-		m.addSystem("could not scope command: " + err.Error())
-		return m, nil
-	}
-	m.lastTaskID = taskID
-	m.markTurn(taskID, m.threadID, "queued")
-	m.rows = append(m.rows, chatRow{Kind: rowUser, ID: message.ID, TaskID: taskID, Text: messageText(message)})
-	m.addThinking(taskID)
-	m.refreshViewportToBottom()
-	return m, sendMessageCmd(m.ctx, m.channel, m.index, m.initialWorkspaceID, m.workspaceID, addr, message, text, nil)
+	m.attachments = nil
+	m.updateAttachmentPlaceholder()
+	return m.submitPreparedMessage(pending)
 }
 
-func (m *model) cancelActive() {
-	if !m.canCancelActive() {
+func (m *model) cancelActive() tea.Cmd {
+	taskID := m.activeTaskID()
+	if taskID == "" || m.canceller == nil {
 		m.addSystem("no active task to cancel")
-		return
+		return nil
 	}
-	if m.canceller.Cancel(m.lastTaskID) {
-		delete(m.turns, m.lastTaskID)
-		m.removeThinking(m.lastTaskID)
-		m.addSystem("cancelled " + m.lastTaskID)
-		return
+	if m.tryCancelTask(taskID) {
+		return m.dispatchNextPending()
 	}
-	m.addSystem("task not cancellable: " + m.lastTaskID)
+	if m.cancelPendingID != taskID {
+		m.cancelPendingID = taskID
+		m.status = "cancellation requested"
+		m.refreshViewport()
+	}
+	return nil
 }
 
 func (m model) canCancelActive() bool {
-	if m.lastTaskID == "" || m.canceller == nil {
+	return m.canceller != nil && m.activeTaskID() != ""
+}
+
+func (m model) activeTaskID() string {
+	if activity, ok := m.turns[m.lastTaskID]; ok && m.activityOnCurrentThread(activity) {
+		return m.lastTaskID
+	}
+	for taskID, activity := range m.turns {
+		if m.activityOnCurrentThread(activity) {
+			return taskID
+		}
+	}
+	return ""
+}
+
+func (m *model) tryCancelTask(taskID string) bool {
+	if taskID == "" || m.canceller == nil || !m.canceller.Cancel(taskID) {
 		return false
 	}
-	activity, ok := m.turns[m.lastTaskID]
-	return ok && m.activityOnCurrentThread(activity)
+	delete(m.turns, taskID)
+	m.removeThinking(taskID)
+	if m.cancelPendingID == taskID {
+		m.cancelPendingID = ""
+	}
+	m.addSystem("cancelled " + taskID)
+	return true
+}
+
+func (m *model) retryPendingCancel(taskID string) tea.Cmd {
+	if taskID == "" || m.cancelPendingID != taskID {
+		return nil
+	}
+	if _, active := m.turns[taskID]; !active {
+		m.cancelPendingID = ""
+		return nil
+	}
+	if !m.tryCancelTask(taskID) {
+		return nil
+	}
+	return m.dispatchNextPending()
 }
 
 func (m *model) resolveApproval(fields []string, granted bool) {
@@ -198,40 +275,4 @@ func (m model) nextThreadAfterDelete(id string) string {
 		}
 	}
 	return ""
-}
-
-func sendMessageCmd(
-	ctx context.Context,
-	ch ChannelSurface,
-	index threadindex.Store,
-	initialWorkspaceID string,
-	storageWorkspaceID string,
-	addr protocol.MessageAddress,
-	message protocol.ChatMessage,
-	text string,
-	referencedImages []referencedImage,
-) tea.Cmd {
-	return func() tea.Msg {
-		var err error
-		message, err = appendReferencedImages(ctx, message, referencedImages)
-		if err != nil {
-			return sendResultMsg{WorkspaceID: storageWorkspaceID, TaskID: addr.TaskID, Err: fmt.Errorf("load image reference: %w", err)}
-		}
-		if err := touchWorkspaceThread(index, initialWorkspaceID, storageWorkspaceID, addr.ThreadID, text); err != nil {
-			return sendResultMsg{WorkspaceID: storageWorkspaceID, TaskID: addr.TaskID, Err: fmt.Errorf("touch thread: %w", err)}
-		}
-		if err := ch.Enqueue(ctx, channel.Inbound{Addr: addr, Message: message}); err != nil {
-			return sendResultMsg{WorkspaceID: storageWorkspaceID, TaskID: addr.TaskID, Err: fmt.Errorf("enqueue: %w", err)}
-		}
-		return sendResultMsg{WorkspaceID: storageWorkspaceID, Session: threadindex.Session{ID: addr.ThreadID}, TaskID: addr.TaskID}
-	}
-}
-
-func sendMetaCommandCmd(ctx context.Context, ch ChannelSurface, storageWorkspaceID string, addr protocol.MessageAddress, message protocol.ChatMessage) tea.Cmd {
-	return func() tea.Msg {
-		if err := ch.Enqueue(ctx, channel.Inbound{Addr: addr, Message: message}); err != nil {
-			return sendResultMsg{WorkspaceID: storageWorkspaceID, TaskID: addr.TaskID, Err: fmt.Errorf("enqueue: %w", err)}
-		}
-		return sendResultMsg{WorkspaceID: storageWorkspaceID, TaskID: addr.TaskID}
-	}
 }

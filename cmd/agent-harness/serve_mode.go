@@ -126,6 +126,7 @@ func runServe(cfg appConfig) error {
 		return fmt.Errorf("runtime: %w", err)
 	}
 	rt.SetCanceller(canceller)
+	rt.SetSteering(runner.SteeringInbox())
 
 	if err := ch.ReconcileGoalContinuations(ctx); err != nil {
 		return fmt.Errorf("goal continuation recovery: %w", err)

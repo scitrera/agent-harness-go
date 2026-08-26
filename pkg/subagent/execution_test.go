@@ -209,6 +209,60 @@ func TestExecutionEnvelopeRejectsUnreleasedAlternateRevision(t *testing.T) {
 	}
 }
 
+func TestExecutionEnvelopePinsCatalogRevision(t *testing.T) {
+	req := executionTestRequest()
+	req.CatalogRevision = digestExecutionText("catalog-v1")
+	envelope, err := NewExecutionEnvelope(req, "project-a", "child-session", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if envelope.CatalogRevision != req.CatalogRevision {
+		t.Fatalf("catalog revision = %q", envelope.CatalogRevision)
+	}
+	drifted := req
+	drifted.CatalogRevision = digestExecutionText("catalog-v2")
+	if err := envelope.VerifyPolicy(drifted); err == nil || !strings.Contains(err.Error(), "catalog revision") {
+		t.Fatalf("catalog drift error = %v", err)
+	}
+}
+
+func TestExecutionEnvelopePinsCanonicalOutputSchema(t *testing.T) {
+	req := executionTestRequest()
+	req.OutputSchema = json.RawMessage(`{ "required": ["status"], "type": "object", "properties": {"status": {"type":"string"}} }`)
+	envelope, err := NewExecutionEnvelope(req, "project-a", "child-session", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contract, err := CompileOutputSchema(req.OutputSchema)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if envelope.OutputSchemaDigest != contract.Digest() || !bytes.Equal(envelope.OutputSchema, contract.Raw()) {
+		t.Fatalf("output contract = digest %q schema %s", envelope.OutputSchemaDigest, envelope.OutputSchema)
+	}
+	encoded, err := MarshalExecutionEnvelope(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := ParseExecutionEnvelope(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(decoded.OutputSchema, contract.Raw()) || decoded.OutputSchemaDigest != contract.Digest() {
+		t.Fatalf("decoded output contract = digest %q schema %s", decoded.OutputSchemaDigest, decoded.OutputSchema)
+	}
+	drifted := req
+	drifted.OutputSchema = json.RawMessage(`{"type":"object","required":["different"]}`)
+	if err := envelope.VerifyPolicy(drifted); err == nil || !strings.Contains(err.Error(), "output schema") {
+		t.Fatalf("output schema drift error = %v", err)
+	}
+	tampered := envelope
+	tampered.OutputSchema = json.RawMessage(`{"type":"string"}`)
+	if err := tampered.Validate(); err == nil || !strings.Contains(err.Error(), "output schema digest") {
+		t.Fatalf("output schema tamper error = %v", err)
+	}
+}
+
 func TestReconstructExecutionRequestUsesCatalogAndTaskAuthority(t *testing.T) {
 	req := executionTestRequest()
 	envelope, err := NewExecutionEnvelope(req, "project-a", "child-session", true)

@@ -53,6 +53,35 @@ func Test_OpenAICompatClient_Chat_posts_scitrera_messages_to_sidecar(t *testing.
 	}
 }
 
+func Test_OpenAICompatClient_Chat_accepts_versioned_base_url_with_shared_transport(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Errorf("path = %q, want /v1/chat/completions", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chat_1","model":"served","choices":[{"message":{"role":"assistant","content":"ok"}}]}`))
+	}))
+	defer server.Close()
+
+	client, err := NewOpenAICompatClient(OpenAICompatConfig{
+		BaseURL: server.URL + "/v1", Format: FormatOpenAI, HTTPClient: server.Client(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	user, _ := protocol.NewTextPart("hello")
+	response, err := client.Chat(context.Background(), ChatRequest{
+		Model: "logical", Messages: []protocol.ChatMessage{{Role: protocol.RoleUser, Content: []protocol.ContentPart{user}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Model != "served" {
+		t.Fatalf("response model = %q", response.Model)
+	}
+}
+
 func Test_OpenAICompatClient_Chat_decodes_openai_compatible_response_when_sidecar_returns_choices(t *testing.T) {
 	// Given
 	ctx := context.Background()

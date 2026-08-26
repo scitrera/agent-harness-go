@@ -118,12 +118,12 @@ func TestUpdateKey_homeMovesComposerCursorInsteadOfScrollback(t *testing.T) {
 	}
 }
 
-func TestViewLeavesMouseSelectionToTerminal(t *testing.T) {
+func TestViewEnablesMouseWheelEvents(t *testing.T) {
 	m := model{channel: NewChannel(), viewport: viewport.New(), composer: newComposer(), tailing: true}
 	m.resize(60, 20)
 
-	if got := m.View().MouseMode; got != tea.MouseModeNone {
-		t.Fatalf("mouse mode = %v, want terminal-owned selection", got)
+	if got := m.View().MouseMode; got != tea.MouseModeCellMotion {
+		t.Fatalf("mouse mode = %v, want cell motion for wheel events", got)
 	}
 }
 

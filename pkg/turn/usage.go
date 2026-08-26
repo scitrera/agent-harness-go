@@ -14,11 +14,13 @@ import (
 // usage record under meta[compaction.MetaUsage] — the authoritative signal trace
 // export reads for token/cost analysis and training-data curation.
 type turnUsage struct {
-	promptTokens     int
-	completionTokens int
-	totalTokens      int
-	calls            int
-	model            string
+	promptTokens             int
+	completionTokens         int
+	totalTokens              int
+	cachedInputTokens        int
+	cacheCreationInputTokens int
+	calls                    int
+	model                    string
 }
 
 // add folds one provider call's usage into the running total. model is the model
@@ -28,6 +30,8 @@ func (t *turnUsage) add(u provider.Usage, model string) {
 	t.promptTokens += u.PromptTokens
 	t.completionTokens += u.CompletionTokens
 	t.totalTokens += u.TotalTokens
+	t.cachedInputTokens += u.CachedInputTokens
+	t.cacheCreationInputTokens += u.CacheCreationInputTokens
 	t.calls++
 	if model != "" {
 		t.model = model
@@ -42,11 +46,13 @@ func (t *turnUsage) stamp(msg *protocol.ChatMessage) {
 		return
 	}
 	payload, err := json.Marshal(map[string]any{
-		"model":             t.model,
-		"prompt_tokens":     t.promptTokens,
-		"completion_tokens": t.completionTokens,
-		"total_tokens":      t.totalTokens,
-		"calls":             t.calls,
+		"model":                       t.model,
+		"prompt_tokens":               t.promptTokens,
+		"completion_tokens":           t.completionTokens,
+		"total_tokens":                t.totalTokens,
+		"cached_input_tokens":         t.cachedInputTokens,
+		"cache_creation_input_tokens": t.cacheCreationInputTokens,
+		"calls":                       t.calls,
 	})
 	if err != nil {
 		slog.Warn("usage: marshal turn usage", slog.Any("err", err))

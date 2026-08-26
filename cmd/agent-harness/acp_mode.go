@@ -46,6 +46,7 @@ func runACP(cfg appConfig) error {
 		return fmt.Errorf("runtime: %w", err)
 	}
 	rt.SetCanceller(canceller)
+	rt.SetSteering(runner.SteeringInbox())
 
 	// The JSON-RPC read loop feeds inbound prompts to the runtime's FetchTask; run
 	// the turn loop concurrently so streaming session/update notifications flow while

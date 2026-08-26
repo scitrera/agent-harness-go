@@ -108,7 +108,7 @@ func AnnotateToolResult(span trace.Span, outputs json.RawMessage, isError bool) 
 // RecordLLMResult stamps the served model, token usage, and wall-clock latency on
 // the LLM span (best-effort; a no-op span just drops them). Call on a successful
 // provider response before Finish. Generic attribute keys; a convention MAY remap.
-func RecordLLMResult(span trace.Span, model string, promptTokens, completionTokens, totalTokens int, latency time.Duration) {
+func RecordLLMResult(span trace.Span, model string, promptTokens, completionTokens, totalTokens, cachedInputTokens, cacheCreationInputTokens int, latency time.Duration) {
 	if span == nil {
 		return
 	}
@@ -117,7 +117,23 @@ func RecordLLMResult(span trace.Span, model string, promptTokens, completionToke
 		attribute.Int("llm.usage.prompt_tokens", promptTokens),
 		attribute.Int("llm.usage.completion_tokens", completionTokens),
 		attribute.Int("llm.usage.total_tokens", totalTokens),
+		attribute.Int("llm.usage.cached_input_tokens", cachedInputTokens),
+		attribute.Int("llm.usage.cache_creation_input_tokens", cacheCreationInputTokens),
 		attribute.Int64("llm.latency_ms", latency.Milliseconds()),
+	)
+}
+
+// RecordLLMCachePlan records only stable prompt/tool digests and the prefix byte
+// count. The underlying prompt and schemas are intentionally excluded.
+func RecordLLMCachePlan(span trace.Span, stablePrefixBytes int, stablePromptDigest, dynamicSuffixDigest, toolSchemaDigest string) {
+	if span == nil {
+		return
+	}
+	span.SetAttributes(
+		attribute.Int("llm.cache.stable_prefix_bytes", stablePrefixBytes),
+		attribute.String("llm.cache.stable_prompt_digest", stablePromptDigest),
+		attribute.String("llm.cache.dynamic_suffix_digest", dynamicSuffixDigest),
+		attribute.String("llm.cache.tool_schema_digest", toolSchemaDigest),
 	)
 }
 

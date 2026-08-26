@@ -14,14 +14,16 @@ import (
 // recoveryProvider records each call's model and defers the success/failure
 // decision to fail(call, model). fail returns nil to succeed.
 type recoveryProvider struct {
-	calls  int
-	models []string
-	fail   func(call int, model string) error
+	calls   int
+	models  []string
+	efforts []string
+	fail    func(call int, model string) error
 }
 
 func (p *recoveryProvider) Chat(_ context.Context, req provider.ChatRequest) (provider.ChatResponse, error) {
 	p.calls++
 	p.models = append(p.models, req.Model)
+	p.efforts = append(p.efforts, req.ReasoningEffort)
 	if err := p.fail(p.calls, req.Model); err != nil {
 		return provider.ChatResponse{}, err
 	}
@@ -154,6 +156,37 @@ func TestRecovery_CrossModelFallback(t *testing.T) {
 	}
 	if len(prov.models) != 2 || prov.models[0] != "primary" || prov.models[1] != "fast" {
 		t.Fatalf("expected primary then fast, got %v", prov.models)
+	}
+}
+
+func TestRecovery_RecomputesReasoningForFallbackModel(t *testing.T) {
+	registry := modelpkg.NewRegistry([]modelpkg.Model{
+		{Name: "primary", Capabilities: modelpkg.Capabilities{Tools: true}, Reasoning: modelpkg.ReasoningConfig{
+			DefaultEffort: "high", AllowedEfforts: []string{"high", "xhigh"},
+		}},
+		{Name: "fast", Capabilities: modelpkg.Capabilities{Tools: true}, Reasoning: modelpkg.ReasoningConfig{
+			DefaultEffort: "low", AllowedEfforts: []string{"low", "medium"},
+		}},
+	}, "primary")
+	prov := &recoveryProvider{fail: func(_ int, model string) error {
+		if model == "primary" {
+			return &provider.ProviderError{Kind: provider.FailureUnknown, Status: 418, Body: "teapot"}
+		}
+		return nil
+	}}
+	r, err := NewRunner(Config{
+		Store: &fakeStore{}, Loader: fakeLoader{}, Provider: prov,
+		Assembler: contextpack.NewAssembler(contextpack.Config{}),
+		Model:     "primary", ModelRegistry: registry, ModelSelector: fallbackSelector{to: "fast"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Run(context.Background(), protocol.MessageAddress{ThreadID: "t1"}, userMessage(t, "q")); err != nil {
+		t.Fatal(err)
+	}
+	if len(prov.efforts) != 2 || prov.efforts[0] != "high" || prov.efforts[1] != "low" {
+		t.Fatalf("fallback efforts = %#v, want [high low]", prov.efforts)
 	}
 }
 

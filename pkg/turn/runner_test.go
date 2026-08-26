@@ -12,6 +12,7 @@ import (
 	"github.com/scitrera/agent-harness-go/pkg/bootstrap"
 	"github.com/scitrera/agent-harness-go/pkg/channel"
 	"github.com/scitrera/agent-harness-go/pkg/contextpack"
+	modelpkg "github.com/scitrera/agent-harness-go/pkg/model"
 	"github.com/scitrera/agent-harness-go/pkg/promptnotes"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 	"github.com/scitrera/agent-harness-go/pkg/provider"
@@ -394,10 +395,16 @@ func Test_Runner_Run_persists_user_and_assistant_and_publishes_final_event(t *te
 	if assistant.ID != streamID {
 		t.Fatalf("unexpected assistant: %#v", assistant)
 	}
+	if got := modelpkg.ActiveModelFromMessage(assistant); got != "test-model" {
+		t.Fatalf("returned assistant active model = %q", got)
+	}
 	// The session Store keeps the raw per-iteration provider messages (used for
 	// context assembly), so the assistant message there retains its provider id.
 	if len(store.messages) != 2 || store.messages[0].ID != "user-1" || store.messages[1].ID != "assistant-1" {
 		t.Fatalf("unexpected persisted history: %#v", store.messages)
+	}
+	if got := modelpkg.ActiveModelFromMessage(store.messages[1]); got != "test-model" {
+		t.Fatalf("persisted assistant active model = %q", got)
 	}
 	if provider.request.Model != "test-model" || len(provider.request.Messages) != 2 {
 		t.Fatalf("unexpected provider request: %#v", provider.request)
@@ -414,6 +421,9 @@ func Test_Runner_Run_persists_user_and_assistant_and_publishes_final_event(t *te
 	last := publisher.events[len(publisher.events)-1]
 	if last.Type != channel.EventMessageFinal || last.Message == nil {
 		t.Fatalf("last event should be message_final with a message: %#v", last)
+	}
+	if got := modelpkg.ActiveModelFromMessage(*last.Message); got != "test-model" {
+		t.Fatalf("final event active model = %q", got)
 	}
 }
 

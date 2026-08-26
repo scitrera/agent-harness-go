@@ -2,6 +2,7 @@ package subagent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -68,6 +69,8 @@ func ReconstructExecutionRequest(
 		SubjectID:       subjectID,
 		Background:      envelope.Background,
 		ExecutionScope:  cloneExecutionScope(envelope.ExecutionScope),
+		CatalogRevision: envelope.CatalogRevision,
+		OutputSchema:    append(json.RawMessage(nil), envelope.OutputSchema...),
 	}
 
 	if envelope.Policy.AgentType == "" {

@@ -43,12 +43,18 @@ func TestExecutionLedgerPersistsModelPinAcrossRunnerRestart(t *testing.T) {
 	if err != nil || !strings.Contains(assistantPlainText(reply), "model-b") {
 		t.Fatalf("pin reply=%q err=%v", assistantPlainText(reply), err)
 	}
+	if got := modelpkg.ActiveModelFromMessage(reply); got != "model-b" {
+		t.Fatalf("pin reply active model=%q, want model-b", got)
+	}
 
 	second := newLedgerCommandRunner(t, ledger)
 	addr.TaskID = "task-list"
 	reply, err = second.Run(ctx, addr, userMessage(t, "/model"))
 	if err != nil || !strings.Contains(assistantPlainText(reply), "Active: model-b") {
 		t.Fatalf("restarted model reply=%q err=%v", assistantPlainText(reply), err)
+	}
+	if got := modelpkg.ActiveModelFromMessage(reply); got != "model-b" {
+		t.Fatalf("restarted reply active model=%q, want model-b", got)
 	}
 	page, err := store.Query(ctx, executionledger.Ref{WorkspaceID: "workspace-a", SessionID: "session-a"}, executionledger.Query{Types: []executionledger.EventType{executionledger.EventModelPinned}})
 	if err != nil || len(page.Events) != 1 || page.Events[0].Model != "model-b" {

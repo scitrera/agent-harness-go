@@ -190,3 +190,43 @@ func TestWorkspaceCatalogRuntimeCoalescesConcurrentColdLoads(t *testing.T) {
 		t.Fatalf("provider calls = %d, want 1", got)
 	}
 }
+
+func TestWorkspaceCatalogRuntimeBindsRevisionPerSession(t *testing.T) {
+	provider := &fakeWorkspaceCatalogProvider{
+		catalogs: map[string]catalog.Catalog{
+			"project-a": {Skills: []catalog.SkillSpec{{Name: "remote", Content: "version one", Enabled: true}}},
+		},
+		errors: map[string]error{}, calls: map[string]int{},
+	}
+	runtime := newWorkspaceCatalogRuntime(provider, t.TempDir(), nil, nil)
+	first := runtime.decorate(context.Background(), protocol.MessageAddress{WorkspaceID: "project-a", ThreadID: "session-one"})
+	firstRevision, ok := catalog.RevisionFrom(first)
+	if !ok {
+		t.Fatal("first session has no catalog revision")
+	}
+
+	provider.mu.Lock()
+	provider.catalogs["project-a"] = catalog.Catalog{Skills: []catalog.SkillSpec{{Name: "remote", Content: "version two", Enabled: true}}}
+	provider.mu.Unlock()
+	same := runtime.decorate(context.Background(), protocol.MessageAddress{WorkspaceID: "project-a", ThreadID: "session-one"})
+	newSession := runtime.decorate(context.Background(), protocol.MessageAddress{WorkspaceID: "project-a", ThreadID: "session-two"})
+	sameRevision, _ := catalog.RevisionFrom(same)
+	newRevision, _ := catalog.RevisionFrom(newSession)
+	if sameRevision != firstRevision || newRevision == "" || newRevision == firstRevision {
+		t.Fatalf("revisions: first=%q same=%q new=%q", firstRevision, sameRevision, newRevision)
+	}
+	if got := provider.callCount("project-a"); got != 2 {
+		t.Fatalf("provider calls = %d, want one per session lineage", got)
+	}
+
+	load := skills.LoadTool(skills.BuildRegistry(nil, t.TempDir()))
+	for _, tc := range []struct {
+		ctx  context.Context
+		want string
+	}{{first, "version one"}, {same, "version one"}, {newSession, "version two"}} {
+		result, err := load(tc.ctx, tools.Request{CallID: tc.want, Name: skills.LoadToolName, Arguments: json.RawMessage(`{"name":"remote"}`)})
+		if err != nil || result.IsError || !strings.Contains(string(result.Payload), tc.want) {
+			t.Fatalf("load for %q = %s, %v", tc.want, result.Payload, err)
+		}
+	}
+}

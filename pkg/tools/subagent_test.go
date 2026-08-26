@@ -28,6 +28,7 @@ type spySubagent struct {
 	resumeThreadID  string
 	parentMessageID string
 	executionScope  *workspacepkg.ExecutionScope
+	outputSchema    json.RawMessage
 	// resultThreadID/resultSummary let a test control the returned handle+digest.
 	resultThreadID string
 	resultSummary  string
@@ -57,7 +58,14 @@ func (s *spySubagent) RunSubagent(_ context.Context, req subagent.Request) (suba
 	s.resumeThreadID = req.ResumeThreadID
 	s.parentMessageID = req.ParentMessageID
 	s.executionScope = req.ExecutionScope
-	return subagent.Result{Text: "sub-agent answer", ThreadID: s.resultThreadID, Summary: s.resultSummary}, nil
+	s.outputSchema = append(json.RawMessage(nil), req.OutputSchema...)
+	result := subagent.Result{Text: "sub-agent answer", ThreadID: s.resultThreadID, Summary: s.resultSummary}
+	if len(req.OutputSchema) > 0 {
+		result.Text = `{"status":"ok"}`
+		result.StructuredPayload = json.RawMessage(result.Text)
+		result.StructuredDigest = subagent.StructuredDigest(result.StructuredPayload)
+	}
+	return result, nil
 }
 
 func TestRegisterSubagentInheritsExactExecutionScope(t *testing.T) {
@@ -112,6 +120,24 @@ func TestRegisterSubagentInvokes(t *testing.T) {
 	}
 	if !bytes.Contains(res.Payload, []byte("sub-agent answer")) {
 		t.Fatalf("result missing sub-agent answer: %s", res.Payload)
+	}
+}
+
+func TestRegisterSubagentForwardsOutputSchemaAndReturnsStructuredResult(t *testing.T) {
+	reg := NewRegistry()
+	spy := &spySubagent{}
+	if err := RegisterSubagent(reg, spy, 2); err != nil {
+		t.Fatal(err)
+	}
+	result, err := reg.Invoke(context.Background(), Request{
+		CallID: "structured", Name: SubagentToolName,
+		Arguments: json.RawMessage(`{"task":"review","output_schema":{"type":"object","required":["status"],"properties":{"status":{"type":"string"}}}}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(spy.outputSchema) == 0 || !bytes.Contains(result.Payload, []byte(`"structured_result":{"status":"ok"}`)) || !bytes.Contains(result.Payload, []byte(`"structured_result_digest":"sha256:`)) {
+		t.Fatalf("schema=%s payload=%s", spy.outputSchema, result.Payload)
 	}
 }
 

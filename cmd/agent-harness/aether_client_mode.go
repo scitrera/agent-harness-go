@@ -14,9 +14,9 @@ import (
 	"github.com/scitrera/agent-harness-go/pkg/team"
 )
 
-// remoteModelStatus reports the model for the status line when there is no local
-// runner to ask. The agent picks the real model; this is the client's best
-// guess, which is why it is only a label.
+// remoteModelStatus supplies the status-line fallback before this client has
+// observed worker-owned model metadata for the current thread. Live finals and
+// loaded history replace this estimate inside the TUI.
 type remoteModelStatus struct{ model string }
 
 func (r remoteModelStatus) ActiveModelName(string) string { return r.model }
@@ -28,11 +28,10 @@ func runTUIClient(cfg appConfig) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// A remote client cannot query the worker synchronously for its status-line
-	// label, but it may share the same workspace checkout (the OSS E2E layout
-	// does). Prefer that registry's default over the unrelated CLI fallback. A
-	// malformed or unavailable client-side registry must not prevent attachment;
-	// /model remains the authoritative remote view.
+	// Before the first worker-authored message is available, prefer the shared
+	// registry default over the unrelated CLI fallback. A malformed or
+	// unavailable client-side registry must not prevent attachment. Once present,
+	// worker-stamped per-thread model metadata is authoritative.
 	statusModel := cfg.model
 	registry := cfg.modelRegistry
 	var registryErr error
@@ -102,6 +101,10 @@ func runTUIClient(cfg appConfig) error {
 	go renewAetherWorkspaceViews(ctx, "client", toolHost)
 
 	modeStateDir := workspaceStateDir(cfg)
+	shellPreferences, err := openTUIShellPreferences(cfg)
+	if err != nil {
+		return err
+	}
 
 	fmt.Fprintf(os.Stderr, "agent-harness | connected to %s via aether %s (history: %s)\n",
 		client.AgentTopic(), cfg.aetherAddr, historyLabel(st))
@@ -112,9 +115,8 @@ func runTUIClient(cfg appConfig) error {
 		Index:     st.threads,
 		Approvals: client,
 		Canceller: client,
-		// No local runner to ask, so the status line shows the best local
-		// configuration estimate and the command palette offers only the UI's own
-		// commands. /model remains the worker-authoritative view.
+		// No local runner to ask, so this is only the footer's initial fallback.
+		// Worker-stamped final messages update the authoritative per-thread value.
 		ModelStatus:       remoteModelStatus{model: statusModel},
 		TaskStore:         store.NewTaskStateStore(modeStateDir),
 		TeamStore:         team.NewFileGraphStore(filepath.Join(modeStateDir, "team", "graph.json")),
@@ -131,5 +133,8 @@ func runTUIClient(cfg appConfig) error {
 		InitialWorkspaceID: cfg.workspaceID,
 		WorkspaceRoot:      cfg.workspaceRoot,
 		RetainReasoning:    cfg.tuiRetainReasoning,
+		UserID:             cfg.aetherUser,
+		ShellTriggerAgent:  cfg.tuiShellTriggerAgent,
+		ShellPreferences:   shellPreferences,
 	})
 }

@@ -14,6 +14,7 @@
 #                                                    <- ECOSYSTEM_SPEC_REPO
 #   <root>/scitrera-app-monorepo2/backend/scitrera-aether3-go/oss-repo
 #                                                    <- AETHER_REPO
+#   <root>/scitrera-app-monorepo2/llm-gateway/go-llm <- GO_LLM_REPO
 #   <root>/scitrera-memorylayer-ai-cc/oss             <- MEMORYLAYER_REPO
 #
 # Usage:
@@ -30,6 +31,7 @@ monorepo_root="$(cd "$oss_repo/../.." && pwd)"
 ECOSYSTEM_SPEC_REPO="${ECOSYSTEM_SPEC_REPO:-$monorepo_root/scitrera-ecosystem-messaging-spec}"
 AETHER_REPO="${AETHER_REPO:-$monorepo_root/backend/scitrera-aether3-go/oss-repo}"
 MEMORYLAYER_REPO="${MEMORYLAYER_REPO:-$HOME/scitrera-memorylayer-ai-cc/oss}"
+GO_LLM_REPO="${GO_LLM_REPO:-$monorepo_root/llm-gateway/go-llm}"
 
 want_embed=0
 only=""
@@ -122,11 +124,13 @@ if build agent yes; then
   [[ -d "$ECOSYSTEM_SPEC_REPO/go" ]] || fail_missing "the ecosystem messaging spec repo" "$ECOSYSTEM_SPEC_REPO" ECOSYSTEM_SPEC_REPO
   [[ -d "$AETHER_REPO/sdk/go" ]] || fail_missing "the aether repo" "$AETHER_REPO" AETHER_REPO
   [[ -d "$MEMORYLAYER_REPO/memorylayer-sdk-go" ]] || fail_missing "the memorylayer oss repo" "$MEMORYLAYER_REPO" MEMORYLAYER_REPO
+  [[ -f "$GO_LLM_REPO/go.mod" ]] || fail_missing "the go-llm repo" "$GO_LLM_REPO" GO_LLM_REPO
   echo "==> agent-harness"
   docker build \
     --build-context ecosystem_spec="$ECOSYSTEM_SPEC_REPO" \
     --build-context aether_oss="$AETHER_REPO" \
     --build-context memorylayer_sdk="$MEMORYLAYER_REPO/memorylayer-sdk-go" \
+    --build-context go_llm="$GO_LLM_REPO" \
     -f "$here/Dockerfile.agent-local" \
     -t agent-harness:local \
     "$oss_repo"

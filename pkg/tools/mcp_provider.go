@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 
+	spec "github.com/scitrera/ecosystem-messaging-spec/go"
+
 	"github.com/scitrera/agent-harness-go/pkg/mcp"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 )
@@ -87,6 +89,19 @@ func NewMCPProvider(cfg MCPProviderConfig) *MCPProvider {
 // ID identifies the provider.
 func (p *MCPProvider) ID() string { return "mcp" }
 
+// mcpEffect maps a server's annotations to a portable effect class. The mapping
+// is deliberately one-directional: an explicit readOnlyHint:true becomes read,
+// and EVERYTHING else becomes execute — the conservative class — because
+// annotations are the server's own claim about itself. A server that wants its
+// tool auto-approved by the read-only tier has to say so explicitly; a server
+// that says nothing does not get the benefit of the doubt.
+func mcpEffect(t mcp.Tool) spec.ToolEffect {
+	if t.Annotations.IsReadOnly() {
+		return spec.ToolEffectRead
+	}
+	return spec.ToolEffectExecute
+}
+
 // Tools lists every configured server's tools and converts each mcp.Tool to a
 // Descriptor using the mcpRegistryName scheme. A per-server ListTools error is
 // logged and that server skipped (best-effort, mirroring the manager's own
@@ -111,6 +126,7 @@ func (p *MCPProvider) Tools(ctx context.Context, _ protocol.MessageAddress, _ pr
 				Name:        name,
 				Description: t.Description,
 				Parameters:  t.InputSchema,
+				Effect:      mcpEffect(t),
 			})
 			route[name] = mcpRoute{server: server, tool: t.Name}
 		}

@@ -45,16 +45,21 @@ func (p *CatalogProvider) LoadWorkspace(ctx context.Context, workspace string) (
 	if err != nil {
 		return catalog.Catalog{}, err
 	}
-	return catalog.Catalog{Skills: skills, MCPServers: servers}, nil
+	return catalog.WithComputedRevision(catalog.Catalog{Skills: skills, MCPServers: servers})
 }
 
 type memoryLayerSkill struct {
+	ID           string          `json:"id"`
 	Name         string          `json:"name"`
 	Description  string          `json:"description"`
 	Body         string          `json:"body"`
 	AllowedTools string          `json:"allowed_tools"`
 	Metadata     json.RawMessage `json:"metadata"`
 	Enabled      bool            `json:"enabled"`
+	Revision     int             `json:"revision"`
+	ETag         string          `json:"etag"`
+	ManifestHash string          `json:"manifest_hash"`
+	BundleHash   string          `json:"bundle_hash"`
 }
 
 func (p *CatalogProvider) loadSkills(ctx context.Context, workspace string) ([]catalog.SkillSpec, error) {
@@ -84,6 +89,10 @@ func (p *CatalogProvider) loadSkills(ctx context.Context, workspace string) ([]c
 			AllowedTools:   parseAllowedTools(skill.AllowedTools),
 			Prereqs:        prereqs,
 			PreferredModel: preferredModel,
+			Source: &catalog.ResourceRevision{
+				System: "memorylayer", ID: skill.ID, Revision: skill.Revision, ETag: skill.ETag,
+				ManifestDigest: skill.ManifestHash, BundleDigest: skill.BundleHash,
+			},
 		})
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Name < out[j].Name })
@@ -126,12 +135,14 @@ func parseAllowedTools(raw string) []string {
 }
 
 type memoryLayerMCPServer struct {
-	Name      string            `json:"name"`
-	Transport string            `json:"transport"`
-	Command   string            `json:"command"`
-	Args      []string          `json:"args"`
-	Env       map[string]string `json:"env"`
-	Enabled   bool              `json:"enabled"`
+	ID           string            `json:"id"`
+	Name         string            `json:"name"`
+	Transport    string            `json:"transport"`
+	Command      string            `json:"command"`
+	Args         []string          `json:"args"`
+	Env          map[string]string `json:"env"`
+	Enabled      bool              `json:"enabled"`
+	ManifestHash string            `json:"manifest_hash"`
 }
 
 func (p *CatalogProvider) loadMCPServers(ctx context.Context, workspace string) ([]catalog.MCPServerSpec, error) {
@@ -157,6 +168,9 @@ func (p *CatalogProvider) loadMCPServers(ctx context.Context, workspace string) 
 			Command: server.Command,
 			Args:    append([]string(nil), server.Args...),
 			Env:     sortedEnvironment(server.Env),
+			Source: &catalog.ResourceRevision{
+				System: "memorylayer", ID: server.ID, ManifestDigest: server.ManifestHash,
+			},
 		})
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Name < out[j].Name })

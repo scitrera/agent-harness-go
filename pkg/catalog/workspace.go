@@ -2,6 +2,23 @@ package catalog
 
 import "context"
 
+type revisionContextKey struct{}
+
+// WithRevision binds the immutable catalog snapshot admitted for this session
+// or task lineage. An empty revision is a no-op for legacy providers.
+func WithRevision(ctx context.Context, revision string) context.Context {
+	if revision == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, revisionContextKey{}, revision)
+}
+
+// RevisionFrom returns the catalog revision bound to the current execution.
+func RevisionFrom(ctx context.Context) (string, bool) {
+	revision, ok := ctx.Value(revisionContextKey{}).(string)
+	return revision, ok && revision != ""
+}
+
 // WorkspaceProvider loads a catalog for one resolved logical workspace. Empty
 // workspace identifiers select the provider's configured default.
 type WorkspaceProvider interface {
@@ -80,5 +97,9 @@ func MergeSkills(base, override []SkillSpec) []SkillSpec {
 func cloneSkill(skill SkillSpec) SkillSpec {
 	skill.AllowedTools = append([]string(nil), skill.AllowedTools...)
 	skill.Prereqs = append([]string(nil), skill.Prereqs...)
+	if skill.Source != nil {
+		source := *skill.Source
+		skill.Source = &source
+	}
 	return skill
 }

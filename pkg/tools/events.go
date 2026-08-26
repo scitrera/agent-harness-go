@@ -126,6 +126,12 @@ func SafeToolError(err error) (string, string) {
 		return "path_outside_workspace", "path outside workspace"
 	case errors.Is(err, localtools.ErrOldTextNotFound):
 		return "old_text_not_found", "old text not found"
+	case errors.Is(err, localtools.ErrOldTextNotUnique):
+		return "old_text_not_unique", "old text occurs more than once"
+	case errors.Is(err, localtools.ErrInvalidPatch):
+		return "invalid_patch", "patch is invalid or could not be applied"
+	case errors.Is(err, localtools.ErrPatchUnsupported):
+		return "patch_unsupported", "patch delegation is not supported"
 	case errors.Is(err, localtools.ErrInvalidFile):
 		return "invalid_file", "invalid file"
 	case errors.Is(err, localtools.ErrInvalidRoot):

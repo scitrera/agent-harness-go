@@ -12,12 +12,31 @@ import (
 
 	"github.com/scitrera/agent-harness-go/pkg/configpath"
 	modelpkg "github.com/scitrera/agent-harness-go/pkg/model"
+	"github.com/scitrera/agent-harness-go/pkg/providerauth"
 	"github.com/scitrera/agent-harness-go/pkg/telemetry/otlpexport"
 	"github.com/scitrera/agent-harness-go/pkg/version"
 	workspacepkg "github.com/scitrera/agent-harness-go/pkg/workspace"
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "auth" {
+		dir, err := providerauth.DefaultDir()
+		if err == nil {
+			var broker *providerauth.Broker
+			broker, err = providerauth.New(providerauth.Config{
+				Dir: dir, IssuerURL: os.Getenv("SAHARA_OPENAI_OAUTH_ISSUER"),
+				ClientID: os.Getenv("SAHARA_OPENAI_OAUTH_CLIENT_ID"), Originator: "sahara",
+			})
+			if err == nil {
+				err = broker.RunCLI(context.Background(), os.Args[2:], os.Stdout)
+			}
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	workspace := flag.String("workspace", env("SAHARA_WORKING_DIRECTORY", "./workspace"), "workspace root")
 	workspaceMode := flag.String("workspace-mode", env("SAHARA_WORKSPACE_MODE", workspaceModeSingle), "workspace selection: single (legacy) or project (derive from workspace root/Git)")
 	workspaceID := flag.String("workspace-id", os.Getenv("SAHARA_WORKSPACE_ID"), "pin the logical workspace ID (enables composite history keys)")
@@ -27,8 +46,11 @@ func main() {
 	baseURL := flag.String("base-url", os.Getenv("SAHARA_LLM_BASE_URL"), "OpenAI-compatible base URL")
 	model := flag.String("model", env("SAHARA_LLM_MODEL", "gpt-4o-mini"), "model id")
 	modelsFile := flag.String("models-file", os.Getenv("SAHARA_MODELS_FILE"), "model registry file (absolute or workspace-relative; default config/models.yaml)")
-	llmFormat := flag.String("llm-format", env("SAHARA_LLM_FORMAT", "openai"), "provider request format: openai or native")
+	llmFormat := flag.String("llm-format", env("SAHARA_LLM_FORMAT", "openai"), "provider request format: openai, responses, or native")
+	reasoningEffort := flag.String("reasoning-effort", os.Getenv("SAHARA_REASONING_EFFORT"), "default reasoning effort: none, minimal, low, medium, high, xhigh, or max")
 	tuiRetainReasoning := flag.Bool("tui-retain-reasoning", strings.EqualFold(strings.TrimSpace(os.Getenv("SAHARA_TUI_RETAIN_REASONING")), "true"), "retain reasoning traces in TUI history after the next assistant action")
+	tuiShellTriggerAgent := flag.Bool("tui-shell-trigger-agent", envBool("SAHARA_TUI_SHELL_TRIGGER_AGENT", false), "have an idle !command trigger an agent response after adding its result to context")
+	tuiShellPreferencesFile := flag.String("tui-shell-preferences-file", env("SAHARA_TUI_SHELL_PREFERENCES_FILE", defaultTUIShellPreferencesFile()), "persistent per-user and per-thread idle-shell response preferences")
 	skillsDirs := flag.String("skills-dirs", env("SAHARA_SKILLS_DIRS", "skills,.agent-harness-skills"), "comma-separated workspace-relative skill roots (ordered, first name wins)")
 	systemSkillsDirs := flag.String("system-skills-dirs", os.Getenv("SAHARA_SYSTEM_SKILLS_DIRS"), "comma-separated absolute operator skill roots appended after workspace roots")
 	commandsDirs := flag.String("commands-dirs", env("SAHARA_COMMANDS_DIRS", "commands,.agent-harness-commands"), "comma-separated workspace-relative command roots (ordered, first name wins)")
@@ -192,17 +214,22 @@ func main() {
 		normalizedPromptNotesAuthority == promptNotesAuthorityMemoryLayer ||
 		normalizedAgentSpecificationsAuthority == agentSpecificationsAuthorityMemoryLayer ||
 		normalizedRefinementAuthority == refinementAuthorityMemoryLayer
-	// A pure client drives someone else's agent, so it needs no provider of its
-	// own; every other mode runs turns locally and does.
-	if *baseURL == "" && selectedMode.runsTurnsLocally(*aetherAddr) {
-		fmt.Fprintln(os.Stderr, "error: set --base-url or SAHARA_LLM_BASE_URL (an OpenAI-compatible endpoint)")
-		os.Exit(2)
-	}
 	var modelRegistry *modelpkg.Registry
 	if selectedMode.runsTurnsLocally(*aetherAddr) || strings.TrimSpace(*modelsFile) != "" {
 		modelRegistry, err = loadAppModelRegistry(*workspace, *modelsFile)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "error: load model registry:", err)
+			os.Exit(2)
+		}
+	}
+	resolvedModel := resolveAppModel(*model, modelRegistry)
+	// A pure client drives someone else's agent, so it needs no provider of its
+	// own. Local runtimes may use either the legacy base URL or a trusted provider
+	// kind (currently OpenAI subscription OAuth) from models.yaml.
+	if *baseURL == "" && selectedMode.runsTurnsLocally(*aetherAddr) {
+		configured, ok := modelRegistry.ProviderFor(resolvedModel)
+		if !ok || configured.Kind != providerauth.KindOpenAISubscription {
+			fmt.Fprintln(os.Stderr, "error: set --base-url/SAHARA_LLM_BASE_URL or configure the default model with provider kind openai_subscription")
 			os.Exit(2)
 		}
 	}
@@ -224,21 +251,24 @@ func main() {
 		workspaceIndexDir: *workspaceIndexDir,
 		dynamicWorkspaces: workspaceResolution.Source == workspacepkg.SourceGitRoot ||
 			workspaceResolution.Source == workspacepkg.SourceDirectory,
-		visibleWorkspaces:  parseVisibleWorkspaces(*visibleWorkspaces),
-		stateDir:           stateDir,
-		thread:             *thread,
-		baseURL:            *baseURL,
-		model:              resolveAppModel(*model, modelRegistry),
-		modelRegistry:      modelRegistry,
-		modelsFile:         strings.TrimSpace(*modelsFile),
-		llmFormat:          *llmFormat,
-		tuiRetainReasoning: *tuiRetainReasoning,
-		seed:               *seed,
-		record:             *record,
-		skillsDirs:         parsedSkillsDirs,
-		systemSkillsDirs:   parsedSystemSkillsDirs,
-		commandsDirs:       parsedCommandsDirs,
-		systemCommandsDirs: parsedSystemCommandsDirs,
+		visibleWorkspaces:       parseVisibleWorkspaces(*visibleWorkspaces),
+		stateDir:                stateDir,
+		thread:                  *thread,
+		baseURL:                 *baseURL,
+		model:                   resolvedModel,
+		modelRegistry:           modelRegistry,
+		modelsFile:              strings.TrimSpace(*modelsFile),
+		llmFormat:               *llmFormat,
+		reasoningEffort:         strings.TrimSpace(*reasoningEffort),
+		tuiRetainReasoning:      *tuiRetainReasoning,
+		tuiShellTriggerAgent:    *tuiShellTriggerAgent,
+		tuiShellPreferencesFile: strings.TrimSpace(*tuiShellPreferencesFile),
+		seed:                    *seed,
+		record:                  *record,
+		skillsDirs:              parsedSkillsDirs,
+		systemSkillsDirs:        parsedSystemSkillsDirs,
+		commandsDirs:            parsedCommandsDirs,
+		systemCommandsDirs:      parsedSystemCommandsDirs,
 
 		aetherAddr:                  *aetherAddr,
 		aetherWorkspace:             effectiveWorkspace(*aetherWorkspace, workspaceResolution.WorkspaceID),

@@ -287,8 +287,11 @@ func (m *model) applyWorkspaceLoaded(msg workspaceLoadedMsg) {
 	m.workspaceID = msg.WorkspaceID
 	m.cwd = msg.CWD
 	m.threadID = msg.Session.ID
+	m.observeModelHistory(msg.WorkspaceID, msg.Session.ID, msg.Messages)
 	m.threads = msg.Threads
 	m.rows = rowsFromHistory(msg.Messages)
+	m.inputHistory = inputHistoryFromMessages(msg.Messages)
+	m.resetHistoryNavigation()
 	m.renderedRows = map[string]renderedRowCache{}
 	m.pendingApprovals = map[string]approvalRequest{}
 	m.tools = map[string]toolEntry{}

@@ -119,5 +119,9 @@ func todoDescriptor() Descriptor {
 		Name:        "todo_write",
 		Description: "Write the shared task checklist (todo list) the user sees. Pass the FULL current list each call; use it to plan multi-step work and keep exactly one item in_progress.",
 		Parameters:  json.RawMessage(params),
+		// The board is UI state, not the user's data: it mutates only what the
+		// user is already watching, so it reads as an interaction rather than a
+		// write worth stopping for.
+		Effect: spec.ToolEffectInteraction,
 	}
 }

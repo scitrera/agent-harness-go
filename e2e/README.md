@@ -6,15 +6,17 @@ conversations — enough to run the harness the way it is meant to be deployed
 platform.
 
 The stack uses only the OSS components. The local agent image is deliberately
-built with the sibling ecosystem-spec, Aether, and MemoryLayer source trees, so
-it exercises the current `replace` graph before coordinated releases exist.
+built with the sibling ecosystem-spec, Aether, MemoryLayer, and go-llm source
+trees, so it exercises the current `replace` graph before coordinated releases
+exist.
 
 ## 1. Prerequisites
 
 - Docker with Compose v2 and BuildKit support.
-- The agent-harness, ecosystem messaging spec, Aether OSS, and MemoryLayer OSS
-  checkouts. `build.sh` defaults to the layout used by this monorepo; override
-  `ECOSYSTEM_SPEC_REPO`, `AETHER_REPO`, or `MEMORYLAYER_REPO` if yours differs.
+- The agent-harness, ecosystem messaging spec, Aether OSS, MemoryLayer OSS, and
+  go-llm checkouts. `build.sh` defaults to the layout used by this monorepo;
+  override `ECOSYSTEM_SPEC_REPO`, `AETHER_REPO`, `MEMORYLAYER_REPO`, or
+  `GO_LLM_REPO` if yours differs.
 - An OpenAI-compatible model endpoint with a tool-capable model.
 - Go only for the host TUI. In this checkout, the known toolchain is
   `/home/drew/sdk/go1.25.10/bin/go`; Go may auto-select the newer patch version
@@ -37,6 +39,21 @@ SAHARA_LLM_API_KEY=
 SAHARA_LLM_MODEL=replace-with-one-real-model-id
 SAHARA_LLM_FORMAT=openai
 ```
+
+`SAHARA_LLM_FORMAT` and each registry provider's `format` accept:
+
+- `openai` for `/v1/chat/completions`;
+- `responses` for `/v1/responses`, including typed Responses SSE; and
+- `native` for the legacy Scitrera sidecar ChatMessages contract.
+
+The `openai` and `responses` paths share the Apache-2.0
+`github.com/scitrera/go-llm/client` transport and
+`github.com/scitrera/go-llm/protocol` codecs. That keeps authentication,
+attribution headers, tool-call decoding, usage normalization, stream liveness,
+and backpressure behavior identical across the two public OpenAI protocols.
+Use `responses` only against an endpoint that implements the Responses API (or
+FoxSci Route, which can strictly translate representable stateless calls to a
+Chat target). The native path remains for existing sidecar deployments.
 
 `SAHARA_LLM_BASE_URL` is resolved inside the agent container. For a model server
 on the host, keep `host.docker.internal` and make sure the server listens on an
@@ -66,6 +83,9 @@ models:
   - name: strong-model-id
     tier: strong
     capabilities: {tools: true, vision: false}
+    reasoning:
+      default_effort: high
+      allowed_efforts: [medium, high, xhigh, max]
   - name: vision-model-id
     tier: vision
     capabilities: {tools: true, vision: true}
@@ -76,6 +96,12 @@ All three entries above use the fallback `SAHARA_LLM_*` provider. When
 Automatic OSS policy is intentionally simple: keep the default when it satisfies
 the turn, otherwise choose the first declared model satisfying the required
 capabilities. `tier` is descriptive metadata; OSS does not apply cost routing.
+
+Reasoning levels are request settings, not separate model entries. The optional
+`reasoning.default_effort` supplies the model default and `allowed_efforts`
+constrains process or `/reasoning` overrides. Use `/reasoning` to inspect the
+effective setting, `/reasoning xhigh` to set it for the current thread and model,
+and `/reasoning default` to clear the override.
 
 Capabilities are operator assertions, not provider discovery. Set `tools: true`
 only for models that support the OpenAI-compatible tool-call loop. Set
@@ -97,6 +123,10 @@ providers:
     base_url: https://api.openai.com/v1
     api_key_env: OPENAI_API_KEY
     format: openai
+  - name: responses
+    base_url: https://api.openai.com/v1
+    api_key_env: OPENAI_API_KEY
+    format: responses
   - name: openrouter
     base_url: https://openrouter.ai/api/v1
     api_key_env: OPENROUTER_API_KEY
@@ -109,7 +139,7 @@ models:
     provider: openai
     capabilities: {tools: true}
   - name: vision-model-id
-    provider: openai
+    provider: responses
     capabilities: {tools: true, vision: true}
 ```
 
@@ -117,6 +147,20 @@ Put the corresponding `OPENAI_API_KEY` and `OPENROUTER_API_KEY` values in
 `.env`; Compose passes those variables only to the agent. Model names are sent
 to the selected provider verbatim. A model without `provider` uses the fallback
 `SAHARA_LLM_*` endpoint.
+
+For a provider with `kind: openai_subscription`, start the stack and log in
+through the repository wrapper:
+
+```bash
+./local-test-oss-e2e.sh up
+./local-test-oss-e2e.sh auth login --profile personal
+./local-test-oss-e2e.sh auth status --profile personal
+```
+
+Run those commands from the repository root. The wrapper executes the auth
+broker in the agent container, where it shares the worker's `sahara-auth` named
+volume. The volume survives ordinary `down`/`up` and agent recreation; using
+`docker compose down -v` removes it along with the other E2E data volumes.
 
 ## 3. Build and start the local replacement graph
 
@@ -344,6 +388,7 @@ sibling checkouts. Aether is layered locally as `aether:local` →
                                                    <- $ECOSYSTEM_SPEC_REPO
 <root>/scitrera-app-monorepo2/backend/scitrera-aether3-go/oss-repo
                                                    <- $AETHER_REPO
+<root>/scitrera-app-monorepo2/llm-gateway/go-llm   <- $GO_LLM_REPO
 <root>/scitrera-memorylayer-ai-cc/oss             <- $MEMORYLAYER_REPO
 ```
 

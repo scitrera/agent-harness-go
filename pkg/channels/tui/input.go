@@ -5,8 +5,6 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/scitrera/agent-harness-go/pkg/protocol"
-	"github.com/scitrera/agent-harness-go/pkg/threadindex"
 )
 
 const historyScrollLines = 3
@@ -151,11 +149,13 @@ func (m model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	switch msg.String() {
 	case "enter":
+		if m.editingPendingID != 0 {
+			return m.commitPendingEdit()
+		}
 		return m.sendCurrent()
 	case "esc":
 		if m.canCancelActive() {
-			m.cancelActive()
-			return m, nil
+			return m, m.cancelActive()
 		}
 		m.drawer = drawerNone
 		m.drawerContent = ""
@@ -179,12 +179,18 @@ func (m model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.tailing = true
 		return m, nil
 	case "up":
+		if m.composerAtTop() && m.historyUp() {
+			return m, m.dispatchNextPending()
+		}
 		if strings.TrimSpace(m.composer.Value()) == "" {
 			m.viewport.ScrollUp(historyScrollLines)
 			m.tailing = false
 			return m, nil
 		}
 	case "down":
+		if m.composerAtBottom() && m.historyDown() {
+			return m, m.dispatchNextPending()
+		}
 		if strings.TrimSpace(m.composer.Value()) == "" {
 			m.viewport.ScrollDown(historyScrollLines)
 			m.tailing = m.viewport.AtBottom()
@@ -203,6 +209,9 @@ func (m *model) refreshSelectionSurface() {
 }
 
 func (m model) sendCurrent() (tea.Model, tea.Cmd) {
+	if m.editingPendingID != 0 {
+		return m.commitPendingEdit()
+	}
 	if m.workspaceSwitching {
 		m.addSystem("workspace switch in progress")
 		return m, nil
@@ -221,59 +230,33 @@ func (m model) sendCurrent() (tea.Model, tea.Cmd) {
 	if strings.HasPrefix(text, "/") {
 		m.composer.Reset()
 		m.selector.clear()
+		m.resetHistoryNavigation()
 		m.refreshInputSurface()
 		return m.handleSlash(text)
 	}
-	resolvedText, referencedImages, err := m.resolveAtReferences(text)
-	if err != nil {
-		m.addSystem("reference failed: " + err.Error())
-		return m, nil
-	}
-	text = resolvedText
-	displayText := text
-	text = m.withWorkingDirectoryContext(text)
-	m.composer.Reset()
-	m.selector.clear()
-	m.refreshInputSurface()
-	taskID, err := threadindex.NewID("task-")
-	if err != nil {
-		m.addSystem("could not create task id: " + err.Error())
-		return m, nil
-	}
-	content, err := m.takeMessageContent(text)
-	if err != nil {
-		m.addSystem("could not create message: " + err.Error())
-		return m, nil
-	}
-	addr := protocol.MessageAddress{WorkspaceID: m.workspaceID, ThreadID: m.threadID, TaskID: taskID}
-	message := protocol.ChatMessage{ID: "user-" + taskID, Role: protocol.RoleUser, Addr: addr, Content: content}
-	if err := m.scopeMessage(&addr, &message); err != nil {
-		m.addSystem("could not scope message: " + err.Error())
-		return m, nil
-	}
-	m.lastTaskID = taskID
-	m.markTurn(taskID, m.threadID, "queued")
-	m.rows = append(m.rows, chatRow{Kind: rowUser, ID: message.ID, TaskID: taskID, Text: messageText(message)})
-	m.addThinking(taskID)
-	m.refreshViewportToBottom()
-	return m, sendMessageCmd(m.ctx, m.channel, m.index, m.initialWorkspaceID, m.workspaceID, addr, message, displayText, referencedImages)
-}
-
-func (m *model) takeMessageContent(text string) ([]protocol.ContentPart, error) {
-	content := make([]protocol.ContentPart, 0, 1+len(m.attachments))
-	if text != "" {
-		part, err := protocol.NewTextPart(text)
-		if err != nil {
-			return nil, err
+	if strings.HasPrefix(text, "!") {
+		if len(m.attachments) > 0 {
+			m.addSystem("shell commands cannot include attachments")
+			return m, nil
 		}
-		content = append(content, part)
+		m.composer.Reset()
+		m.selector.clear()
+		m.resetHistoryNavigation()
+		m.refreshInputSurface()
+		return m.startShellCommand(strings.TrimSpace(strings.TrimPrefix(text, "!")))
 	}
-	for _, attachment := range m.attachments {
-		content = append(content, attachment.Part)
+	pending, err := m.prepareQueuedMessage(outboundConversation, text, m.attachments)
+	if err != nil {
+		m.addSystem("could not prepare message: " + err.Error())
+		return m, nil
 	}
+	m.composer.Reset()
 	m.attachments = nil
 	m.updateAttachmentPlaceholder()
-	return content, nil
+	m.selector.clear()
+	m.resetHistoryNavigation()
+	m.refreshInputSurface()
+	return m.submitPreparedMessage(pending)
 }
 
 func (m model) completeSelection() (tea.Model, tea.Cmd) {

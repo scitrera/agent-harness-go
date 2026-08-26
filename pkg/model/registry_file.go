@@ -19,17 +19,23 @@ var ErrInvalidRegistryFile = errors.New("model: invalid registry file")
 type registryFile struct {
 	Default   string `yaml:"default"`
 	Providers []struct {
-		Name      string `yaml:"name"`
-		BaseURL   string `yaml:"base_url"`
-		APIKey    string `yaml:"api_key"`
-		APIKeyEnv string `yaml:"api_key_env"`
-		Format    string `yaml:"format"`
+		Name        string `yaml:"name"`
+		Kind        string `yaml:"kind"`
+		BaseURL     string `yaml:"base_url"`
+		APIKey      string `yaml:"api_key"`
+		APIKeyEnv   string `yaml:"api_key_env"`
+		AuthProfile string `yaml:"auth_profile"`
+		Format      string `yaml:"format"`
 	} `yaml:"providers"`
 	Models []struct {
-		Name         string `yaml:"name"`
-		Tier         string `yaml:"tier"`
-		Provider     string `yaml:"provider"`
-		Context      int    `yaml:"context"`
+		Name      string `yaml:"name"`
+		Tier      string `yaml:"tier"`
+		Provider  string `yaml:"provider"`
+		Context   int    `yaml:"context"`
+		Reasoning struct {
+			DefaultEffort  string   `yaml:"default_effort"`
+			AllowedEfforts []string `yaml:"allowed_efforts"`
+		} `yaml:"reasoning"`
 		Capabilities struct {
 			Vision bool `yaml:"vision"`
 			Tools  bool `yaml:"tools"`
@@ -64,11 +70,18 @@ func LoadRegistry(path string) (*Registry, error) {
 		if m.Name == "" {
 			return nil, fmt.Errorf("%w: %s model[%d] has no name", ErrInvalidRegistryFile, path, i)
 		}
+		reasoning, err := normalizeReasoningConfig(ReasoningConfig{
+			DefaultEffort: m.Reasoning.DefaultEffort, AllowedEfforts: m.Reasoning.AllowedEfforts,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("%w: %s model[%d] reasoning: %w", ErrInvalidRegistryFile, path, i, err)
+		}
 		models = append(models, Model{
-			Name:     m.Name,
-			Tier:     m.Tier,
-			Provider: m.Provider,
-			Context:  m.Context,
+			Name:      m.Name,
+			Tier:      m.Tier,
+			Provider:  m.Provider,
+			Context:   m.Context,
+			Reasoning: reasoning,
 			Capabilities: Capabilities{
 				Vision: m.Capabilities.Vision,
 				Tools:  m.Capabilities.Tools,
@@ -82,11 +95,13 @@ func LoadRegistry(path string) (*Registry, error) {
 			return nil, fmt.Errorf("%w: %s provider[%d] has no name", ErrInvalidRegistryFile, path, i)
 		}
 		providers = append(providers, ProviderConfig{
-			Name:      p.Name,
-			BaseURL:   p.BaseURL,
-			APIKey:    p.APIKey,
-			APIKeyEnv: p.APIKeyEnv,
-			Format:    p.Format,
+			Name:        p.Name,
+			Kind:        p.Kind,
+			BaseURL:     p.BaseURL,
+			APIKey:      p.APIKey,
+			APIKeyEnv:   p.APIKeyEnv,
+			AuthProfile: p.AuthProfile,
+			Format:      p.Format,
 		})
 	}
 	return NewRegistryWithProviders(models, rf.Default, providers), nil

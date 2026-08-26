@@ -9,6 +9,9 @@ func (m *model) applySendResult(msg sendResultMsg) {
 	}
 	if msg.Err != nil {
 		delete(m.turns, msg.TaskID)
+		if m.cancelPendingID == msg.TaskID {
+			m.cancelPendingID = ""
+		}
 		m.removeThinking(msg.TaskID)
 		m.addSystem("send failed: " + msg.Err.Error())
 		return
@@ -27,7 +30,10 @@ func (m *model) applyHistoryLoaded(msg historyLoadedMsg) {
 		return
 	}
 	m.threadID = msg.ThreadID
+	m.observeModelHistory(msg.WorkspaceID, msg.ThreadID, msg.Messages)
 	m.rows = rowsFromHistoryWithReasoning(msg.Messages, m.retainReasoning)
+	m.inputHistory = inputHistoryFromMessages(msg.Messages)
+	m.resetHistoryNavigation()
 	m.renderedRows = map[string]renderedRowCache{}
 	m.threads = m.listThreads()
 	m.status = "thread " + msg.ThreadID
@@ -45,6 +51,8 @@ func (m *model) applyThreadCreated(msg threadCreatedMsg) {
 	}
 	m.threadID = msg.Session.ID
 	m.rows = nil
+	m.inputHistory = nil
+	m.resetHistoryNavigation()
 	m.renderedRows = map[string]renderedRowCache{}
 	m.threads = m.listThreads()
 	m.status = "thread " + msg.Session.ID
@@ -103,6 +111,8 @@ func (m *model) applyClearThread(msg clearThreadMsg) {
 	}
 	if msg.ThreadID == m.threadID {
 		m.rows = nil
+		m.inputHistory = nil
+		m.resetHistoryNavigation()
 		m.renderedRows = map[string]renderedRowCache{}
 	}
 	m.addSystem("cleared " + msg.ThreadID)

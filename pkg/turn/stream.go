@@ -155,29 +155,28 @@ func (s *turnStreamer) appendUnstreamed(ctx context.Context, part protocol.Conte
 	return true, nil
 }
 
-// appendTextStream appends an empty text part to stream tokens into, returning
-// its index (or -1 when there is no publisher).
+// appendTextStream appends an empty text part to stream answer tokens into,
+// returning its index (or -1 when there is no publisher).
 func (s *turnStreamer) appendTextStream(ctx context.Context) (int, error) {
-	if s == nil || s.publisher == nil {
-		return -1, nil
-	}
-	if err := s.start(ctx); err != nil {
-		return -1, err
-	}
-	if err := s.flushPending(ctx); err != nil {
-		return -1, err
-	}
-	idx := s.index
-	s.index++
 	part, err := protocol.NewTextPart("")
 	if err != nil {
 		return -1, err
 	}
-	if err := s.publisher.PublishEvent(ctx, channel.Event{Type: channel.EventPartAppended, Addr: s.addr, MessageID: s.msgID, Index: idx, Part: &part}); err != nil {
+	return s.appendPart(ctx, part)
+}
+
+// appendReasoningStream appends an empty reasoning part to stream the model's
+// thinking trace into, returning its index (or -1 when there is no publisher).
+// Reasoning is its own delta channel (provider.DeltaReasoning), so it gets its
+// own part and lands at its true position in content order — ahead of the answer
+// text of the same provider call, instead of being appended after it once the
+// call returns.
+func (s *turnStreamer) appendReasoningStream(ctx context.Context) (int, error) {
+	part, err := protocol.NewReasoningPart("", false)
+	if err != nil {
 		return -1, err
 	}
-	s.state = spec.ApplyEvent(s.state, spec.PartAppendedEvent{MessageID: s.msgID, Index: idx, Part: part})
-	return idx, nil
+	return s.appendPart(ctx, part)
 }
 
 // updatePart emits part_updated, merging patch into the part already streamed at

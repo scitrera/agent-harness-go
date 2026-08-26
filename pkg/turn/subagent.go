@@ -14,6 +14,7 @@ import (
 
 	"github.com/scitrera/agent-harness-go/pkg/authhandoff"
 	"github.com/scitrera/agent-harness-go/pkg/bootstrap"
+	"github.com/scitrera/agent-harness-go/pkg/catalog"
 	"github.com/scitrera/agent-harness-go/pkg/channel"
 	"github.com/scitrera/agent-harness-go/pkg/compaction"
 	"github.com/scitrera/agent-harness-go/pkg/harness"
@@ -98,6 +99,11 @@ type subagentExecution struct {
 func (r *Runner) admitSubagent(ctx context.Context, req subagent.Request, childThreadID string, resume, background bool) (subagentExecution, error) {
 	if strings.TrimSpace(req.InvocationID) == "" {
 		req.InvocationID = fmt.Sprintf("local-execution-%d", nextSubagentExecutionSeq())
+	}
+	if req.CatalogRevision == "" {
+		if revision, ok := catalog.RevisionFrom(ctx); ok {
+			req.CatalogRevision = revision
+		}
 	}
 	var err error
 	req, err = r.resolveSubagentExecutionScope(ctx, req, "parent_inheritance")
@@ -335,7 +341,11 @@ func (r *Runner) resolveExternalSubagentResult(ctx context.Context, execution *s
 	}
 	execution.childUsage = sessionUsageProjection(assistant)
 	text := textOf(assistant)
-	return subagent.Result{Text: text, ThreadID: execution.childThreadID, Summary: summarizeSubagent(text)}, nil
+	structured, digest, validationErr := validateSubagentResult(execution.req.OutputSchema, text)
+	if validationErr != nil {
+		return subagent.Result{}, validationErr
+	}
+	return subagent.Result{Text: text, StructuredPayload: structured, StructuredDigest: digest, ThreadID: execution.childThreadID, Summary: summarizeSubagent(text)}, nil
 }
 
 // ExecuteAssignedSubagent runs an already-admitted child without re-entering
@@ -469,6 +479,15 @@ func (r *Runner) runSubagentOn(ctx context.Context, req subagent.Request, childT
 		return subagent.Result{}, fmt.Errorf("subagent bootstrap: %w", err)
 	}
 	bootstrap = subagentBootstrap(bootstrap, req)
+	contract, err := subagent.CompileOutputSchema(req.OutputSchema)
+	if err != nil {
+		return subagent.Result{}, err
+	}
+	// A typed child is buffered until it has produced a valid terminal payload;
+	// otherwise an invalid first attempt would be streamed as if it were final.
+	if contract != nil {
+		publisher = nil
+	}
 	// publisher is nil for a synchronous sub-agent (silent, internal to the tool
 	// call) and the runner's publisher for a streamed background sub-agent (keyed to
 	// the child thread id, so a client can subscribe to that thread to render it).
@@ -493,6 +512,34 @@ func (r *Runner) runSubagentOn(ctx context.Context, req subagent.Request, childT
 		}
 		return subagent.Result{}, err
 	}
+	messagesToCommit := []protocol.ChatMessage{userMsg, assistant}
+	if contract != nil {
+		validationErrors := contract.Validate(json.RawMessage(strings.TrimSpace(textOf(assistant))))
+		if len(validationErrors) > 0 {
+			correction, correctionErr := structuredOutputCorrection(execution.envelope.ExecutionID, addr, validationErrors)
+			if correctionErr != nil {
+				return subagent.Result{}, correctionErr
+			}
+			if err := session.Append(ctx, correction); err != nil {
+				return subagent.Result{}, fmt.Errorf("append structured-output correction: %w", err)
+			}
+			correctionStreamer := newTurnStreamer(nil, addr, streamMessageID(addr), r.now, r.streamFlush)
+			if err := correctionStreamer.start(ctx); err != nil {
+				return subagent.Result{}, fmt.Errorf("structured-output correction stream: %w", err)
+			}
+			assistant, err = r.runProviderLoop(ctx, session, addr, correction, bootstrap, correctionStreamer, nil, subModel, approvers, tt, nil)
+			if err != nil {
+				return subagent.Result{}, err
+			}
+			streamer = correctionStreamer
+			messagesToCommit = append(messagesToCommit, correction, assistant)
+			validationErrors = contract.Validate(json.RawMessage(strings.TrimSpace(textOf(assistant))))
+			if len(validationErrors) > 0 {
+				r.commitMessages(ctx, auth, addr, messagesToCommit)
+				return subagent.Result{}, fmt.Errorf("subagent: structured output remained invalid after one correction: %s", formatValidationErrors(validationErrors))
+			}
+		}
+	}
 	assistant, err = streamer.finalize(ctx, assistant)
 	if err != nil {
 		return subagent.Result{}, fmt.Errorf("subagent publish final: %w", err)
@@ -507,10 +554,15 @@ func (r *Runner) runSubagentOn(ctx context.Context, req subagent.Request, childT
 	// meta. Dropping it would leave the child→parent linkage nowhere in memory except
 	// the "::sub::" thread-name convention. On resume the task message has no ref
 	// (skipped above), so committing it is still correct (just the follow-up turn).
-	r.commitMessages(ctx, auth, addr, []protocol.ChatMessage{userMsg, assistant})
+	messagesToCommit[len(messagesToCommit)-1] = assistant
+	r.commitMessages(ctx, auth, addr, messagesToCommit)
 	execution.childUsage = sessionUsageProjection(assistant)
 	text := textOf(assistant)
-	return subagent.Result{Text: text, ThreadID: childThreadID, Summary: summarizeSubagent(text)}, nil
+	structured, digest, validationErr := validateSubagentResult(req.OutputSchema, text)
+	if validationErr != nil {
+		return subagent.Result{}, validationErr
+	}
+	return subagent.Result{Text: text, StructuredPayload: structured, StructuredDigest: digest, ThreadID: childThreadID, Summary: summarizeSubagent(text)}, nil
 }
 
 // StartBackground runs a sub-agent DETACHED: it resolves (or resumes) the child
@@ -841,7 +893,11 @@ func summarizeSubagent(text string) string {
 }
 
 func subagentBootstrap(files []bootstrap.File, req subagent.Request) []bootstrap.File {
-	instructions := strings.TrimSpace(req.Instructions)
+	sections := []string{strings.TrimSpace(req.Instructions)}
+	if len(req.OutputSchema) > 0 {
+		sections = append(sections, "## Required structured output\nReturn only one JSON value matching this schema. Do not wrap it in Markdown or add explanatory text. The host validates the result and permits at most one correction attempt.\n\n```json\n"+string(req.OutputSchema)+"\n```")
+	}
+	instructions := strings.TrimSpace(strings.Join(sections, "\n\n"))
 	if instructions == "" {
 		return files
 	}
@@ -853,6 +909,35 @@ func subagentBootstrap(files []bootstrap.File, req subagent.Request) []bootstrap
 	}
 	out = append(out, bootstrap.File{Name: name, Content: instructions})
 	return out
+}
+
+func structuredOutputCorrection(executionID string, addr protocol.MessageAddress, validationErrors []subagent.ValidationError) (protocol.ChatMessage, error) {
+	text := "Your previous final result did not satisfy the required output schema. Return only the corrected JSON value. Do not include Markdown or commentary. Validation errors:\n" + formatValidationErrors(validationErrors)
+	part, err := protocol.NewTextPart(text)
+	if err != nil {
+		return protocol.ChatMessage{}, err
+	}
+	return protocol.ChatMessage{ID: executionID + "-output-correction", Role: protocol.RoleUser, Addr: addr, Content: []protocol.ContentPart{part}}, nil
+}
+
+func formatValidationErrors(validationErrors []subagent.ValidationError) string {
+	encoded, err := json.Marshal(validationErrors)
+	if err != nil {
+		return `[{"path":"$","message":"validation failed"}]`
+	}
+	return string(encoded)
+}
+
+func validateSubagentResult(schema json.RawMessage, text string) (json.RawMessage, string, error) {
+	contract, err := subagent.CompileOutputSchema(schema)
+	if err != nil || contract == nil {
+		return nil, "", err
+	}
+	payload := json.RawMessage(strings.TrimSpace(text))
+	if validationErrors := contract.Validate(payload); len(validationErrors) > 0 {
+		return nil, "", fmt.Errorf("subagent: structured output validation failed: %s", formatValidationErrors(validationErrors))
+	}
+	return append(json.RawMessage(nil), payload...), subagent.StructuredDigest(payload), nil
 }
 
 func subagentApprovers(req subagent.Request) []hooks.ToolApprover {

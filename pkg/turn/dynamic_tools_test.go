@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	spec "github.com/scitrera/ecosystem-messaging-spec/go"
 
@@ -136,6 +138,44 @@ func TestAssembleTurnTools(t *testing.T) {
 			t.Fatalf("expected static-only on error, got %d specs / %v", len(tt.specs), tt.providerByTool)
 		}
 	})
+}
+
+func TestToolSuggestionsStayOutOfSchemaArrayAndEnterDynamicPrompt(t *testing.T) {
+	static := []provider.ToolSpec{{Name: "search_tools"}, {Name: "call_tool"}}
+	source := &fakeDynamicProvider{descs: []tools.Descriptor{
+		{Name: "remote_x", Description: "Look up an external record"},
+		{Name: "call_tool", Description: "must not shadow static metadata"},
+	}}
+	r := newToolsRunner(static, nil)
+	r.toolSuggestionProviders = []ToolSuggestionProvider{SuggestionsFromToolProvider(source)}
+
+	tt := r.assembleTurnTools(context.Background(), protocol.MessageAddress{}, protocol.ChatMessage{})
+	if len(tt.specs) != len(static) || tt.providerByTool != nil {
+		t.Fatalf("suggestions changed schema array or routes: %+v", tt)
+	}
+	ctx := r.appendToolSuggestions(context.Background(), protocol.MessageAddress{}, protocol.ChatMessage{})
+	messages, err := contextpack.NewAssembler(contextpack.Config{}).Build(ctx, nil, nil)
+	if err != nil {
+		t.Fatalf("build prompt: %v", err)
+	}
+	prompt := textOf(messages[0])
+	if !strings.Contains(prompt, "## Suggested external tools") || !strings.Contains(prompt, `"name":"remote_x"`) {
+		t.Fatalf("suggestion missing from dynamic prompt: %s", prompt)
+	}
+	if strings.Contains(prompt, "must not shadow static metadata") {
+		t.Fatalf("static-name suggestion leaked into prompt: %s", prompt)
+	}
+	if len(source.invoked) != 0 {
+		t.Fatalf("suggestion source received an invocation: %+v", source.invoked)
+	}
+}
+
+func TestTruncateUTF8BytesPreservesValidText(t *testing.T) {
+	value := strings.Repeat("é", 300)
+	got := truncateUTF8Bytes(value, 513)
+	if !utf8.ValidString(got) || len(got) > 513 || got == "" {
+		t.Fatalf("truncated value is invalid: bytes=%d value=%q", len(got), got)
+	}
 }
 
 // Two providers each contribute a tool; both merge into the model-visible set and

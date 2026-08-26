@@ -100,7 +100,17 @@ func (c EvictingCompactor) Compact(ctx context.Context, messages []protocol.Chat
 			if err != nil {
 				return Report{}, fmt.Errorf("evict part: %w", err)
 			}
-			replacement, err := protocol.NewTextPart(previewOf(content, head, tail, ref))
+			preview := previewOf(content, head, tail, ref)
+			if result, ok := part.AsToolResult(); ok {
+				// Keep the tool-result envelope and call linkage intact. Replacing the
+				// whole part with plain text leaves a tool-role message that neither
+				// Chat Completions nor Responses can represent correctly.
+				result.Output = nil
+				result.OutputText = preview
+				parts[j] = spec.NewToolResultPart(result)
+				continue
+			}
+			replacement, err := protocol.NewTextPart(preview)
 			if err != nil {
 				return Report{}, fmt.Errorf("evict preview: %w", err)
 			}
@@ -117,15 +127,16 @@ func (c EvictingCompactor) Compact(ctx context.Context, messages []protocol.Chat
 	return Report{Messages: out, WorldState: state, Budget: budget}, nil
 }
 
-// evictableContent returns the readable text of a part that should be evicted:
-// any tool-result part, or a text part whose estimated tokens exceed the cap.
+// evictableContent returns the readable text of a tool-result or text part when
+// its estimated token count exceeds the eviction cap.
 // Image (and every other) part type is never evicted.
 func evictableContent(part protocol.ContentPart, evictTokens int) (string, bool) {
 	if tr, ok := part.AsToolResult(); ok {
+		content := string(tr.Output)
 		if tr.OutputText != "" {
-			return tr.OutputText, true
+			content = tr.OutputText
 		}
-		return string(tr.Output), true
+		return content, len(content)/bytesPerToken > evictTokens
 	}
 	if tp, ok := part.AsText(); ok {
 		if len(part.Raw())/bytesPerToken > evictTokens {

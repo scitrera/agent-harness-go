@@ -3,11 +3,11 @@ package runtime
 import (
 	"context"
 	"errors"
-	"strconv"
 	"sync"
 	"time"
 
 	"github.com/scitrera/agent-harness-go/pkg/channel"
+	"github.com/scitrera/agent-harness-go/pkg/steering"
 )
 
 const (
@@ -113,6 +113,21 @@ func (r *Runner) runLoopConcurrent(ctx context.Context, cfg LoopConfig) (LoopSta
 		switch {
 		case err == nil:
 			errorBackoff = cfg.ErrorBackoff
+			// A steering send joins the turn already running on its thread, or is
+			// rejected. Either way it never becomes a turn, so neither outcome is
+			// counted as submitted.
+			switch r.classifySteering(env) {
+			case steeringParked:
+				continue
+			case steeringMissed:
+				if fallback, ok := shellSteeringFallback(env); ok {
+					dispatcher.submit(fallback)
+					submitted++
+					continue
+				}
+				r.rejectSteering(ctx, env, reasonNoActiveTurn)
+				continue
+			}
 			dispatcher.submit(env)
 			submitted++
 		case errors.Is(err, channel.ErrNoTask):
@@ -136,11 +151,14 @@ func (r *Runner) runLoopConcurrent(ctx context.Context, cfg LoopConfig) (LoopSta
 	return stats, nil
 }
 
+// threadKey is the dispatcher lane for a turn. It delegates to steering.Key so
+// the lane a message is parked under and the lane its turn runs on cannot drift
+// apart — a divergence would not fail loudly, it would just silently never
+// deliver steering. (steering.Key length-prefixes the workspace so arbitrary
+// opaque IDs cannot make two composite (workspace, thread) pairs share a lane.)
 func threadKey(env channel.Inbound) string {
 	addr := turnAddress(env)
-	// Length-prefix the workspace so arbitrary opaque IDs cannot make two
-	// composite (workspace, thread) pairs share a dispatcher lane.
-	return strconv.Itoa(len(addr.WorkspaceID)) + ":" + addr.WorkspaceID + addr.ThreadID
+	return steering.Key(addr.WorkspaceID, addr.ThreadID)
 }
 
 func normalizeLoopConfig(cfg LoopConfig) LoopConfig {

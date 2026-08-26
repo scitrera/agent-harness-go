@@ -107,6 +107,51 @@ func TestPromptCachingStampsNativeBreakpoint(t *testing.T) {
 	}
 }
 
+func TestPromptCachingPreservesDeclaredStablePrefix(t *testing.T) {
+	sys := spec.NewChatMessage("sys", spec.RoleSystem)
+	sys.Content = []spec.ContentPart{spec.NewTextPart("stable\n\ndynamic")}
+	sys.Meta = map[string]json.RawMessage{"scitrera": json.RawMessage(`{"cache":{"stable_prefix_chars":6,"ttl":"session"},"trace":"keep"}`)}
+
+	stamped := stampPromptCacheBreakpoint([]protocol.ChatMessage{sys})
+	raw := stamped[0].Meta["scitrera"]
+	if !bytes.Contains(raw, []byte(`"stable_prefix_chars":6`)) {
+		t.Fatalf("declared boundary was replaced: %s", raw)
+	}
+	if !bytes.Contains(raw, []byte(`"ttl":"session"`)) || !bytes.Contains(raw, []byte(`"trace":"keep"`)) {
+		t.Fatalf("cache/namespace metadata was not preserved: %s", raw)
+	}
+	if !bytes.Contains(sys.Meta["scitrera"], []byte(`"stable_prefix_chars":6`)) {
+		t.Fatalf("caller meta was mutated: %s", sys.Meta["scitrera"])
+	}
+
+	plan := BuildPromptCachePlan(ChatRequest{
+		Messages: []protocol.ChatMessage{sys},
+		Tools:    []ToolSpec{{Name: "search_tools", Description: "search"}},
+	})
+	if plan.StablePrefixBytes != 6 || plan.StablePromptDigest == "" || plan.DynamicSuffixDigest == "" || plan.ToolSchemaDigest == "" {
+		t.Fatalf("cache plan = %+v", plan)
+	}
+	changed := sys
+	changed.Content = []spec.ContentPart{spec.NewTextPart("stable\n\ndifferent dynamic")}
+	changedPlan := BuildPromptCachePlan(ChatRequest{
+		Messages: []protocol.ChatMessage{changed},
+		Tools:    []ToolSpec{{Name: "search_tools", Description: "search"}},
+	})
+	if changedPlan.StablePromptDigest != plan.StablePromptDigest || changedPlan.ToolSchemaDigest != plan.ToolSchemaDigest || changedPlan.DynamicSuffixDigest == plan.DynamicSuffixDigest {
+		t.Fatalf("dynamic suffix rotated stable cache identity: before=%+v after=%+v", plan, changedPlan)
+	}
+}
+
+func TestUsageDecodesCacheTokenAliases(t *testing.T) {
+	var usage Usage
+	if err := json.Unmarshal([]byte(`{"prompt_tokens":100,"completion_tokens":7,"total_tokens":107,"prompt_tokens_details":{"cached_tokens":80,"cache_write_tokens":10}}`), &usage); err != nil {
+		t.Fatalf("decode usage: %v", err)
+	}
+	if usage.CachedInputTokens != 80 || usage.CacheCreationInputTokens != 10 {
+		t.Fatalf("usage = %+v", usage)
+	}
+}
+
 func TestDecodeOpenAIToolCalls(t *testing.T) {
 	data := []byte(`{"id":"a1","choices":[{"message":{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"SOUL.md\"}"}}]}}]}`)
 	resp, err := decodeChatResponse(data)

@@ -56,7 +56,7 @@ func TestChatStreamCapturesUsage(t *testing.T) {
 	})
 	defer srv.Close()
 
-	resp, err := usageStreamClient(t, srv.URL).ChatStream(context.Background(), ChatRequest{}, func(string) error { return nil })
+	resp, err := usageStreamClient(t, srv.URL).ChatStream(context.Background(), ChatRequest{}, func(DeltaKind, string) error { return nil })
 	if err != nil {
 		t.Fatalf("stream: %v", err)
 	}
@@ -82,7 +82,7 @@ func TestChatStreamDefaultDropsPostFinishUsage(t *testing.T) {
 	})
 	defer srv.Close()
 
-	resp, err := streamClient(t, srv.URL).ChatStream(context.Background(), ChatRequest{}, func(string) error { return nil })
+	resp, err := streamClient(t, srv.URL).ChatStream(context.Background(), ChatRequest{}, func(DeltaKind, string) error { return nil })
 	if err != nil {
 		t.Fatalf("stream: %v", err)
 	}
@@ -99,7 +99,7 @@ func TestChatStreamSSEText(t *testing.T) {
 	defer srv.Close()
 
 	var got strings.Builder
-	resp, err := streamClient(t, srv.URL).ChatStream(context.Background(), ChatRequest{}, func(text string) error {
+	resp, err := streamClient(t, srv.URL).ChatStream(context.Background(), ChatRequest{}, func(_ DeltaKind, text string) error {
 		got.WriteString(text)
 		return nil
 	})
@@ -123,7 +123,7 @@ func TestChatStreamSSEToolCalls(t *testing.T) {
 	})
 	defer srv.Close()
 
-	resp, err := streamClient(t, srv.URL).ChatStream(context.Background(), ChatRequest{}, func(string) error { return nil })
+	resp, err := streamClient(t, srv.URL).ChatStream(context.Background(), ChatRequest{}, func(DeltaKind, string) error { return nil })
 	if err != nil {
 		t.Fatalf("stream: %v", err)
 	}
@@ -173,7 +173,7 @@ func TestChatStreamTerminatesOnFinishReasonWithoutDONE(t *testing.T) {
 	ch := make(chan result, 1)
 	go func() {
 		var got strings.Builder
-		resp, err := streamClient(t, srv.URL).ChatStream(context.Background(), ChatRequest{}, func(text string) error {
+		resp, err := streamClient(t, srv.URL).ChatStream(context.Background(), ChatRequest{}, func(_ DeltaKind, text string) error {
 			got.WriteString(text)
 			return nil
 		})
@@ -205,7 +205,7 @@ func TestChatStreamFallsBackToJSON(t *testing.T) {
 	defer srv.Close()
 
 	var got strings.Builder
-	resp, err := streamClient(t, srv.URL).ChatStream(context.Background(), ChatRequest{}, func(text string) error {
+	resp, err := streamClient(t, srv.URL).ChatStream(context.Background(), ChatRequest{}, func(_ DeltaKind, text string) error {
 		got.WriteString(text)
 		return nil
 	})
@@ -215,5 +215,129 @@ func TestChatStreamFallsBackToJSON(t *testing.T) {
 	tp, _ := resp.Message.Content[0].AsText()
 	if tp.Text != "non-stream" || got.String() != "non-stream" {
 		t.Fatalf("fallback text=%q delta=%q", tp.Text, got.String())
+	}
+}
+
+// nativeStreamClient builds a client on the sidecar (native) wire format, which
+// bypasses the shared llm-protocol codec and parses SSE locally
+// (parseSSEStream) — the production sandbox path.
+func nativeStreamClient(t *testing.T, baseURL string) *OpenAICompatClient {
+	t.Helper()
+	c, err := NewOpenAICompatClient(OpenAICompatConfig{BaseURL: baseURL, Format: FormatNative})
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+	return c
+}
+
+// A reasoning model streams its thinking trace on a channel of its own
+// (`reasoning_content`) ahead of the answer. Both channels must reach the
+// consumer tagged and in order, and the assembled message must LEAD with the
+// reasoning part — the turn layer dedups its reconstruction against these parts
+// by (type, text), so assembled order has to mirror emitted order.
+func TestChatStreamSSEReasoningContent(t *testing.T) {
+	srv := sseServer(t, []string{
+		`{"id":"a1","choices":[{"delta":{"role":"assistant","reasoning_content":"let me "}}]}`,
+		`{"choices":[{"delta":{"reasoning_content":"think"}}]}`,
+		`{"choices":[{"delta":{"content":"Hello"}}]}`,
+	})
+	defer srv.Close()
+
+	var text, reasoning strings.Builder
+	var kinds []DeltaKind
+	resp, err := nativeStreamClient(t, srv.URL).ChatStream(context.Background(), ChatRequest{}, func(kind DeltaKind, s string) error {
+		kinds = append(kinds, kind)
+		if kind == DeltaReasoning {
+			reasoning.WriteString(s)
+		} else {
+			text.WriteString(s)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	if reasoning.String() != "let me think" || text.String() != "Hello" {
+		t.Fatalf("streamed reasoning = %q, text = %q", reasoning.String(), text.String())
+	}
+	wantKinds := []DeltaKind{DeltaReasoning, DeltaReasoning, DeltaText}
+	if len(kinds) != len(wantKinds) {
+		t.Fatalf("delta kinds = %v, want %v", kinds, wantKinds)
+	}
+	for i, k := range wantKinds {
+		if kinds[i] != k {
+			t.Fatalf("delta kinds = %v, want %v", kinds, wantKinds)
+		}
+	}
+	if len(resp.Message.Content) != 2 {
+		t.Fatalf("expected [reasoning, text], got %#v", resp.Message.Content)
+	}
+	rt, ok := reasoningPartText(resp.Message.Content[0])
+	if !ok || rt != "let me think" {
+		t.Fatalf("final reasoning = %q (ok=%v)", rt, ok)
+	}
+	tp, ok := resp.Message.Content[1].AsText()
+	if !ok || tp.Text != "Hello" {
+		t.Fatalf("final text = %q", tp.Text)
+	}
+}
+
+// Some upstreams name the same channel `reasoning` rather than
+// `reasoning_content`; the local parser accepts both.
+func TestChatStreamSSEReasoningAlias(t *testing.T) {
+	srv := sseServer(t, []string{
+		`{"id":"a1","choices":[{"delta":{"role":"assistant","reasoning":"hmm"}}]}`,
+		`{"choices":[{"delta":{"content":"Hi"}}]}`,
+	})
+	defer srv.Close()
+
+	var reasoning strings.Builder
+	resp, err := nativeStreamClient(t, srv.URL).ChatStream(context.Background(), ChatRequest{}, func(kind DeltaKind, s string) error {
+		if kind == DeltaReasoning {
+			reasoning.WriteString(s)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	if reasoning.String() != "hmm" {
+		t.Fatalf("streamed reasoning = %q", reasoning.String())
+	}
+	rt, ok := reasoningPartText(resp.Message.Content[0])
+	if !ok || rt != "hmm" {
+		t.Fatalf("final reasoning = %q (ok=%v)", rt, ok)
+	}
+}
+
+// The OpenAI-format path goes through the shared llm-protocol client, whose
+// codec maps `reasoning_content` to a reasoning stream event: sharedChatStream
+// must forward it on the reasoning channel rather than dropping it (it did
+// until reasoning got its own channel).
+func TestSharedChatStreamForwardsReasoningDeltas(t *testing.T) {
+	srv := sseServer(t, []string{
+		`{"id":"a1","choices":[{"delta":{"role":"assistant","reasoning_content":"weighing options"}}]}`,
+		`{"choices":[{"delta":{"content":"Hello"}}]}`,
+	})
+	defer srv.Close()
+
+	var text, reasoning strings.Builder
+	resp, err := streamClient(t, srv.URL).ChatStream(context.Background(), ChatRequest{}, func(kind DeltaKind, s string) error {
+		if kind == DeltaReasoning {
+			reasoning.WriteString(s)
+		} else {
+			text.WriteString(s)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	if reasoning.String() != "weighing options" || text.String() != "Hello" {
+		t.Fatalf("streamed reasoning = %q, text = %q", reasoning.String(), text.String())
+	}
+	rt, ok := reasoningPartText(resp.Message.Content[0])
+	if !ok || rt != "weighing options" {
+		t.Fatalf("final reasoning = %q (ok=%v)", rt, ok)
 	}
 }

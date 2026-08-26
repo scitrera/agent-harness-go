@@ -11,6 +11,7 @@ import (
 
 var (
 	styleUser      = lipgloss.NewStyle().Foreground(lipgloss.Color("39")).Bold(true)
+	styleShell     = lipgloss.NewStyle().Foreground(lipgloss.Color("81"))
 	styleAssistant = lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
 	styleReasoning = lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Italic(true)
 	styleThinking  = lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Italic(true)
@@ -20,13 +21,14 @@ var (
 	styleDrawer    = lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Background(lipgloss.Color("236")).Padding(0, 1)
 	styleSuggest   = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
 	styleSuggestOn = lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Background(lipgloss.Color("238"))
+	styleQueued    = lipgloss.NewStyle().Foreground(lipgloss.Color("180"))
+	styleQueuedOn  = lipgloss.NewStyle().Foreground(lipgloss.Color("222")).Bold(true)
 )
 
 func (m model) View() tea.View {
 	view := tea.NewView(m.render())
 	view.AltScreen = true
-	// Leave mouse reporting disabled so the terminal owns drag selection and copy.
-	view.MouseMode = tea.MouseModeNone
+	view.MouseMode = tea.MouseModeCellMotion
 	if cursor := m.composer.Cursor(); cursor != nil {
 		adjusted := *cursor
 		adjusted.Y += m.viewport.Height()
@@ -35,6 +37,9 @@ func (m model) View() tea.View {
 		}
 		if selection := m.renderSelection(); selection != "" {
 			adjusted.Y += lipgloss.Height(selection)
+		}
+		if pending := m.renderPendingMessages(); pending != "" {
+			adjusted.Y += lipgloss.Height(pending)
 		}
 		view.Cursor = &adjusted
 	}
@@ -49,9 +54,57 @@ func (m model) render() string {
 	if selection := m.renderSelection(); selection != "" {
 		parts = append(parts, selection)
 	}
+	if pending := m.renderPendingMessages(); pending != "" {
+		parts = append(parts, pending)
+	}
 	parts = append(parts, m.composer.View())
 	parts = append(parts, m.renderStatus())
 	return strings.Join(parts, "\n")
+}
+
+func (m model) renderPendingMessages() string {
+	indexes := m.currentPendingIndexes()
+	if len(indexes) == 0 {
+		return ""
+	}
+	const maxVisiblePending = 3
+	visible := indexes
+	if len(visible) > maxVisiblePending {
+		visible = visible[:maxVisiblePending]
+	}
+	lines := make([]string, 0, len(visible)+1)
+	for _, index := range visible {
+		pending := m.pendingMessages[index]
+		prefix := "queued> "
+		style := styleQueued
+		text := pending.Input
+		if pending.ID == m.editingPendingID {
+			prefix = "editing> "
+			style = styleQueuedOn
+			text = m.composer.Value()
+		}
+		text = strings.Join(strings.Fields(text), " ")
+		if text == "" && len(pending.Attachments) > 0 {
+			text = fmt.Sprintf("[%d image attachment(s)]", len(pending.Attachments))
+		}
+		line := prefix + text
+		if m.width > 0 {
+			line = fitCells(line, m.width)
+			lines = append(lines, style.Width(m.width).Render(line))
+			continue
+		}
+		lines = append(lines, style.Render(line))
+	}
+	if hidden := len(indexes) - len(visible); hidden > 0 {
+		line := fmt.Sprintf("queued> +%d more", hidden)
+		if m.width > 0 {
+			line = styleQueued.Width(m.width).Render(fitCells(line, m.width))
+		} else {
+			line = styleQueued.Render(line)
+		}
+		lines = append(lines, line)
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (m model) renderSelection() string {
@@ -107,8 +160,9 @@ func (m *model) renderRows() string {
 	if m.renderedRows == nil {
 		m.renderedRows = map[string]renderedRowCache{}
 	}
+	rows := collapseToolCallRows(m.rows)
 	var b strings.Builder
-	for i, row := range m.rows {
+	for i, row := range rows {
 		if i > 0 {
 			b.WriteString("\n")
 		}
@@ -129,6 +183,39 @@ func (m *model) renderRows() string {
 	return b.String()
 }
 
+// collapseToolCallRows leaves the source transcript untouched (tool drawers,
+// persistence, and updates still see every call) while rendering a consecutive
+// run as a summary of historical calls plus the latest live call.
+func collapseToolCallRows(rows []chatRow) []chatRow {
+	if len(rows) < 2 {
+		return rows
+	}
+	visible := make([]chatRow, 0, len(rows))
+	for i := 0; i < len(rows); {
+		if !rows[i].ToolCall {
+			visible = append(visible, rows[i])
+			i++
+			continue
+		}
+		end := i + 1
+		for end < len(rows) && rows[end].ToolCall {
+			end++
+		}
+		count := end - i
+		if count > 1 {
+			visible = append(visible, chatRow{
+				Kind:   rowTool,
+				ID:     "tool-summary:" + rows[i].ID + ":" + rows[end-1].ID,
+				TaskID: rows[end-1].TaskID,
+				Text:   fmt.Sprintf("%dx prior tool calls", count-1),
+			})
+		}
+		visible = append(visible, rows[end-1])
+		i = end
+	}
+	return visible
+}
+
 func (m model) renderRow(row chatRow) string {
 	prefix := ""
 	style := styleAssistant
@@ -136,6 +223,9 @@ func (m model) renderRow(row chatRow) string {
 	case rowUser:
 		prefix = "you"
 		style = styleUser
+	case rowShell:
+		prefix = "shell"
+		style = styleShell
 	case rowAssistant:
 		prefix = "assistant"
 		style = styleAssistant
@@ -324,6 +414,9 @@ func (m model) statusText() string {
 }
 
 func (m model) activeModel() string {
+	if name := m.observedModels[workspaceKey(m.workspaceID, m.threadID)]; name != "" {
+		return name
+	}
 	if m.modelStatus == nil {
 		return "unknown"
 	}

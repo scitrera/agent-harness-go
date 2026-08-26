@@ -51,19 +51,27 @@ func RegisterSubagentWithConfig(reg *Registry, cfg SubagentConfig) error {
 			return errorResult(req, fmt.Sprintf("sub-agent depth limit (%d) reached; handle this task directly", cfg.MaxDepth))
 		}
 		var args struct {
-			Task       string   `json:"task"`
-			Model      string   `json:"model"`
-			Agent      string   `json:"agent"`
-			Type       string   `json:"type"`
-			Tools      []string `json:"tools"`
-			Thread     string   `json:"thread"`
-			Background bool     `json:"background"`
+			Task         string          `json:"task"`
+			Model        string          `json:"model"`
+			Agent        string          `json:"agent"`
+			Type         string          `json:"type"`
+			Tools        []string        `json:"tools"`
+			Thread       string          `json:"thread"`
+			Background   bool            `json:"background"`
+			OutputSchema json.RawMessage `json:"output_schema"`
 		}
 		if err := decodeArgs(req, &args); err != nil {
 			return Result{}, err
 		}
 		if args.Task == "" {
 			return errorResult(req, "task is required")
+		}
+		outputContract, err := subagent.CompileOutputSchema(args.OutputSchema)
+		if err != nil {
+			return errorResult(req, err.Error())
+		}
+		if outputContract != nil {
+			args.OutputSchema = outputContract.Raw()
 		}
 		def, selected, err := selectAgentDefinition(ctx, cfg.Catalog, req.Addr.WorkspaceID, agentSelection{Agent: args.Agent, Type: args.Type})
 		if err != nil {
@@ -96,6 +104,7 @@ func RegisterSubagentWithConfig(reg *Registry, cfg SubagentConfig) error {
 			// req.MessageID by the turn loop, recorded on the child thread's task
 			// message as MessageRef.ParentMessageID (the cross-thread back-ref).
 			ParentMessageID: req.MessageID,
+			OutputSchema:    args.OutputSchema,
 		}
 		if selected {
 			applyDefinition(&subReq, def)
@@ -125,11 +134,16 @@ func RegisterSubagentWithConfig(reg *Registry, cfg SubagentConfig) error {
 		if sink, ok := WorldStateSinkFrom(ctx); ok {
 			sink.RecordSubagent(res.ThreadID, name, "completed", res.Summary)
 		}
-		out, err := json.Marshal(map[string]string{
-			"result":    res.Text,
-			"thread_id": res.ThreadID,
-			"summary":   res.Summary,
-		})
+		outPayload := map[string]any{"result": res.Text, "thread_id": res.ThreadID, "summary": res.Summary}
+		if len(res.StructuredPayload) > 0 {
+			var structured any
+			if err := json.Unmarshal(res.StructuredPayload, &structured); err != nil {
+				return Result{}, err
+			}
+			outPayload["structured_result"] = structured
+			outPayload["structured_result_digest"] = res.StructuredDigest
+		}
+		out, err := json.Marshal(outPayload)
 		if err != nil {
 			return Result{}, err
 		}
@@ -157,6 +171,7 @@ func RegisterSubagentWithConfig(reg *Registry, cfg SubagentConfig) error {
 		return err
 	}
 	props := `"task":{"type":"string","description":"A self-contained instruction for the sub-agent. The child inherits the active working directory; describe filesystem paths relative to it unless the user explicitly requested another allowed absolute directory."},"agent":{"type":"string","description":"Optional: filesystem agent type/name from the local catalog."},"type":{"type":"string","description":"Alias for agent."},"model":{"type":"string","description":"Optional: a specific model name to run the sub-agent on (e.g. a vision or stronger model). Omit to use the default or selected agent model."},"tools":{"type":"array","items":{"type":"string"},"description":"Optional requested tool names checked against the selected agent definition."},"thread":{"type":"string","description":"Optional: a thread_id returned by a previous spawn_subagent call. Provide it to CONTINUE that same sub-agent thread (route a follow-up to it) instead of creating a new sub-agent."}`
+	props += `,"output_schema":{"type":"object","description":"Optional JSON Schema for the final child result. The host validates it and permits one correction attempt. Unsupported schema assertions fail admission."}`
 	if cfg.AllowBackground {
 		props += `,"background":{"type":"boolean","description":"Optional: run the sub-agent in the BACKGROUND. Returns immediately with its thread_id and status 'running' instead of the result; the result is delivered later as a follow-up message on this thread, so you can keep working or spawn several in parallel and react to each as it finishes. Omit (default) to run synchronously and get the result inline."}`
 	}

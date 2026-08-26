@@ -208,6 +208,46 @@ func Test_Runner_RunSubagent_returns_final_text(t *testing.T) {
 	}
 }
 
+func Test_Runner_RunSubagentCorrectsStructuredOutputOnce(t *testing.T) {
+	invalidPart, _ := protocol.NewTextPart(`{"status":1}`)
+	validPart, _ := protocol.NewTextPart(`{"status":"ok","findings":[]}`)
+	providerScript := &scriptedProvider{responses: []provider.ChatResponse{
+		{Message: protocol.ChatMessage{ID: "invalid", Role: protocol.RoleAssistant, Content: []protocol.ContentPart{invalidPart}}},
+		{Message: protocol.ChatMessage{ID: "valid", Role: protocol.RoleAssistant, Content: []protocol.ContentPart{validPart}}},
+	}}
+	r, err := NewRunner(Config{
+		Store: &fakeStore{}, Loader: fakeLoader{}, Provider: providerScript,
+		Assembler: contextpack.NewAssembler(contextpack.Config{MaxHistoryMessages: 16}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	schema := json.RawMessage(`{"type":"object","required":["status","findings"],"additionalProperties":false,"properties":{"status":{"type":"string"},"findings":{"type":"array","items":{"type":"string"}}}}`)
+	result, err := r.RunSubagent(context.Background(), subagent.Request{
+		Task: "review", Depth: 1, Parent: protocol.MessageAddress{WorkspaceID: "project-a", ThreadID: "parent"}, OutputSchema: schema,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(result.StructuredPayload) != `{"status":"ok","findings":[]}` || result.StructuredDigest == "" {
+		t.Fatalf("structured result = %+v", result)
+	}
+	if len(providerScript.requests) != 2 {
+		t.Fatalf("provider calls = %d, want exactly one correction", len(providerScript.requests))
+	}
+	second := providerScript.requests[1].Messages
+	var correction string
+	for index := len(second) - 1; index >= 0; index-- {
+		if second[index].Role == protocol.RoleUser {
+			correction = textOf(second[index])
+			break
+		}
+	}
+	if !strings.Contains(correction, "Validation errors") || strings.Contains(correction, `"properties"`) {
+		t.Fatalf("correction should contain errors without re-pasting schema: %q", correction)
+	}
+}
+
 func Test_Runner_RunSubagent_externalParentOnlyAwaitsSharedHistory(t *testing.T) {
 	store := &recordingStore{}
 	tasks := &inlineExternalSubagentTasks{}

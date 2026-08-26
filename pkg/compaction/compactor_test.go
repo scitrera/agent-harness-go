@@ -46,21 +46,28 @@ func TestEvictingCompactorEvictsOldToolResult(t *testing.T) {
 	}
 
 	sink := newFakeSink()
-	rep, err := EvictingCompactor{Sink: sink, KeepRecent: 6}.Compact(context.Background(), history, Config{})
+	rep, err := EvictingCompactor{Sink: sink, KeepRecent: 6, ToolResultEvictTokens: 100}.Compact(context.Background(), history, Config{})
 	if err != nil {
 		t.Fatalf("compact: %v", err)
 	}
 
-	// The old tool-result is now a preview text part with a ref back to the sink.
-	tp, ok := rep.Messages[0].Content[0].AsText()
+	// The old tool-result keeps its typed envelope and call linkage while its
+	// payload becomes a preview with a ref back to the sink.
+	tr, ok := rep.Messages[0].Content[0].AsToolResult()
 	if !ok {
-		t.Fatalf("expected old tool-result replaced by a text preview, got %s", rep.Messages[0].Content[0].Type())
+		t.Fatalf("expected old tool-result to remain typed, got %s", rep.Messages[0].Content[0].Type())
 	}
-	if !strings.Contains(tp.Text, "sink://call-1") || !strings.Contains(tp.Text, "evicted") {
-		t.Fatalf("preview missing ref/marker: %q", tp.Text)
+	if tr.CallID != "call-1" || tr.Name != "some_tool" {
+		t.Fatalf("tool-result linkage changed: %#v", tr)
 	}
-	if len(tp.Text) >= len(bigOutput) {
-		t.Fatalf("preview should be smaller than the evicted content (%d vs %d)", len(tp.Text), len(bigOutput))
+	if !strings.Contains(tr.OutputText, "sink://call-1") || !strings.Contains(tr.OutputText, "evicted") {
+		t.Fatalf("preview missing ref/marker: %q", tr.OutputText)
+	}
+	if len(tr.Output) != 0 {
+		t.Fatalf("original output remained inline after eviction: %s", tr.Output)
+	}
+	if len(tr.OutputText) >= len(bigOutput) {
+		t.Fatalf("preview should be smaller than the evicted content (%d vs %d)", len(tr.OutputText), len(bigOutput))
 	}
 
 	// The full content is recorded in the sink under the call id.
@@ -78,6 +85,27 @@ func TestEvictingCompactorEvictsOldToolResult(t *testing.T) {
 	}
 	if _, ok := sink.stored["sink://call-2"]; ok {
 		t.Fatalf("recent-window content must not be offloaded")
+	}
+}
+
+func TestEvictingCompactorKeepsSmallOldToolResult(t *testing.T) {
+	old := toolResultMsg(t, "old", "call-small", "small output")
+	history := []protocol.ChatMessage{
+		old,
+		msg(t, "r1", "a"), msg(t, "r2", "b"), msg(t, "r3", "c"),
+		msg(t, "r4", "d"), msg(t, "r5", "e"), msg(t, "r6", "f"),
+	}
+	sink := newFakeSink()
+	rep, err := EvictingCompactor{Sink: sink, KeepRecent: 6, ToolResultEvictTokens: 100}.Compact(context.Background(), history, Config{})
+	if err != nil {
+		t.Fatalf("compact: %v", err)
+	}
+	tr, ok := rep.Messages[0].Content[0].AsToolResult()
+	if !ok || tr.OutputText != "small output" {
+		t.Fatalf("small tool result changed: %#v, ok=%v", tr, ok)
+	}
+	if len(sink.stored) != 0 {
+		t.Fatalf("small tool result was offloaded: %v", keysOf(sink.stored))
 	}
 }
 

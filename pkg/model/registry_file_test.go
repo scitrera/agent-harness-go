@@ -34,13 +34,23 @@ providers:
     base_url: http://llm.local
     api_key: inline-secret
     format: native
+  - name: subscription
+    kind: openai_subscription
+    auth_profile: work
+    format: responses
 models:
   - name: primary
     tier: primary
     provider: openrouter
+    reasoning:
+      default_effort: HIGH
+      allowed_efforts: [med, high, xhigh, max, high]
     capabilities: { vision: true, tools: true }
   - name: bare
     tier: light
+    capabilities: { tools: true }
+  - name: sub
+    provider: subscription
     capabilities: { tools: true }
 `)
 	reg, err := LoadRegistry(path)
@@ -54,6 +64,18 @@ models:
 	if !ok || m.Provider != "openrouter" || !m.Capabilities.Vision {
 		t.Fatalf("primary model wrong: %+v ok=%v", m, ok)
 	}
+	if m.Reasoning.DefaultEffort != "high" {
+		t.Fatalf("reasoning default = %q, want high", m.Reasoning.DefaultEffort)
+	}
+	wantEfforts := []string{"medium", "high", "xhigh", "max"}
+	if len(m.Reasoning.AllowedEfforts) != len(wantEfforts) {
+		t.Fatalf("reasoning allowed = %#v, want %#v", m.Reasoning.AllowedEfforts, wantEfforts)
+	}
+	for i := range wantEfforts {
+		if m.Reasoning.AllowedEfforts[i] != wantEfforts[i] {
+			t.Fatalf("reasoning allowed = %#v, want %#v", m.Reasoning.AllowedEfforts, wantEfforts)
+		}
+	}
 
 	// A model referencing a provider resolves to that provider's config.
 	pc, ok := reg.ProviderFor("primary")
@@ -63,6 +85,10 @@ models:
 	if pc.Name != "openrouter" || pc.BaseURL != "https://openrouter.example/v1" ||
 		pc.APIKeyEnv != "OPENROUTER_KEY" || pc.Format != "openai" {
 		t.Fatalf("openrouter config wrong: %+v", pc)
+	}
+	subscription, ok := reg.ProviderFor("sub")
+	if !ok || subscription.Kind != "openai_subscription" || subscription.AuthProfile != "work" {
+		t.Fatalf("subscription config wrong: %+v, ok=%v", subscription, ok)
 	}
 
 	// A bare model (no provider) → (_, false).
@@ -104,6 +130,31 @@ func TestLoadRegistryMalformedErrors(t *testing.T) {
 	path := writeModelsFile(t, "default: [not-a-string\n")
 	if _, err := LoadRegistry(path); err == nil {
 		t.Fatal("malformed yaml should error")
+	}
+}
+
+func TestLoadRegistryRejectsInvalidReasoning(t *testing.T) {
+	tests := []struct {
+		name      string
+		reasoning string
+	}{
+		{name: "unknown", reasoning: "default_effort: turbo"},
+		{name: "default not allowed", reasoning: "default_effort: high\n      allowed_efforts: [medium]"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := writeModelsFile(t, "default: x\nmodels:\n  - name: x\n    reasoning:\n      "+tt.reasoning+"\n")
+			if _, err := LoadRegistry(path); err == nil {
+				t.Fatal("invalid reasoning should error")
+			}
+		})
+	}
+}
+
+func TestNormalizeReasoningEffort(t *testing.T) {
+	got, err := NormalizeReasoningEffort(" Med ")
+	if err != nil || got != "medium" {
+		t.Fatalf("NormalizeReasoningEffort = %q, %v; want medium, nil", got, err)
 	}
 }
 

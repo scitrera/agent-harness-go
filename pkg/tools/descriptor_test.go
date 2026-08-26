@@ -35,7 +35,7 @@ func TestLocalDescriptorsCoverAllLocalTools(t *testing.T) {
 	for _, d := range localDescriptors() {
 		byName[d.Name] = d
 	}
-	for _, name := range []string{"read_file", "write_file", "edit_file", "list_dir", "inspect_file", "shell", "python", "web_search"} {
+	for _, name := range []string{"read_file", "write_file", "edit_file", "apply_patch", "list_dir", "inspect_file", "shell", "python", "web_search"} {
 		d, ok := byName[name]
 		if !ok {
 			t.Fatalf("missing descriptor for %s", name)
@@ -56,7 +56,7 @@ func TestLocalDescriptorsCoverAllLocalTools(t *testing.T) {
 			t.Fatalf("%s concurrency = %v, want explicitly parallel-safe", name, byName[name].Concurrency)
 		}
 	}
-	for _, name := range []string{"write_file", "edit_file", "shell", "python"} {
+	for _, name := range []string{"write_file", "edit_file", "apply_patch", "shell", "python"} {
 		if byName[name].Concurrency == ConcurrencyParallelSafe {
 			t.Fatalf("mutating tool %s must remain sequential", name)
 		}

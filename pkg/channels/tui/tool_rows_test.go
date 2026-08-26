@@ -44,4 +44,45 @@ func TestModelApplyPartAppended_preservesToolLifecycleDetails(t *testing.T) {
 	if strings.Contains(m.rows[0].Text, "tool result shell") {
 		t.Fatalf("generic tool result replaced lifecycle details: %+v", m.rows[0])
 	}
+	if !m.rows[0].ToolCall {
+		t.Fatalf("tool lifecycle row was not marked for compaction: %+v", m.rows[0])
+	}
+}
+
+func TestCollapseToolCallRowsKeepsLatestAndSummarizesPriorCalls(t *testing.T) {
+	rows := []chatRow{
+		{Kind: rowAssistant, ID: "a", Text: "checking"},
+		{Kind: rowTool, ID: "call-1", Text: "tool read_file: finished", ToolCall: true},
+		{Kind: rowTool, ID: "call-2", Text: "tool list_dir: finished", ToolCall: true},
+		{Kind: rowTool, ID: "call-3", Text: "tool shell: started", ToolCall: true},
+	}
+
+	visible := collapseToolCallRows(rows)
+
+	if len(visible) != 3 {
+		t.Fatalf("visible rows = %+v", visible)
+	}
+	if visible[1].Text != "2x prior tool calls" || visible[2].ID != "call-3" {
+		t.Fatalf("collapsed rows = %+v", visible)
+	}
+
+	rows = append(rows, chatRow{Kind: rowTool, ID: "call-4", Text: "tool read_file: started", ToolCall: true})
+	visible = collapseToolCallRows(rows)
+	if len(visible) != 3 || visible[1].Text != "3x prior tool calls" || visible[2].ID != "call-4" {
+		t.Fatalf("updated collapsed rows = %+v", visible)
+	}
+}
+
+func TestCollapseToolCallRowsDoesNotCollapseApprovals(t *testing.T) {
+	rows := []chatRow{
+		{Kind: rowTool, ID: "call-1", Text: "tool shell: queued", ToolCall: true},
+		{Kind: rowTool, ID: "approval-1", Text: "approval shell: pending"},
+		{Kind: rowTool, ID: "call-2", Text: "tool shell: started", ToolCall: true},
+	}
+
+	visible := collapseToolCallRows(rows)
+
+	if len(visible) != len(rows) {
+		t.Fatalf("approval should break a tool run: %+v", visible)
+	}
 }

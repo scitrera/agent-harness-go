@@ -17,6 +17,10 @@ type sendResultMsg struct {
 	Err         error
 }
 
+type shellResultMsg struct {
+	Run shellRun
+}
+
 type historyLoadedMsg struct {
 	WorkspaceID string
 	ThreadID    string

@@ -2,10 +2,12 @@ package turn
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
 
+	"github.com/scitrera/agent-harness-go/pkg/channel"
 	"github.com/scitrera/agent-harness-go/pkg/contextpack"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 	"github.com/scitrera/agent-harness-go/pkg/tools"
@@ -143,10 +145,12 @@ func Test_Runner_Run_threads_turn_grant_to_memory(t *testing.T) {
 func Test_Runner_Run_auto_recall_injects_memories(t *testing.T) {
 	mem := &fakeMemory{hits: []tools.MemoryHit{{ID: "m1", Content: "the user likes teal"}}}
 	provider := &fakeProvider{}
+	publisher := &fakePublisher{}
 	r, err := NewRunner(Config{
 		Store:                    &fakeStore{},
 		Loader:                   fakeLoader{},
 		Provider:                 provider,
+		Publisher:                publisher,
 		Assembler:                contextpack.NewAssembler(contextpack.Config{MaxHistoryMessages: 8}),
 		Memory:                   mem,
 		MemoryAutoRecall:         true,
@@ -174,5 +178,22 @@ func Test_Runner_Run_auto_recall_injects_memories(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("recalled memories not injected into provider request: %#v", provider.request.Messages)
+	}
+	var status channel.MemoryRecallStatus
+	foundStatus := false
+	for _, event := range publisher.events {
+		if event.Type != channel.EventMemoryRecall {
+			continue
+		}
+		foundStatus = true
+		if err := json.Unmarshal(event.Payload, &status); err != nil {
+			t.Fatalf("decode memory status: %v", err)
+		}
+		if strings.Contains(string(event.Payload), "teal") || strings.Contains(string(event.Payload), "m1") {
+			t.Fatalf("memory status leaked recalled content or identifiers: %s", event.Payload)
+		}
+	}
+	if !foundStatus || status.Provider != "memory" || status.WorkspaceID != "ws1" || status.Scope != "workspace" || status.ItemCount != 1 || status.ResultCode != "ok" {
+		t.Fatalf("memory status = %#v", status)
 	}
 }

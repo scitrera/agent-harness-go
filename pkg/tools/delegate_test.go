@@ -3,6 +3,9 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/scitrera/agent-harness-go/pkg/localtools"
@@ -135,6 +138,42 @@ func TestFileDelegateAbsentFallsBackToWorkspace(t *testing.T) {
 	}
 	if rd.Text != "on-disk" {
 		t.Fatalf("read = %q, want workspace content 'on-disk'", rd.Text)
+	}
+}
+
+func TestApplyPatchUsesWorkspaceAndReturnsFileChanges(t *testing.T) {
+	reg, ws := delegateTestRegistry(t)
+	patch := "*** Begin Patch\n*** Add File: added.txt\n+hello\n*** End Patch"
+	arguments, err := json.Marshal(map[string]string{"patch": patch})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := reg.Invoke(context.Background(), Request{CallID: "patch-1", Name: "apply_patch", Arguments: arguments})
+
+	if err != nil {
+		t.Fatalf("apply_patch invoke: %v", err)
+	}
+	data, readErr := os.ReadFile(filepath.Join(ws.Root(), "added.txt"))
+	if readErr != nil || string(data) != "hello\n" {
+		t.Fatalf("added file = %q, %v", data, readErr)
+	}
+	if len(result.Metadata.FileChanges) != 1 || result.Metadata.FileChanges[0].Kind != "create" {
+		t.Fatalf("file changes = %+v", result.Metadata.FileChanges)
+	}
+}
+
+func TestApplyPatchFailsClosedForFileDelegateWithoutPatchSupport(t *testing.T) {
+	reg, _ := delegateTestRegistry(t)
+	arguments, err := json.Marshal(map[string]string{"patch": "*** Begin Patch\n*** Add File: added.txt\n+hello\n*** End Patch"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = reg.Invoke(WithFileDelegate(context.Background(), &fakeFileDelegate{}), Request{CallID: "patch-1", Name: "apply_patch", Arguments: arguments})
+
+	if !errors.Is(err, localtools.ErrPatchUnsupported) {
+		t.Fatalf("expected fail-closed delegate error, got %v", err)
 	}
 }
 

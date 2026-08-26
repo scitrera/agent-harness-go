@@ -29,24 +29,19 @@ func (m *model) markTurnAt(taskID, workspaceID, threadID, phase string) {
 func (m *model) finishTurn(taskID string) {
 	if taskID != "" {
 		delete(m.turns, taskID)
+		if m.cancelPendingID == taskID {
+			m.cancelPendingID = ""
+		}
 	}
 	m.status = m.activeTurnStatus()
 }
 
 func (m model) activeTurnStatus() string {
-	if len(m.turns) == 0 {
+	pending := len(m.currentPendingIndexes())
+	if len(m.turns) == 0 && pending == 0 {
 		return "ready"
 	}
-	priorities := []string{"approval needed", "tool failed", "subagent working", "tool", "responding", "reasoning", "thinking", "queued"}
-	queued := 0
-	for _, activity := range m.turns {
-		if !m.activityOnCurrentThread(activity) {
-			continue
-		}
-		if activity.Phase == "queued" {
-			queued++
-		}
-	}
+	priorities := []string{"approval needed", "tool failed", "subagent working", "tool", "responding", "reasoning", "thinking", "saving context", "queued"}
 	for _, priority := range priorities {
 		for _, activity := range m.turns {
 			if !m.activityOnCurrentThread(activity) {
@@ -60,13 +55,14 @@ func (m model) activeTurnStatus() string {
 				continue
 			}
 			status := activity.Phase
-			if queued > 0 && priority != "queued" {
-				status += fmt.Sprintf(" (+%d queued)", queued)
-			} else if priority == "queued" && queued > 1 {
-				status = fmt.Sprintf("queued %d", queued)
+			if pending > 0 {
+				status += fmt.Sprintf(" (+%d queued)", pending)
 			}
 			return status
 		}
+	}
+	if pending > 0 {
+		return fmt.Sprintf("queued %d", pending)
 	}
 	return "ready"
 }

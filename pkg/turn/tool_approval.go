@@ -41,6 +41,14 @@ func (r *Runner) notifyToolFinished(ctx context.Context, call hooks.ToolCall, is
 	}
 }
 
+func (r *Runner) notifyToolResult(ctx context.Context, call hooks.ToolCall, result tools.Result, err error) {
+	for _, observer := range r.observers {
+		if enriched, ok := observer.(hooks.ToolResultObserver); ok {
+			enriched.ToolResult(ctx, call, result, err)
+		}
+	}
+}
+
 // toolErrorOutput is the tool_result output payload recorded when a tool call is
 // denied by an approver or fails to invoke (e.g. registry policy denial,
 // execution error) — the error is handed back to the model, not raised.

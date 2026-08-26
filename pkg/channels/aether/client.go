@@ -17,6 +17,7 @@ import (
 	"github.com/scitrera/agent-harness-go/pkg/channel"
 	"github.com/scitrera/agent-harness-go/pkg/ids"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
+	"github.com/scitrera/agent-harness-go/pkg/shellcontext"
 	workspacepkg "github.com/scitrera/agent-harness-go/pkg/workspace"
 )
 
@@ -253,7 +254,7 @@ func (c *Client) SetWorkspaceHistoryProjection(p WorkspaceHistoryProjection) {
 // projection failure must never fail the turn, since the agent's copy is the
 // authoritative one.
 func (c *Client) recordProjection(ctx context.Context, msg protocol.ChatMessage) {
-	if msg.Addr.ThreadID == "" {
+	if msg.Addr.ThreadID == "" || shellcontext.IsCommitAck(msg) {
 		return
 	}
 	c.projectionMu.Lock()

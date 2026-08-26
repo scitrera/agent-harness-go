@@ -2,6 +2,7 @@ package turn
 
 import (
 	"context"
+	"net/http"
 	"testing"
 
 	"github.com/scitrera/agent-harness-go/pkg/bootstrap"
@@ -9,6 +10,8 @@ import (
 	modelpkg "github.com/scitrera/agent-harness-go/pkg/model"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 	"github.com/scitrera/agent-harness-go/pkg/provider"
+	llmclient "github.com/scitrera/go-llm/client"
+	openaiprovider "github.com/scitrera/go-llm/provider/openai"
 )
 
 func multiProviderRegistry() *modelpkg.Registry {
@@ -26,6 +29,30 @@ func multiProviderRegistry() *modelpkg.Registry {
 			{Name: "enved", BaseURL: "https://enved.example/api", APIKeyEnv: "TEST_PROVIDER_KEY"},
 		},
 	)
+}
+
+func TestProviderResolverBuildsTrustedSubscriptionProvider(t *testing.T) {
+	reg := modelpkg.NewRegistryWithProviders(
+		[]modelpkg.Model{{Name: "gpt-5", Provider: "chatgpt"}}, "gpt-5",
+		[]modelpkg.ProviderConfig{{Name: "chatgpt", Kind: "openai_subscription", AuthProfile: "personal"}},
+	)
+	auth := &fakeProviderAuthResolver{}
+	resolver := NewProviderResolver(reg, modelpkg.ProviderConfig{}, nil, WithProviderAuthResolver(auth))
+	resolved, ok := resolver.ProviderForModel("gpt-5")
+	if !ok || resolved == nil {
+		t.Fatal("subscription provider did not resolve")
+	}
+	client := resolved.(*provider.OpenAICompatClient)
+	if client.BaseURL() != openaiprovider.SubscriptionBaseURL || auth.kind != "openai_subscription" || auth.profile != "personal" {
+		t.Fatalf("base = %q, auth = %#v", client.BaseURL(), auth)
+	}
+}
+
+type fakeProviderAuthResolver struct{ kind, profile string }
+
+func (r *fakeProviderAuthResolver) Authenticator(kind, profile string) (llmclient.Authenticator, error) {
+	r.kind, r.profile = kind, profile
+	return llmclient.AuthFunc(func(context.Context, *http.Request) error { return nil }), nil
 }
 
 func TestNewProviderResolverNilRegistry(t *testing.T) {
@@ -110,6 +137,20 @@ func TestProviderResolverFillsFromDefault(t *testing.T) {
 	}
 	if cfg.Format != provider.FormatNative {
 		t.Fatalf("format not filled from default: %q", cfg.Format)
+	}
+}
+
+func TestProviderResolverSelectsResponsesFormat(t *testing.T) {
+	t.Parallel()
+	reg := modelpkg.NewRegistryWithProviders(
+		[]modelpkg.Model{{Name: "m", Capabilities: modelpkg.Capabilities{Tools: true}, Provider: "responses"}},
+		"m",
+		[]modelpkg.ProviderConfig{{Name: "responses", BaseURL: "https://responses.example/v1", Format: "responses"}},
+	)
+	r := NewProviderResolver(reg, modelpkg.ProviderConfig{}, nil).(*providerResolver)
+	configured, _ := reg.ProviderFor("m")
+	if got := r.sidecarConfig(configured).Format; got != provider.FormatResponses {
+		t.Fatalf("format = %q, want %q", got, provider.FormatResponses)
 	}
 }
 

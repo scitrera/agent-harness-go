@@ -16,6 +16,9 @@ WORKDIR /src
 COPY --from=ecosystem_spec . /scitrera-ecosystem-messaging-spec
 COPY --from=aether_oss . /scitrera-aether3-go/oss-repo
 COPY --from=memorylayer_sdk . /scitrera-memorylayer-ai-cc/oss/memorylayer-sdk-go
+# go.mod resolves github.com/scitrera/go-llm from ../../llm-gateway/go-llm.
+# Stage that named context at the matching absolute path before downloading.
+COPY --from=go_llm . /llm-gateway/go-llm
 
 COPY go.mod go.sum ./
 RUN go mod download

@@ -10,16 +10,13 @@ import (
 // The returned slice is detached from the registry and safe for callers to
 // sort or filter.
 func (r *Runner) AvailableCommands() []commands.Command {
-	out := make([]commands.Command, 0, len(commands.ReservedNames)+r.commands.Len())
-	for name, description := range commands.ReservedNames {
-		hint := ""
-		if name == "model" || name == "models" {
-			hint = "[list|switch <name>]"
-		}
+	definitions := commands.Definitions(commands.SurfaceRunner)
+	out := make([]commands.Command, 0, len(definitions)+r.commands.Len())
+	for _, definition := range definitions {
 		out = append(out, commands.Command{
-			Name:         name,
-			Description:  description,
-			ArgumentHint: hint,
+			Name:         definition.Name,
+			Description:  definition.Description,
+			ArgumentHint: definition.ArgumentHint,
 		})
 	}
 	out = append(out, r.commands.List()...)

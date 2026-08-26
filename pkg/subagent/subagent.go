@@ -7,6 +7,7 @@ package subagent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sync"
 
@@ -44,6 +45,13 @@ type Request struct {
 	// write ceiling. The spawn tool supplies it from trusted turn context; it is
 	// never accepted as a model-authored absolute path or bearer grant.
 	ExecutionScope *workspacepkg.ExecutionScope
+	// CatalogRevision pins the immutable workspace catalog admitted by the
+	// parent session so durable/external execution cannot silently use a newer
+	// skill, MCP, or agent surface.
+	CatalogRevision string
+	// OutputSchema is an optional, admission-validated JSON Schema contract for
+	// the child's final answer. The child receives it once in its bootstrap.
+	OutputSchema json.RawMessage
 	// Model optionally pins the sub-agent to a specific model (validated against
 	// the registry by the runner; empty → the runner's normal per-turn selection).
 	Model string
@@ -78,6 +86,10 @@ type Request struct {
 // Result is the sub-agent's final answer.
 type Result struct {
 	Text string
+	// StructuredPayload is set when OutputSchema was supplied and the final JSON
+	// passed host-side validation. StructuredDigest identifies those exact bytes.
+	StructuredPayload json.RawMessage
+	StructuredDigest  string
 	// ThreadID is the child sub-agent thread's id — the re-addressable handle.
 	// Pass it back as Request.ResumeThreadID to continue the same sub-agent.
 	ThreadID string

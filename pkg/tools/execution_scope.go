@@ -12,7 +12,7 @@ import (
 // general programs and cannot be proven read-only from the tool name alone.
 func ViewMutatingTool(name string) bool {
 	switch name {
-	case "write_file", "edit_file", "shell", "python":
+	case "write_file", "edit_file", "apply_patch", "shell", "python":
 		return true
 	default:
 		return false

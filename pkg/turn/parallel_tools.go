@@ -217,6 +217,7 @@ func (r *Runner) runParallelToolBatch(
 		item := &prepared[i]
 		if item.invoke != nil {
 			r.notifyToolFinished(item.toolCtx, item.hookCall, item.err != nil || item.result.IsError, item.err)
+			r.notifyToolResult(item.toolCtx, item.hookCall, item.result, item.err)
 			r.publishToolEvent(item.toolCtx, finishToolEventAt(item.call, item.started, item.finished, item.result, item.err))
 		}
 		if errors.Is(item.err, subagent.ErrParentCheckpointUncertain) {

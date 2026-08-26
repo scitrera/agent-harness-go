@@ -34,6 +34,9 @@ func NewRecaller(cfg Config) (*Recaller, error) {
 	return &Recaller{client: c}, nil
 }
 
+// MemoryProviderName labels content-free recall transparency events.
+func (*Recaller) MemoryProviderName() string { return "memorylayer" }
+
 // memoryRecord is the subset of MemoryLayer's memory shape the harness surfaces.
 type memoryRecord struct {
 	ID             string         `json:"id"`

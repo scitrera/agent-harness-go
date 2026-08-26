@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/scitrera/agent-harness-go/pkg/channel"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 	"github.com/scitrera/agent-harness-go/pkg/threadindex"
+	"github.com/scitrera/agent-harness-go/pkg/tools"
 )
 
 func TestThinkingPlaceholderAnimatesUntilFirstResponseContent(t *testing.T) {
@@ -132,5 +134,71 @@ func TestRemoveThinkingOnlyRemovesMatchingTurn(t *testing.T) {
 
 	if len(m.rows) != 1 || m.rows[0].TaskID != "task-2" {
 		t.Fatalf("remaining placeholders = %+v", m.rows)
+	}
+}
+
+func TestThinkingPlaceholderReturnsBetweenToolCalls(t *testing.T) {
+	m := model{
+		threadID:         "thread-1",
+		turns:            map[string]turnActivity{"task-1": {ThreadID: "thread-1", Phase: "thinking"}},
+		pendingApprovals: map[string]approvalRequest{},
+		tools:            map[string]toolEntry{},
+		viewport:         viewport.New(),
+	}
+	m.addThinking("task-1")
+
+	callPart, err := protocol.NewToolCallPart(protocol.ToolInvokeEnvelope{CallID: "call-1", Name: "read_file"})
+	if err != nil {
+		t.Fatalf("tool call part: %v", err)
+	}
+	m.applyEvent(channel.Event{
+		Type: channel.EventPartAppended,
+		Addr: protocol.MessageAddress{ThreadID: "thread-1", TaskID: "task-1"},
+		Part: &callPart,
+	})
+	m.applyEvent(toolLifecycleEvent(t, "task-1", "call-1", tools.ToolEventStarted))
+	if m.hasThinking() {
+		t.Fatal("thinking placeholder remained while tool was running")
+	}
+
+	m.applyEvent(toolLifecycleEvent(t, "task-1", "call-1", tools.ToolEventFinished))
+	if !m.hasThinking() {
+		t.Fatal("thinking placeholder did not return after tool finished")
+	}
+
+	resultPart, err := protocol.NewToolResultPart("call-1", "read_file", json.RawMessage(`{"content":"ok"}`), false)
+	if err != nil {
+		t.Fatalf("tool result part: %v", err)
+	}
+	m.applyEvent(channel.Event{
+		Type: channel.EventPartAppended,
+		Addr: protocol.MessageAddress{ThreadID: "thread-1", TaskID: "task-1"},
+		Part: &resultPart,
+	})
+	if !m.hasThinking() {
+		t.Fatal("tool result hid thinking before the next model response")
+	}
+
+	m.applyEvent(channel.Event{
+		Type:      channel.EventTokenDelta,
+		Addr:      protocol.MessageAddress{ThreadID: "thread-1", TaskID: "task-1"},
+		MessageID: "assistant-1",
+		Delta:     "done",
+	})
+	if m.hasThinking() {
+		t.Fatal("assistant response did not replace thinking placeholder")
+	}
+}
+
+func toolLifecycleEvent(t *testing.T, taskID, callID string, status tools.ToolEventStatus) channel.Event {
+	t.Helper()
+	payload, err := json.Marshal(tools.ToolEvent{CallID: callID, ToolName: "read_file", Status: status})
+	if err != nil {
+		t.Fatalf("marshal tool event: %v", err)
+	}
+	return channel.Event{
+		Type:    channel.EventToolLifecycle,
+		Addr:    protocol.MessageAddress{ThreadID: "thread-1", TaskID: taskID},
+		Payload: payload,
 	}
 }

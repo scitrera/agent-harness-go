@@ -33,6 +33,20 @@ func TestModelApplyEvent_whenToolLifecycleArrives(t *testing.T) {
 	}
 }
 
+func TestModelApplyEventSurfacesMemoryRecallWithoutContent(t *testing.T) {
+	m := model{threadID: "t1", viewport: viewport.New()}
+	payload, err := json.Marshal(channel.MemoryRecallStatus{
+		Provider: "memorylayer", WorkspaceID: "ws", Scope: "workspace", ItemCount: 2, LatencyMS: 7, ResultCode: "ok",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.applyEvent(channel.Event{Type: channel.EventMemoryRecall, Addr: protocol.MessageAddress{ThreadID: "t1"}, Payload: payload})
+	if len(m.rows) != 1 || m.rows[0].Kind != rowSystem || m.rows[0].Text != "memorylayer recall: 2 item(s) in 7ms" {
+		t.Fatalf("memory recall rows = %#v", m.rows)
+	}
+}
+
 func TestRenderToolEventIncludesSafeFailureReason(t *testing.T) {
 	got := renderToolEvent(tools.ToolEvent{
 		Status:       tools.ToolEventFinished,
@@ -65,6 +79,48 @@ func TestFinalFailureMessageSurfacesReason(t *testing.T) {
 	}
 	if _, ok := m.turns["task-1"]; ok {
 		t.Fatal("failed turn remained active")
+	}
+}
+
+func TestFinalMessageUpdatesWorkerOwnedActiveModel(t *testing.T) {
+	message := protocol.ChatMessage{
+		ID:   "assistant-1",
+		Role: protocol.RoleAssistant,
+		Addr: protocol.MessageAddress{WorkspaceID: "project-a", ThreadID: "t1", TaskID: "task-1"},
+		Meta: map[string]json.RawMessage{"active_model": json.RawMessage(`"gpt-5.6-sol"`)},
+	}
+	m := model{
+		workspaceID: "project-a",
+		threadID:    "t1",
+		modelStatus: fakeModelStatus("client-default"),
+		turns:       map[string]turnActivity{"task-1": {ThreadID: "t1"}},
+		viewport:    viewport.New(),
+	}
+
+	m.applyEvent(channel.Event{Type: channel.EventMessageFinal, Addr: message.Addr, Message: &message})
+
+	if got := m.activeModel(); got != "gpt-5.6-sol" {
+		t.Fatalf("active model = %q, want worker observation", got)
+	}
+	m.threadID = "t2"
+	if got := m.activeModel(); got != "client-default" {
+		t.Fatalf("other thread model = %q, want fallback", got)
+	}
+}
+
+func TestLoadedHistoryRestoresLatestWorkerOwnedActiveModel(t *testing.T) {
+	m := model{
+		workspaceID: "project-a",
+		threadID:    "t1",
+		modelStatus: fakeModelStatus("client-default"),
+	}
+	m.observeModelHistory("project-a", "t1", []protocol.ChatMessage{
+		{Meta: map[string]json.RawMessage{"active_model": json.RawMessage(`"model-a"`)}},
+		{Meta: map[string]json.RawMessage{"active_model": json.RawMessage(`"model-b"`)}},
+	})
+
+	if got := m.activeModel(); got != "model-b" {
+		t.Fatalf("active model = %q, want latest history observation", got)
 	}
 }
 

@@ -18,17 +18,14 @@ const (
 // ReservedNames are built-in command names handled by the runner; workspace
 // files using these names are ignored so built-ins cannot be shadowed. The value
 // is the help-line description.
-var ReservedNames = map[string]string{
-	"help":        "List available commands.",
-	"commands":    "List available commands.",
-	"clear":       "Clear this thread's history.",
-	"model":       "List available models, or switch with /model MODEL_NAME.",
-	"models":      "List available models (alias for /model).",
-	"schedules":   "Inspect authoritative scheduled-turn definitions.",
-	"runs":        "Inspect authoritative scheduled-turn runs.",
-	"refinements": "Browse the authoritative continual-refinement audit.",
-	"ledger":      "Browse branch-aware execution events.",
-}
+var ReservedNames = func() map[string]string {
+	definitions := Definitions(SurfaceRunner)
+	out := make(map[string]string, len(definitions))
+	for _, definition := range definitions {
+		out[CanonicalKey(definition.Name)] = definition.Description
+	}
+	return out
+}()
 
 // Discover scans each workspace-relative or absolute dir for "<name>.md"
 // command files plus one level of namespace dirs

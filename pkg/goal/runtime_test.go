@@ -258,9 +258,69 @@ func TestRuntimeAdmitsOneContinuationAcrossReplicasForSameTurn(t *testing.T) {
 	}
 }
 
-func TestRuntimeTokenBudgetBlocksBeforeContinuation(t *testing.T) {
+// An exhausted budget grants exactly one wrap-up round and then blocks. The goal
+// is not cut off at the instant the budget trips: that would end it mid-thought,
+// leaving the operator a blocked goal and no statement of where it got to.
+func TestRuntimeTokenBudgetGrantsOneWrapUpRoundThenBlocks(t *testing.T) {
 	enqueuer := &recordingGoalEnqueuer{}
 	fx := newRuntimeFixture(t, 3, enqueuer, nil)
+	budget := uint64(20)
+	goalRecord, _ := fx.service.CreateGoal(context.Background(), "project-a", "session-1", CreateInput{
+		Objective: "bounded", TokenBudget: &budget,
+	})
+	addr := protocol.MessageAddress{WorkspaceID: "project-a", ThreadID: "session-1"}
+
+	// First turn over budget: the wrap-up round is queued, goal still active.
+	ctx, _ := fx.runtime.BeginTurn(context.Background(), addr)
+	assistant := assistantWithUsage("assistant-budget", addr, 25)
+	if _, err := fx.runtime.AfterTurn(ctx, addr, []protocol.ChatMessage{assistant}, assistant); err != nil {
+		t.Fatal(err)
+	}
+	updated, _ := fx.service.Goal(context.Background(), "project-a", "session-1", goalRecord.ID)
+	if updated.Status != spec.SessionGoalActive || updated.TokenUsage != 25 {
+		t.Fatalf("after the budget tripped, goal = %#v; want still active for the wrap-up", updated)
+	}
+	queued := enqueuer.messages()
+	if len(queued) != 1 {
+		t.Fatalf("queued = %d, want the one wrap-up round", len(queued))
+	}
+	// The wrap-up must not read like an ordinary "keep going" round.
+	text := messageText(queued[0].Message)
+	if !strings.Contains(text, "FINAL round") {
+		t.Fatalf("wrap-up round does not announce itself as final: %q", text)
+	}
+	if !strings.Contains(text, "Do NOT mark the goal completed") {
+		t.Fatalf("wrap-up round does not forbid claiming completion: %q", text)
+	}
+	records, _ := fx.ledger.List(context.Background(), "project-a", "session-1")
+	if len(records) != 2 || records[0].Reason != ReasonTokenBudgetWrapUp {
+		t.Fatalf("wrap-up decisions = %#v", records)
+	}
+
+	// Second turn still over budget: no second wrap-up, the goal blocks.
+	ctx2, _ := fx.runtime.BeginTurn(context.Background(), addr)
+	assistant2 := assistantWithUsage("assistant-budget-2", addr, 5)
+	if _, err := fx.runtime.AfterTurn(ctx2, addr, []protocol.ChatMessage{assistant2}, assistant2); err != nil {
+		t.Fatal(err)
+	}
+	final, _ := fx.service.Goal(context.Background(), "project-a", "session-1", goalRecord.ID)
+	if final.Status != spec.SessionGoalBlocked {
+		t.Fatalf("goal = %#v, want blocked after the wrap-up was spent", final)
+	}
+	if len(enqueuer.messages()) != 1 {
+		t.Fatalf("queued = %d, want no round after the wrap-up", len(enqueuer.messages()))
+	}
+	after, _ := fx.ledger.List(context.Background(), "project-a", "session-1")
+	if after[len(after)-1].Reason != ReasonTokenBudget {
+		t.Fatalf("final decision = %#v, want a token_budget block", after[len(after)-1])
+	}
+}
+
+// A host that disabled automatic follow-ups must not get a surprise extra turn
+// from the wrap-up path.
+func TestRuntimeTokenBudgetBlocksWithoutWrapUpWhenContinuationsDisabled(t *testing.T) {
+	enqueuer := &recordingGoalEnqueuer{}
+	fx := newRuntimeFixture(t, 0, enqueuer, nil)
 	budget := uint64(20)
 	goalRecord, _ := fx.service.CreateGoal(context.Background(), "project-a", "session-1", CreateInput{
 		Objective: "bounded", TokenBudget: &budget,
@@ -271,9 +331,10 @@ func TestRuntimeTokenBudgetBlocksBeforeContinuation(t *testing.T) {
 	if _, err := fx.runtime.AfterTurn(ctx, addr, []protocol.ChatMessage{assistant}, assistant); err != nil {
 		t.Fatal(err)
 	}
+
 	updated, _ := fx.service.Goal(context.Background(), "project-a", "session-1", goalRecord.ID)
-	if updated.Status != spec.SessionGoalBlocked || updated.TokenUsage != 25 || len(enqueuer.messages()) != 0 {
-		t.Fatalf("budget goal = %#v queued=%d", updated, len(enqueuer.messages()))
+	if updated.Status != spec.SessionGoalBlocked || len(enqueuer.messages()) != 0 {
+		t.Fatalf("goal = %#v queued=%d; want blocked with no wrap-up", updated, len(enqueuer.messages()))
 	}
 	records, _ := fx.ledger.List(context.Background(), "project-a", "session-1")
 	if len(records) != 1 || records[0].Reason != ReasonTokenBudget {
@@ -492,22 +553,92 @@ func TestRuntimeVerifierSatisfiedCompletesAndFailureBlocks(t *testing.T) {
 		}
 	})
 
-	t.Run("error", func(t *testing.T) {
-		fx := newRuntimeFixture(t, 3, &recordingGoalEnqueuer{}, fixedGoalVerifier{err: errors.New("grader offline")})
+	// A verifier error is fail-closed, but only once the fault has PERSISTED.
+	// Blocking on the first error conflates "this goal cannot succeed" with "the
+	// grader had a bad minute", permanently killing a goal that was progressing.
+	t.Run("error is tolerated below the streak", func(t *testing.T) {
+		enqueuer := &recordingGoalEnqueuer{}
+		fx := newRuntimeFixture(t, 5, enqueuer, fixedGoalVerifier{err: errors.New("grader offline")})
 		goalRecord, _ := fx.service.CreateGoal(context.Background(), "project-a", "session-1", CreateInput{Objective: "verified"})
 		addr := protocol.MessageAddress{WorkspaceID: "project-a", ThreadID: "session-1"}
 		ctx, _ := fx.runtime.BeginTurn(context.Background(), addr)
 		assistant := assistantWithUsage("assistant-error", addr, 10)
-		if _, err := fx.runtime.AfterTurn(ctx, addr, []protocol.ChatMessage{assistant}, assistant); err == nil {
-			t.Fatal("verifier failure returned nil error")
+
+		if _, err := fx.runtime.AfterTurn(ctx, addr, []protocol.ChatMessage{assistant}, assistant); err != nil {
+			t.Fatalf("a single verifier error must not fail the turn: %v", err)
+		}
+
+		updated, _ := fx.service.Goal(context.Background(), "project-a", "session-1", goalRecord.ID)
+		if updated.Status != spec.SessionGoalActive {
+			t.Fatalf("goal = %#v, want still active after one verifier error", updated)
+		}
+		if len(enqueuer.messages()) != 1 {
+			t.Fatalf("queued = %d, want the goal to continue and retry", len(enqueuer.messages()))
+		}
+		records, _ := fx.ledger.List(context.Background(), "project-a", "session-1")
+		// Recorded as verifier_failed, not active_goal: otherwise the streak is
+		// uncountable and the fault is invisible in the audit trail.
+		if records[0].Reason != ReasonVerifierFailed {
+			t.Fatalf("first decision = %#v, want reason verifier_failed", records[0])
+		}
+		if !strings.Contains(records[0].Detail, "grader offline") {
+			t.Fatalf("decision detail loses the verifier error: %q", records[0].Detail)
+		}
+	})
+
+	t.Run("error blocks once it persists", func(t *testing.T) {
+		fx := newRuntimeFixture(t, 5, &recordingGoalEnqueuer{}, fixedGoalVerifier{err: errors.New("grader offline")})
+		goalRecord, _ := fx.service.CreateGoal(context.Background(), "project-a", "session-1", CreateInput{Objective: "verified"})
+		addr := protocol.MessageAddress{WorkspaceID: "project-a", ThreadID: "session-1"}
+
+		// Drive consecutive failing turns up to the streak.
+		var lastErr error
+		for i := 0; i < DefaultVerifierFailureStreak; i++ {
+			ctx, _ := fx.runtime.BeginTurn(context.Background(), addr)
+			assistant := assistantWithUsage(fmt.Sprintf("assistant-error-%d", i), addr, 10)
+			_, lastErr = fx.runtime.AfterTurn(ctx, addr, []protocol.ChatMessage{assistant}, assistant)
+		}
+
+		if lastErr == nil {
+			t.Fatal("a persistent verifier failure must surface the error")
 		}
 		updated, _ := fx.service.Goal(context.Background(), "project-a", "session-1", goalRecord.ID)
 		if updated.Status != spec.SessionGoalBlocked || !strings.Contains(updated.BlockedReason, "grader offline") {
 			t.Fatalf("failed verifier goal = %#v", updated)
 		}
-		records, _ := fx.ledger.List(context.Background(), "project-a", "session-1")
-		if len(records) != 1 || records[0].Reason != ReasonVerifierFailed {
-			t.Fatalf("failed verifier decisions = %#v", records)
+	})
+
+	// One good verify in the middle must reset the run, or intermittent faults
+	// accumulate into a block that never should have happened.
+	t.Run("a successful verify resets the streak", func(t *testing.T) {
+		records := []DecisionRecord{
+			{GoalID: "g1", TurnMessageID: "t1", Reason: ReasonVerifierFailed},
+			{GoalID: "g1", TurnMessageID: "t2", Reason: ReasonVerifierFailed},
+			{GoalID: "g1", TurnMessageID: "t3", Reason: ReasonVerifierRevision},
+			{GoalID: "g1", TurnMessageID: "t4", Reason: ReasonVerifierFailed},
+		}
+		if got := consecutiveVerifierFailures(records, "g1"); got != 1 {
+			t.Fatalf("streak = %d, want 1 — only the unbroken tail counts", got)
+		}
+		if got := consecutiveVerifierFailures(records[:2], "g1"); got != 2 {
+			t.Fatalf("streak = %d, want 2", got)
+		}
+		if got := consecutiveVerifierFailures(records, "other-goal"); got != 0 {
+			t.Fatalf("streak = %d, want 0 for an unrelated goal", got)
+		}
+	})
+
+	// One continued turn writes two records sharing a TurnMessageID. Counting
+	// records instead of turns would make a tolerance of 3 block after 2.
+	t.Run("the streak counts turns not ledger records", func(t *testing.T) {
+		records := []DecisionRecord{
+			{GoalID: "g1", TurnMessageID: "t1", Action: DecisionContinuationPlanned, Reason: ReasonVerifierFailed},
+			{GoalID: "g1", TurnMessageID: "t1", Action: DecisionContinuationEnqueued, Reason: ReasonVerifierFailed},
+			{GoalID: "g1", TurnMessageID: "t2", Action: DecisionContinuationPlanned, Reason: ReasonVerifierFailed},
+			{GoalID: "g1", TurnMessageID: "t2", Action: DecisionContinuationEnqueued, Reason: ReasonVerifierFailed},
+		}
+		if got := consecutiveVerifierFailures(records, "g1"); got != 2 {
+			t.Fatalf("streak = %d, want 2 turns (not 4 records)", got)
 		}
 	})
 }

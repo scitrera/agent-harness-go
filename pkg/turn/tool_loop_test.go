@@ -32,19 +32,27 @@ func (p *scriptedProvider) Chat(ctx context.Context, req provider.ChatRequest) (
 }
 
 // streamingScriptedProvider is a scriptedProvider that also satisfies
-// StreamingProvider: for the Nth call it streams streamText[N] (when non-empty)
-// through onDelta before returning the Nth scripted response. Used to exercise
-// the production streaming path, where the answer text reaches the stream via
-// token_delta and must NOT be appended a second time at finalize.
+// StreamingProvider: for the Nth call it streams streamReasoning[N] then
+// streamText[N] (each when non-empty) through onDelta before returning the Nth
+// scripted response — the channel order a reasoning model produces. Used to
+// exercise the production streaming path, where the trace and the answer text
+// reach the stream via token_delta and must NOT be appended a second time at
+// finalize.
 type streamingScriptedProvider struct {
 	scriptedProvider
-	streamText []string
+	streamText      []string
+	streamReasoning []string
 }
 
 func (p *streamingScriptedProvider) ChatStream(ctx context.Context, req provider.ChatRequest, onDelta provider.DeltaFunc) (provider.ChatResponse, error) {
 	idx := len(p.requests)
+	if idx < len(p.streamReasoning) && p.streamReasoning[idx] != "" {
+		if err := onDelta(provider.DeltaReasoning, p.streamReasoning[idx]); err != nil {
+			return provider.ChatResponse{}, err
+		}
+	}
 	if idx < len(p.streamText) && p.streamText[idx] != "" {
-		if err := onDelta(p.streamText[idx]); err != nil {
+		if err := onDelta(provider.DeltaText, p.streamText[idx]); err != nil {
 			return provider.ChatResponse{}, err
 		}
 	}
@@ -609,5 +617,105 @@ func Test_Runner_Run_streams_tool_extra_parts_into_finalized_assistant(t *testin
 	}
 	if !findSubagent(mem.appended[0][0]) {
 		t.Fatalf("committed assistant missing SubagentPart(thread=%s): %#v", childThread, mem.appended[0][0].Content)
+	}
+}
+
+// Reasoning streams on its own channel, so each provider call's thinking trace
+// becomes its OWN content part at its true position — before that call's answer
+// text and before the tool calls it decided on. A tool-loop turn therefore
+// carries several reasoning parts (one per model call), which the UI renders
+// inline as a chronological record; and because the trace arrived via
+// token_delta it must NOT be appended a second time at finalize.
+func Test_Runner_Run_streaming_reasoning_is_its_own_part_per_provider_call(t *testing.T) {
+	ctx := context.Background()
+	registry := tools.NewRegistry()
+	if err := registry.Register("record", tools.HandlerFunc(func(_ context.Context, req tools.Request) (tools.Result, error) {
+		return tools.NewJSONResult(req.CallID, req.Name, json.RawMessage(`{"recorded":true}`))
+	})); err != nil {
+		t.Fatalf("register tool: %v", err)
+	}
+	callPart, err := protocol.NewToolCallPart(protocol.ToolInvokeEnvelope{CallID: "call-1", Name: "record", Args: protocol.RawToArgs(json.RawMessage(`{"value":1}`))})
+	if err != nil {
+		t.Fatalf("tool call part: %v", err)
+	}
+	firstReasoning, err := protocol.NewReasoningPart("i should record it", false)
+	if err != nil {
+		t.Fatalf("first reasoning: %v", err)
+	}
+	finalReasoning, err := protocol.NewReasoningPart("the tool succeeded", false)
+	if err != nil {
+		t.Fatalf("final reasoning: %v", err)
+	}
+	finalPart, err := protocol.NewTextPart("done")
+	if err != nil {
+		t.Fatalf("final text: %v", err)
+	}
+	provider := &streamingScriptedProvider{
+		scriptedProvider: scriptedProvider{responses: []provider.ChatResponse{
+			{Message: protocol.ChatMessage{ID: "assistant-tool", Role: protocol.RoleAssistant, Content: []protocol.ContentPart{firstReasoning, callPart}}},
+			{Message: protocol.ChatMessage{ID: "assistant-final", Role: protocol.RoleAssistant, Content: []protocol.ContentPart{finalReasoning, finalPart}}},
+		}},
+		// Call 1 thinks, then emits only the tool_call; call 2 thinks, then answers.
+		streamReasoning: []string{"i should record it", "the tool succeeded"},
+		streamText:      []string{"", "done"},
+	}
+	publisher := &fakePublisher{}
+	runner, err := NewRunner(Config{
+		Store:             &fakeStore{},
+		Loader:            fakeLoader{},
+		Registry:          registry,
+		Provider:          provider,
+		Publisher:         publisher,
+		Assembler:         contextpack.NewAssembler(contextpack.Config{MaxHistoryMessages: 10}),
+		MaxToolIterations: 2,
+		Streaming:         true,
+	})
+	if err != nil {
+		t.Fatalf("runner: %v", err)
+	}
+	userPart, err := protocol.NewTextPart("please record")
+	if err != nil {
+		t.Fatalf("user text: %v", err)
+	}
+
+	assistant, err := runner.Run(ctx, protocol.MessageAddress{ThreadID: "thread-1"}, protocol.ChatMessage{ID: "user-1", Role: protocol.RoleUser, Content: []protocol.ContentPart{userPart}})
+	if err != nil {
+		t.Fatalf("run turn: %v", err)
+	}
+
+	wantTypes := []protocol.ContentPartType{
+		protocol.ContentReasoning,
+		protocol.ContentToolCall,
+		protocol.ContentToolResult,
+		protocol.ContentReasoning,
+		protocol.ContentText,
+	}
+	if len(assistant.Content) != len(wantTypes) {
+		t.Fatalf("expected %v, got %#v", wantTypes, assistant.Content)
+	}
+	for i, want := range wantTypes {
+		if assistant.Content[i].Type() != want {
+			t.Fatalf("content[%d] = %q, want %q (full: %#v)", i, assistant.Content[i].Type(), want, assistant.Content)
+		}
+	}
+	for _, want := range []struct {
+		index int
+		text  string
+	}{{0, "i should record it"}, {3, "the tool succeeded"}} {
+		got, ok := partText(assistant.Content[want.index])
+		if !ok || got != want.text {
+			t.Fatalf("reasoning at %d = %q (ok=%v), want %q", want.index, got, ok, want.text)
+		}
+	}
+	// Each trace rode as token_delta into one part_appended — no duplicate
+	// append at finalize (which would show up as 4 reasoning appends).
+	reasoningAppends := 0
+	for _, ev := range publisher.events {
+		if ev.Type == channel.EventPartAppended && ev.Part != nil && ev.Part.Type() == protocol.ContentReasoning {
+			reasoningAppends++
+		}
+	}
+	if reasoningAppends != 2 {
+		t.Fatalf("expected exactly 2 reasoning part_appended (one per provider call), got %d", reasoningAppends)
 	}
 }

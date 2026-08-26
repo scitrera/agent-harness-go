@@ -31,6 +31,10 @@ func (m *model) reflowSurfaces() {
 		return
 	}
 	drawerHeight := m.drawerHeight()
+	pendingHeight := 0
+	if pending := m.renderPendingMessages(); pending != "" {
+		pendingHeight = lipgloss.Height(pending)
+	}
 	composerHeight := 0
 	if m.composer.Prompt == "" && m.composer.Placeholder == "" {
 		composerHeight = minComposerHeight
@@ -38,9 +42,9 @@ func (m *model) reflowSurfaces() {
 		m.composer.SetWidth(m.width)
 		composerHeight = m.composer.Height()
 	}
-	selectionSpace := m.height - composerHeight - statusHeight - drawerHeight - 1
+	selectionSpace := m.height - composerHeight - statusHeight - drawerHeight - pendingHeight - 1
 	m.selector.limitHeight(selectionSpace)
-	viewHeight := m.height - composerHeight - statusHeight - drawerHeight - m.selector.height()
+	viewHeight := m.height - composerHeight - statusHeight - drawerHeight - pendingHeight - m.selector.height()
 	if viewHeight < 1 {
 		viewHeight = 1
 	}

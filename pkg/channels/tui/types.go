@@ -10,6 +10,7 @@ type rowKind string
 const (
 	rowSystem    rowKind = "system"
 	rowUser      rowKind = "user"
+	rowShell     rowKind = "shell"
 	rowAssistant rowKind = "assistant"
 	rowReasoning rowKind = "reasoning"
 	rowThinking  rowKind = "thinking"
@@ -22,6 +23,10 @@ type chatRow struct {
 	TaskID    string
 	Text      string
 	Streaming bool
+	// ToolCall distinguishes actual tool activity from other rows rendered with
+	// the tool style (notably approvals). Only consecutive ToolCall rows are
+	// compacted in the transcript view.
+	ToolCall bool
 }
 
 type approvalRequest struct {
@@ -67,6 +72,28 @@ type pendingAttachment struct {
 	Mime string
 	Size int64
 	Part protocol.ContentPart
+}
+
+type outboundKind uint8
+
+const (
+	outboundConversation outboundKind = iota
+	outboundCommand
+	outboundMetaCommand
+	outboundShell
+)
+
+type queuedMessage struct {
+	ID               uint64
+	Kind             outboundKind
+	WorkspaceID      string
+	ThreadID         string
+	Input            string
+	DisplayText      string
+	Message          protocol.ChatMessage
+	ReferencedImages []referencedImage
+	Attachments      []pendingAttachment
+	Presented        bool
 }
 
 type drawerMode string

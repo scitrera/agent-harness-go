@@ -162,3 +162,31 @@ func TestEmptyComposerArrowEventsScrollHistoryByLines(t *testing.T) {
 		t.Fatal("scrolling to bottom should resume tailing")
 	}
 }
+
+func TestMouseWheelScrollsTranscriptWithoutRecallingComposerHistory(t *testing.T) {
+	m := model{
+		viewport:     viewport.New(),
+		composer:     newComposer(),
+		tailing:      true,
+		inputHistory: []string{"previous message"},
+	}
+	m.viewport.SetWidth(40)
+	m.viewport.SetHeight(3)
+	m.viewport.SetContent(strings.Join([]string{
+		"one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+	}, "\n"))
+	m.viewport.GotoBottom()
+	bottom := m.viewport.YOffset()
+
+	next, _ := m.Update(tea.MouseWheelMsg(tea.Mouse{Button: tea.MouseWheelUp}))
+	updated := next.(model)
+	if got := updated.viewport.YOffset(); got != bottom-updated.viewport.MouseWheelDelta {
+		t.Fatalf("wheel scroll offset = %d, want %d", got, bottom-updated.viewport.MouseWheelDelta)
+	}
+	if got := updated.composer.Value(); got != "" {
+		t.Fatalf("mouse wheel recalled composer history: %q", got)
+	}
+	if updated.historyIndex != 0 {
+		t.Fatalf("mouse wheel changed composer history index to %d", updated.historyIndex)
+	}
+}

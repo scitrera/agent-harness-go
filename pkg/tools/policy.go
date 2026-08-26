@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"sync"
+
+	spec "github.com/scitrera/ecosystem-messaging-spec/go"
 )
 
 type DecisionCode string
@@ -42,6 +44,43 @@ func (p StaticPolicy) Decide(req Request) Decision {
 		return Decision{Code: DecisionAllow, Reason: reason, AuditCode: "tool.allow"}
 	}
 	return Decision{Code: DecisionRequiresApproval, Reason: "tool is not pre-authorized", AuditCode: "tool.approval_required"}
+}
+
+// EffectLookup resolves a tool name to its declared portable effect. The bool
+// is false for a tool that declared none — an unclassified tool must never be
+// treated as read-only by omission.
+type EffectLookup func(tool string) (spec.ToolEffect, bool)
+
+// ReadOnlyAutoApprove is the read-only approval tier: it allows any tool whose
+// declared effect is `read` and defers everything else to the base policy.
+//
+// It exists because an always-ask configuration that prompts for `read_file`
+// teaches users to approve without reading the prompt, which costs more safety
+// than the prompt ever bought. Only an EXPLICIT read effect qualifies: a tool
+// with no declared effect, or one whose effect the provider could not classify,
+// falls through to the base policy unchanged.
+type ReadOnlyAutoApprove struct {
+	Base   Policy
+	Effect EffectLookup
+}
+
+// NewReadOnlyAutoApprove wraps base so read-effect tools resolved through lookup
+// are auto-approved. A nil lookup disables the tier (every call defers to base),
+// so a misconfiguration fails closed rather than approving everything.
+func NewReadOnlyAutoApprove(base Policy, lookup EffectLookup) ReadOnlyAutoApprove {
+	return ReadOnlyAutoApprove{Base: base, Effect: lookup}
+}
+
+func (p ReadOnlyAutoApprove) Decide(req Request) Decision {
+	if p.Effect != nil {
+		if effect, ok := p.Effect(req.Name); ok && effect == spec.ToolEffectRead {
+			return Decision{Code: DecisionAllow, Reason: "read-only tool", AuditCode: "tool.read_only"}
+		}
+	}
+	if p.Base == nil {
+		return Decision{Code: DecisionRequiresApproval, Reason: "tool is not pre-authorized", AuditCode: "tool.approval_required"}
+	}
+	return p.Base.Decide(req)
 }
 
 // GrantStore persists "always"-scoped tool authorizations per workspace. The

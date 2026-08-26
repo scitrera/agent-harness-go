@@ -2,7 +2,6 @@ package tui
 
 import (
 	"context"
-	"os"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -123,6 +122,12 @@ type Config struct {
 	InitialThreadID    string
 	InitialWorkspaceID string
 	WorkspaceRoot      string
+	// UserID keys persistent per-user shell response preferences.
+	UserID string
+	// ShellTriggerAgent is the process-wide default for whether an idle !command
+	// starts an agent turn after its result is added to context.
+	ShellTriggerAgent bool
+	ShellPreferences  ShellPreferenceStore
 	// RetainReasoning keeps reasoning rows after a subsequent assistant action
 	// consumes them. The default false presents reasoning only while it is the
 	// model's latest activity.
@@ -130,7 +135,6 @@ type Config struct {
 }
 
 func Run(ctx context.Context, cfg Config) error {
-	defer func() { _, _ = os.Stdout.WriteString(alternateScrollModeOff) }()
 	model, err := newModel(ctx, cfg)
 	if err != nil {
 		return err

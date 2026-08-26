@@ -31,6 +31,8 @@ import (
 	"github.com/scitrera/agent-harness-go/pkg/channel"
 	"github.com/scitrera/agent-harness-go/pkg/ids"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
+	"github.com/scitrera/agent-harness-go/pkg/steering"
+	"github.com/scitrera/agent-harness-go/pkg/tasklifecycle"
 	"github.com/scitrera/agent-harness-go/pkg/turncancel"
 	workspacepkg "github.com/scitrera/agent-harness-go/pkg/workspace"
 )
@@ -441,14 +443,41 @@ func (c *Channel) onMessage(ctx context.Context, msg *sdk.Message) error {
 	// without one is an identity-less artifact to drop — an OSS frontend may
 	// simply not use Aether tasks. A turn with no task id is therefore normal
 	// here; mint a local id so cancel and approval correlation still work.
-	if chatMsg.Addr.TaskID == "" {
+	//
+	// A steering send is the deliberate exception: it is an interjection into a
+	// turn that is already running and owns no task of its own (the sender does
+	// not open one for it — see pkg/steering). Minting an id here would invent a
+	// task nobody authorized and, on a host with an authoritative task API, one
+	// that cannot be claimed. It only gets an id on the fallback path below,
+	// where it missed its window and really is becoming a turn.
+	if chatMsg.Addr.TaskID == "" && !steering.IsRequested(chatMsg) {
 		taskID, idErr := ids.New("task-")
 		if idErr != nil {
 			return fmt.Errorf("aether: mint task id: %w", idErr)
 		}
 		chatMsg.Addr.TaskID = taskID
+		chatMsg = tasklifecycle.MarkLocal(chatMsg)
 	}
 	if binding != nil {
+		// A bound turn must have task identity. Until steering sends existed this
+		// was unreachable — every turn was minted an id above — and the checks
+		// below inherited it silently: the access receipt is correlated BY task
+		// id, so an empty one makes ExecutionBindingAccessRequest error out.
+		// That is a fail-closed accident, not a decision, and it only covers the
+		// cross-host path; a same-host bound turn would skip the receipt
+		// entirely. State the requirement explicitly instead, matching the
+		// distribution's admission check.
+		//
+		// A steering send legitimately has no task, and legitimately has no
+		// business carrying a binding: it joins a turn already running and
+		// inherits that turn's execution view.
+		if chatMsg.Addr.TaskID == "" {
+			slog.WarnContext(ctx, "aether: execution binding on a turn with no task identity",
+				slog.String("thread", chatMsg.Addr.ThreadID),
+				slog.Bool("steering", steering.IsRequested(chatMsg)))
+			c.rejectTurn(msg.SourceTopic, chatMsg, "workspace execution binding requires a task")
+			return nil
+		}
 		if (workspaceResolveErr == nil && binding.WorkspaceID != chatMsg.Addr.WorkspaceID) ||
 			binding.ExecutionSite != spec.ExecutionSiteClient || msg.SourceTopic == "" {
 			slog.WarnContext(ctx, "aether: execution binding does not match turn source",
@@ -560,22 +589,78 @@ func (c *Channel) rejectTurn(sourceTopic string, chatMsg protocol.ChatMessage, r
 	}
 }
 
-func (c *Channel) enqueueTurn(ctx context.Context, sourceTopic string, chatMsg protocol.ChatMessage, access *workspacepkg.ExecutionBindingAuthorizationRequest) error {
-	if sourceTopic != "" {
-		c.mu.Lock()
-		c.replyTo[chatMsg.Addr.TaskID] = sourceTopic
-		c.mu.Unlock()
+// RejectSteering tells the sender that an interjection never reached the turn it
+// was aimed at (channel.SteeringRejector).
+//
+// It routes purely by address: a steering send carries no task id, so there is
+// no replyTo entry for it, and replyTopic falls back to the originating user
+// session (addr.user_id + addr.request_id) — which the platform stamps on every
+// inbound message. That is deliberate; keying a reply topic by message id would
+// need a map with no reliable moment to delete the entries that ARE delivered.
+//
+// Undeliverable rejections are dropped by PublishEvent's own routing check. The
+// runtime has already logged the rejection, so a client on a transport that
+// cannot be reached still leaves a trace.
+func (c *Channel) RejectSteering(ctx context.Context, in channel.Inbound, reason string) {
+	addr := in.Addr
+	if addr.ThreadID == "" {
+		addr = in.Message.Addr
 	}
-	if access != nil {
-		c.mu.Lock()
-		c.executionBindings[chatMsg.Addr.TaskID] = access.Binding
-		c.executionPolicies[chatMsg.Addr.TaskID] = ScheduledViewPolicy{
-			WriteAccess:      access.ViewPolicy.WriteAccess,
-			AllowMutableView: access.ViewPolicy.AllowMutableView,
-			AllowDirtyView:   access.ViewPolicy.AllowDirtyView,
+	if addr.ThreadID == "" {
+		return
+	}
+	messageID, err := ids.New("msg-")
+	if err != nil {
+		slog.WarnContext(ctx, "aether: mint steering rejection message id", slog.Any("err", err))
+		return
+	}
+	part, err := protocol.NewTextPart("That message was not added to the previous response — " + reason + ". Send it again to ask separately.")
+	if err != nil {
+		return
+	}
+	message := protocol.ChatMessage{
+		SchemaVersion: spec.MessagingSchemaVersion,
+		ID:            messageID,
+		Role:          protocol.RoleAssistant,
+		Content:       []protocol.ContentPart{part},
+		Addr:          addr,
+		Meta:          map[string]json.RawMessage{},
+	}
+	if err := c.PublishEvent(ctx, channel.Event{
+		Type: channel.EventMessageFinal, Addr: addr, Message: &message,
+	}); err != nil {
+		slog.WarnContext(ctx, "aether: publish steering rejection", slog.Any("err", err))
+	}
+}
+
+func (c *Channel) enqueueTurn(ctx context.Context, sourceTopic string, chatMsg protocol.ChatMessage, access *workspacepkg.ExecutionBindingAuthorizationRequest) error {
+	// Every map below is keyed by task id, so a turn WITHOUT one (a steering
+	// send, which deliberately owns no task) must not write to them: each write
+	// would land on the shared "" key, where the last sender wins. That is not a
+	// leak but a misroute — replyTopic would then answer any task-less event,
+	// including a steering rejection, on whichever client most recently
+	// interjected, rather than falling through to that event's own user session.
+	//
+	// A steering send needs none of this state: it never runs a turn of its own,
+	// so it never publishes on its own behalf, and its rejection routes by
+	// address.
+	if taskID := chatMsg.Addr.TaskID; taskID != "" {
+		if sourceTopic != "" {
+			c.mu.Lock()
+			c.replyTo[taskID] = sourceTopic
+			c.mu.Unlock()
 		}
-		c.executionAccess[chatMsg.Addr.TaskID] = *access
-		c.mu.Unlock()
+		if access != nil {
+			c.mu.Lock()
+			c.executionBindings[taskID] = access.Binding
+			c.executionPolicies[taskID] = ScheduledViewPolicy{
+				WriteAccess:      access.ViewPolicy.WriteAccess,
+				AllowMutableView: access.ViewPolicy.AllowMutableView,
+				AllowDirtyView:   access.ViewPolicy.AllowDirtyView,
+			}
+			c.executionAccess[taskID] = *access
+			c.mu.Unlock()
+		}
 	}
 	select {
 	case c.tasks <- channel.Inbound{Addr: chatMsg.Addr, Message: chatMsg}:

@@ -115,16 +115,23 @@ func (d *fileDelegate) WriteFile(ctx context.Context, path, content string) erro
 	return d.ch.writeTextFile(ctx, d.sessionID, d.resolve(path), content)
 }
 
-// EditFile mirrors localtools.EditFile over the client: read, exact single
-// replace (error when old_text is absent), write back.
+// EditFile mirrors localtools.EditFile over the client: read, require exactly
+// one match, then write the replacement back.
 func (d *fileDelegate) EditFile(ctx context.Context, path, oldText, newText string) error {
+	if oldText == "" {
+		return fmt.Errorf("%w: old text must not be empty", localtools.ErrInvalidFile)
+	}
 	abs := d.resolve(path)
 	current, err := d.ch.readTextFile(ctx, d.sessionID, abs, 0)
 	if err != nil {
 		return err
 	}
-	if !strings.Contains(current, oldText) {
+	switch strings.Count(current, oldText) {
+	case 0:
 		return localtools.ErrOldTextNotFound
+	case 1:
+	default:
+		return localtools.ErrOldTextNotUnique
 	}
 	updated := strings.Replace(current, oldText, newText, 1)
 	return d.ch.writeTextFile(ctx, d.sessionID, abs, updated)

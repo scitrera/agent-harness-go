@@ -8,10 +8,14 @@ import (
 
 	"github.com/scitrera/agent-harness-go/pkg/channel"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
+	"github.com/scitrera/agent-harness-go/pkg/shellcontext"
 	"github.com/scitrera/agent-harness-go/pkg/tools"
 )
 
 func (m *model) applyEvent(event channel.Event) {
+	if event.Type == channel.EventMessageFinal && event.Message != nil {
+		m.observeMessageModel(event.Addr, *event.Message)
+	}
 	eventWorkspaceID := event.Addr.WorkspaceID
 	if eventWorkspaceID == "" {
 		eventWorkspaceID = m.workspaceID
@@ -25,17 +29,12 @@ func (m *model) applyEvent(event channel.Event) {
 		return
 	}
 	switch event.Type {
-	case channel.EventTokenDelta,
-		channel.EventPartAppended,
-		channel.EventPartUpdated,
-		channel.EventMessageFinal,
-		channel.EventToolLifecycle,
-		channel.EventError:
-		m.removeThinking(event.Addr.TaskID)
-	}
-	switch event.Type {
 	case channel.EventMessageStarted:
-		m.markTurnAt(event.Addr.TaskID, eventWorkspaceID, event.Addr.ThreadID, "thinking")
+		if event.Message != nil && shellcontext.IsCommitAck(*event.Message) {
+			m.markTurnAt(event.Addr.TaskID, eventWorkspaceID, event.Addr.ThreadID, "saving context")
+		} else {
+			m.markTurnAt(event.Addr.TaskID, eventWorkspaceID, event.Addr.ThreadID, "thinking")
+		}
 	case channel.EventTokenDelta:
 		kind := m.appendAssistantDelta(event.MessageID, event.Index, event.Addr.TaskID, event.Delta)
 		if kind == rowReasoning {
@@ -55,12 +54,36 @@ func (m *model) applyEvent(event channel.Event) {
 		m.finishTurn(event.Addr.TaskID)
 	case channel.EventToolLifecycle:
 		m.applyToolLifecycle(event)
+	case channel.EventMemoryRecall:
+		m.applyMemoryRecall(event)
 	case channel.EventError:
 		delete(m.turns, event.Addr.TaskID)
 		m.status = "turn error"
 		m.addSystem("turn error")
 	}
+	m.syncThinking(event.Addr.TaskID)
 	m.refreshViewport()
+}
+
+func (m *model) applyMemoryRecall(event channel.Event) {
+	var status channel.MemoryRecallStatus
+	if json.Unmarshal(event.Payload, &status) != nil {
+		return
+	}
+	provider := strings.TrimSpace(status.Provider)
+	if provider == "" {
+		provider = "memory"
+	}
+	var text string
+	switch status.ResultCode {
+	case "error":
+		text = fmt.Sprintf("%s recall unavailable", provider)
+	case "empty":
+		text = fmt.Sprintf("%s recall: no items", provider)
+	default:
+		text = fmt.Sprintf("%s recall: %d item(s) in %dms", provider, status.ItemCount, status.LatencyMS)
+	}
+	m.addSystem(text)
 }
 
 func (m *model) applyForeignWorkspaceEvent(event channel.Event, workspaceID string) {
@@ -75,6 +98,23 @@ func (m *model) applyForeignWorkspaceEvent(event channel.Event, workspaceID stri
 }
 
 func (m *model) applyBackgroundEvent(event channel.Event) {
+	// A command may finish after the user switches threads. Preserve lifecycle
+	// bookkeeping for a real turn on that background thread without confusing
+	// child-thread subagent events (whose task activity belongs to the parent).
+	if activity, ok := m.turns[event.Addr.TaskID]; ok && activity.ThreadID == event.Addr.ThreadID {
+		switch event.Type {
+		case channel.EventMessageStarted:
+			phase := "thinking"
+			if event.Message != nil && shellcontext.IsCommitAck(*event.Message) {
+				phase = "saving context"
+			}
+			m.markTurnAt(event.Addr.TaskID, event.Addr.WorkspaceID, event.Addr.ThreadID, phase)
+		case channel.EventTokenDelta:
+			m.markTurnAt(event.Addr.TaskID, event.Addr.WorkspaceID, event.Addr.ThreadID, "responding")
+		case channel.EventMessageFinal, channel.EventError:
+			m.finishTurn(event.Addr.TaskID)
+		}
+	}
 	var childTool *tools.ToolEvent
 	if event.Type == channel.EventToolLifecycle {
 		if entry, ok := m.recordToolEvent(event); ok {
@@ -102,7 +142,7 @@ func (m *model) applyPartAppended(event channel.Event) {
 	if approval, ok := part.AsApprovalRequest(); ok {
 		m.recordApproval(event.Addr.TaskID, approval.ID, approval.Tool, string(approval.Status), approval.Reason)
 		m.refreshApprovalSelector()
-		m.upsertToolishRow(approval.ID, "approval "+approval.Tool+": "+string(approval.Status))
+		m.upsertToolishRow(approval.ID, "approval "+approval.Tool+": "+string(approval.Status), false)
 		if approval.Status == "" || approval.Status == "pending" {
 			m.markTurnAt(event.Addr.TaskID, event.Addr.WorkspaceID, event.Addr.ThreadID, "approval needed")
 		}
@@ -146,13 +186,13 @@ func (m *model) applyPartUpdated(event channel.Event) {
 	if status == "pending" {
 		m.pendingApprovals[id] = req
 		m.refreshApprovalSelector()
-		m.upsertToolishRow(id, "approval "+req.Tool+": "+status)
+		m.upsertToolishRow(id, "approval "+req.Tool+": "+status, false)
 		return
 	}
 	delete(m.pendingApprovals, id)
 	m.refreshApprovalSelector()
 	m.markTurnAt(event.Addr.TaskID, event.Addr.WorkspaceID, event.Addr.ThreadID, "thinking")
-	m.upsertToolishRow(id, "approval "+req.Tool+": "+status)
+	m.upsertToolishRow(id, "approval "+req.Tool+": "+status, false)
 }
 
 func patchString(patch map[string]json.RawMessage, key string) string {
@@ -189,7 +229,7 @@ func (m *model) applyToolLifecycle(event channel.Event) {
 	if entry.Event.ToolName == tools.SubagentToolName {
 		line = m.applySubagentLifecycle(event.Addr.TaskID, entry.Event)
 	}
-	m.upsertToolishRow(entry.Event.CallID, line)
+	m.upsertToolishRow(entry.Event.CallID, line, true)
 }
 
 func (m *model) recordToolEvent(event channel.Event) (toolEntry, bool) {
@@ -284,32 +324,34 @@ func (m *model) consumeReasoning(taskID string) {
 	m.rows = removeReasoningRows(m.rows, taskID)
 }
 
-func (m *model) upsertToolishRow(id, text string) {
+func (m *model) upsertToolishRow(id, text string, toolCall bool) {
 	if id == "" {
 		id = text
 	}
 	for i := range m.rows {
 		if m.rows[i].Kind == rowTool && m.rows[i].ID == id {
 			m.rows[i].Text = text
+			m.rows[i].ToolCall = m.rows[i].ToolCall || toolCall
 			return
 		}
 	}
-	m.rows = append(m.rows, chatRow{Kind: rowTool, ID: id, Text: text})
+	m.rows = append(m.rows, chatRow{Kind: rowTool, ID: id, Text: text, ToolCall: toolCall})
 }
 
-func (m *model) ensureToolishRow(id, text string) {
+func (m *model) ensureToolishRow(id, text string, toolCall bool) {
 	if id == "" {
 		id = text
 	}
 	for i := range m.rows {
 		if m.rows[i].Kind == rowTool && m.rows[i].ID == id {
+			m.rows[i].ToolCall = m.rows[i].ToolCall || toolCall
 			if strings.TrimSpace(m.rows[i].Text) == "" {
 				m.rows[i].Text = text
 			}
 			return
 		}
 	}
-	m.rows = append(m.rows, chatRow{Kind: rowTool, ID: id, Text: text})
+	m.rows = append(m.rows, chatRow{Kind: rowTool, ID: id, Text: text, ToolCall: toolCall})
 }
 
 func (m *model) applyFinalMessage(message protocol.ChatMessage) {
@@ -324,15 +366,15 @@ func (m *model) applyFinalMessage(message protocol.ChatMessage) {
 			continue
 		}
 		if call, ok := part.AsToolCall(); ok {
-			m.ensureToolishRow(call.ID, toolCallText(call))
+			m.ensureToolishRow(call.ID, toolCallText(call), true)
 			continue
 		}
 		if result, ok := part.AsToolResult(); ok {
-			m.ensureToolishRow(result.CallID, toolResultText(result))
+			m.ensureToolishRow(result.CallID, toolResultText(result), true)
 			continue
 		}
 		if approval, ok := part.AsApprovalRequest(); ok {
-			m.ensureToolishRow(approval.ID, approvalText(approval.Tool, string(approval.Status)))
+			m.ensureToolishRow(approval.ID, approvalText(approval.Tool, string(approval.Status)), false)
 			continue
 		}
 		if sub, ok := part.AsSubagent(); ok {

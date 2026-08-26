@@ -28,6 +28,7 @@ func TestCatalogProviderLoadsWorkspaceSkillsAndMCPDeterministically(t *testing.T
 			_ = json.NewEncoder(w).Encode(map[string]any{"skills": []any{
 				map[string]any{"name": "zeta", "description": "Z", "body": "z body", "enabled": true},
 				map[string]any{
+					"id": "skill-alpha", "revision": 4, "etag": "skill-etag-4", "manifest_hash": "manifest-4", "bundle_hash": "bundle-2",
 					"name": "alpha", "description": "A", "body": "a body", "enabled": true,
 					"allowed_tools": "read_file, shell  read_file",
 					"metadata": map[string]any{"scitrera": map[string]any{
@@ -43,6 +44,7 @@ func TestCatalogProviderLoadsWorkspaceSkillsAndMCPDeterministically(t *testing.T
 			_ = json.NewEncoder(w).Encode(map[string]any{"mcp_servers": []any{
 				map[string]any{"name": "zeta-mcp", "transport": "stdio", "command": "zeta", "enabled": true},
 				map[string]any{
+					"id": "mcp-alpha", "manifest_hash": "mcp-manifest-3",
 					"name": "alpha-mcp", "transport": "stdio", "command": "alpha", "args": []string{"--serve"},
 					"env": map[string]string{"ZED": "2", "ALPHA": "1"}, "enabled": true,
 				},
@@ -74,11 +76,20 @@ func TestCatalogProviderLoadsWorkspaceSkillsAndMCPDeterministically(t *testing.T
 	if !reflect.DeepEqual(alpha.AllowedTools, []string{"read_file", "shell"}) || !reflect.DeepEqual(alpha.Prereqs, []string{"base"}) || alpha.PreferredModel != "reasoner" {
 		t.Fatalf("alpha = %#v", alpha)
 	}
+	if alpha.Source == nil || alpha.Source.System != "memorylayer" || alpha.Source.ID != "skill-alpha" || alpha.Source.Revision != 4 || alpha.Source.ETag != "skill-etag-4" || alpha.Source.ManifestDigest != "manifest-4" || alpha.Source.BundleDigest != "bundle-2" {
+		t.Fatalf("alpha source = %#v", alpha.Source)
+	}
 	if len(got.MCPServers) != 2 || got.MCPServers[0].Name != "alpha-mcp" || got.MCPServers[1].Name != "zeta-mcp" {
 		t.Fatalf("mcp servers = %#v", got.MCPServers)
 	}
 	if !reflect.DeepEqual(got.MCPServers[0].Env, []string{"ALPHA=1", "ZED=2"}) {
 		t.Fatalf("env = %#v", got.MCPServers[0].Env)
+	}
+	if source := got.MCPServers[0].Source; source == nil || source.ID != "mcp-alpha" || source.ManifestDigest != "mcp-manifest-3" {
+		t.Fatalf("mcp source = %#v", source)
+	}
+	if got.Revision == "" {
+		t.Fatal("catalog revision is empty")
 	}
 }
 
@@ -100,5 +111,8 @@ func TestCatalogProviderLoadUsesConfiguredWorkspaceAndToleratesMissingEndpoints(
 	}
 	if len(got.Skills) != 0 || len(got.MCPServers) != 0 {
 		t.Fatalf("catalog = %#v", got)
+	}
+	if got.Revision == "" {
+		t.Fatal("empty catalog must still have a deterministic revision")
 	}
 }

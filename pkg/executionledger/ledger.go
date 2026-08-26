@@ -46,6 +46,7 @@ const (
 	EventModelPinned          EventType = "model_pinned"
 	EventGoalReferenced       EventType = "goal_referenced"
 	EventRefinementReferenced EventType = "refinement_referenced"
+	EventSkillReferenced      EventType = "skill_referenced"
 	EventRecoveryMarker       EventType = "recovery_marker"
 	EventTurnFinished         EventType = "turn_finished"
 )
@@ -185,7 +186,7 @@ func normalizeRequest(request AppendRequest) (AppendRequest, error) {
 		if request.Model == "" {
 			return AppendRequest{}, fmt.Errorf("%w: %s requires a model", ErrInvalid, request.Type)
 		}
-	case EventGoalReferenced, EventRefinementReferenced, EventRecoveryMarker:
+	case EventGoalReferenced, EventRefinementReferenced, EventSkillReferenced, EventRecoveryMarker:
 		if request.Reference == nil {
 			return AppendRequest{}, fmt.Errorf("%w: %s requires a reference", ErrInvalid, request.Type)
 		}
@@ -197,7 +198,7 @@ func validEventType(value EventType) bool {
 	switch value {
 	case EventTurnStarted, EventUserPromptSubmitted, EventModelCallStarted, EventModelCallFinished,
 		EventContextCompacted, EventModelPinned, EventGoalReferenced, EventRefinementReferenced,
-		EventRecoveryMarker, EventTurnFinished:
+		EventSkillReferenced, EventRecoveryMarker, EventTurnFinished:
 		return true
 	default:
 		return false

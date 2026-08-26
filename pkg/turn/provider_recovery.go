@@ -2,17 +2,22 @@ package turn
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"time"
 
+	spec "github.com/scitrera/ecosystem-messaging-spec/go"
+
 	"github.com/scitrera/agent-harness-go/pkg/bootstrap"
 	"github.com/scitrera/agent-harness-go/pkg/compaction"
+	"github.com/scitrera/agent-harness-go/pkg/hooks"
 	modelpkg "github.com/scitrera/agent-harness-go/pkg/model"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 	"github.com/scitrera/agent-harness-go/pkg/provider"
 	"github.com/scitrera/agent-harness-go/pkg/telemetry"
+	"github.com/scitrera/agent-harness-go/pkg/tools"
 )
 
 const (
@@ -68,7 +73,11 @@ func (r *Runner) callWithRecovery(ctx context.Context, addr protocol.MessageAddr
 		} else {
 			messages = resolved
 		}
-		req := provider.ChatRequest{Model: model, Messages: messages, Tools: tt.specs}
+		reasoningEffort, _ := r.effectiveReasoningEffort(addr, model)
+		req := provider.ChatRequest{
+			Model: model, Messages: messages, Tools: tt.specs,
+			ReasoningEffort: reasoningEffort,
+		}
 		response, err := r.invokeProvider(ctx, addr, req, streamer)
 		if err == nil {
 			return response, model, nil
@@ -86,13 +95,27 @@ func (r *Runner) callWithRecovery(ctx context.Context, addr protocol.MessageAddr
 			overflowTrim++
 			slog.WarnContext(ctx, "context overflow; compacting and retrying",
 				slog.String("model", model), slog.Int("attempt", overflowTrim))
+			r.announceRetry(ctx, addr, hooks.TurnEvent{
+				Phase: hooks.PhaseProviderRetry, Addr: addr, Model: model, Err: err,
+				Attempt: overflowTrim, Strategy: hooks.RetryTrimContext, FailureKind: fallbackReason(err),
+			})
 			continue
 		}
 		// 2) transient: context-aware backoff, retry the same model.
 		if isProviderErr && pe.Retryable() && transientRetries < r.maxTransientRetries {
 			transientRetries++
+			wait := r.retryBackoff(transientRetries)
 			slog.WarnContext(ctx, "transient provider failure; backing off and retrying",
-				slog.String("model", model), slog.String("kind", string(pe.Kind)), slog.Int("attempt", transientRetries))
+				slog.String("model", model), slog.String("kind", string(pe.Kind)),
+				slog.Int("attempt", transientRetries), slog.Int64("retry_in_ms", wait.Milliseconds()))
+			// Announce BEFORE sleeping: the whole point is that the user sees the
+			// wait while it is happening. Announcing after it would describe a
+			// pause that has already ended.
+			r.announceRetry(ctx, addr, hooks.TurnEvent{
+				Phase: hooks.PhaseProviderRetry, Addr: addr, Model: model, Err: err,
+				Attempt: transientRetries, RetryIn: wait, Strategy: hooks.RetryBackoff,
+				FailureKind: string(pe.Kind),
+			})
 			if serr := r.backoffSleep(ctx, transientRetries); serr != nil {
 				return provider.ChatResponse{}, model, serr
 			}
@@ -109,11 +132,114 @@ func (r *Runner) callWithRecovery(ctx context.Context, addr protocol.MessageAddr
 		}
 		slog.WarnContext(ctx, "provider failure; falling back to a different model",
 			slog.String("from", model), slog.String("to", next), slog.String("reason", fallbackReason(err)), slog.Any("err", err))
+		r.announceRetry(ctx, addr, hooks.TurnEvent{
+			Phase: hooks.PhaseProviderRetry, Addr: addr, Model: model, Err: err,
+			Attempt: len(modelAttempts), Strategy: hooks.RetryFallbackModel,
+			FailureKind: fallbackReason(err), NextModel: next,
+		})
 		model = next
 		// Fresh per-model recovery budgets (a new model may have a larger context
 		// window and its own transient behavior).
 		overflowTrim = 0
 		transientRetries = 0
+	}
+}
+
+// DynamicProviderRetry is the dynamic-part kind carrying a provider retry to the
+// user's channel. A retry the user cannot see is a session that appears hung:
+// the turn is alive and waiting, but nothing on screen says so or says for how
+// long. Renderers should show the wait as a countdown.
+const DynamicProviderRetry = "provider_retry"
+
+// providerRetryPartID is stable for the whole turn, so successive retries UPDATE
+// one notice rather than stacking a new one per attempt — a five-attempt ladder
+// should read as one status line counting up, not five banners.
+const providerRetryPartID = "provider-retry"
+
+// ProviderRetryPayload is the dynamic part's body. Milliseconds (not a duration
+// string) because the consumer is a countdown timer.
+type ProviderRetryPayload struct {
+	Attempt     int    `json:"attempt"`
+	RetryInMS   int64  `json:"retry_in_ms"`
+	Strategy    string `json:"strategy"`
+	FailureKind string `json:"failure_kind,omitempty"`
+	Model       string `json:"model,omitempty"`
+	NextModel   string `json:"next_model,omitempty"`
+	Message     string `json:"message"`
+}
+
+// announceRetry reports an imminent provider retry to both audiences: the
+// TurnObservers (audit, telemetry, command hooks) and the user's channel.
+// Best-effort on both — a failed announcement must never turn a recoverable
+// provider failure into a failed turn.
+func (r *Runner) announceRetry(ctx context.Context, addr protocol.MessageAddress, ev hooks.TurnEvent) {
+	r.notifyTurn(ctx, ev)
+
+	emitter, ok := tools.PartEmitterFrom(ctx)
+	if !ok || emitter == nil {
+		return
+	}
+	payload := ProviderRetryPayload{
+		Attempt:     ev.Attempt,
+		RetryInMS:   ev.RetryIn.Milliseconds(),
+		Strategy:    string(ev.Strategy),
+		FailureKind: ev.FailureKind,
+		Model:       ev.Model,
+		NextModel:   ev.NextModel,
+		Message:     retryMessage(ev),
+	}
+	part, err := providerRetryPart(payload)
+	if err != nil {
+		slog.WarnContext(ctx, "build provider retry part failed", slog.Any("err", err))
+		return
+	}
+	if err := emitter.UpsertPart(ctx, part); err != nil {
+		slog.WarnContext(ctx, "emit provider retry part failed", slog.Any("err", err))
+	}
+}
+
+// providerRetryPart wraps the payload in a dynamic part carrying a stable
+// top-level id, which is what the PartEmitter keys on to append once and update
+// in place thereafter.
+func providerRetryPart(payload ProviderRetryPayload) (protocol.ContentPart, error) {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return protocol.ContentPart{}, err
+	}
+	raw, err := json.Marshal(struct {
+		Type        string          `json:"type"`
+		Kind        string          `json:"kind"`
+		ID          string          `json:"id"`
+		Interactive bool            `json:"interactive"`
+		Payload     json.RawMessage `json:"payload"`
+	}{
+		Type:    string(spec.PartDynamic),
+		Kind:    DynamicProviderRetry,
+		ID:      providerRetryPartID,
+		Payload: body,
+	})
+	if err != nil {
+		return protocol.ContentPart{}, err
+	}
+	return spec.RawPart(raw)
+}
+
+// retryMessage is the fallback rendering for a channel that does not know the
+// provider_retry kind: every dynamic part should carry text that stands on its
+// own, or an unrecognized kind renders as nothing at all.
+func retryMessage(ev hooks.TurnEvent) string {
+	kind := ev.FailureKind
+	if kind == "" {
+		kind = "provider error"
+	}
+	switch ev.Strategy {
+	case hooks.RetryFallbackModel:
+		return fmt.Sprintf("%s on %s; switching to %s", kind, ev.Model, ev.NextModel)
+	case hooks.RetryTrimContext:
+		return fmt.Sprintf("context overflow on %s; trimming history and retrying (attempt %d)", ev.Model, ev.Attempt)
+	default:
+		return fmt.Sprintf("%s on %s; retrying in %ds (attempt %d)",
+			kind, ev.Model, int(ev.RetryIn.Round(time.Second)/time.Second), ev.Attempt)
 	}
 }
 
@@ -242,8 +368,27 @@ func (r *Runner) invokeProvider(ctx context.Context, addr protocol.MessageAddres
 	}
 	start := time.Now()
 	if sp, ok := p.(StreamingProvider); ok && r.streaming {
-		textIndex := -1
-		onDelta := func(text string) error {
+		// One stream part per channel per provider call, created lazily on that
+		// channel's first token: reasoning models emit the whole trace before the
+		// answer, so the reasoning part is appended first and the text part after
+		// it — the true content order. Indices are sticky for the call (a model
+		// that interleaves the channels appends to the part it already opened)
+		// because the returned response carries ONE block per channel, and the
+		// turn's finalize dedups the reconstruction against it by (type, text) —
+		// splitting a channel across parts would break that match and duplicate
+		// the content.
+		textIndex, reasoningIndex := -1, -1
+		onDelta := func(kind provider.DeltaKind, text string) error {
+			if kind == provider.DeltaReasoning {
+				if reasoningIndex < 0 {
+					idx, derr := streamer.appendReasoningStream(ctx)
+					if derr != nil {
+						return derr
+					}
+					reasoningIndex = idx
+				}
+				return streamer.tokenDelta(ctx, reasoningIndex, text)
+			}
 			if textIndex < 0 {
 				idx, derr := streamer.appendTextStream(ctx)
 				if derr != nil {
@@ -267,12 +412,19 @@ func (r *Runner) invokeProvider(ctx context.Context, addr protocol.MessageAddres
 			respModel = req.Model
 		}
 		latency := time.Since(start)
-		telemetry.RecordLLMResult(span, respModel, resp.Usage.PromptTokens, resp.Usage.CompletionTokens, resp.Usage.TotalTokens, latency)
+		plan := provider.BuildPromptCachePlan(req)
+		telemetry.RecordLLMCachePlan(span, plan.StablePrefixBytes, plan.StablePromptDigest, plan.DynamicSuffixDigest, plan.ToolSchemaDigest)
+		telemetry.RecordLLMResult(span, respModel, resp.Usage.PromptTokens, resp.Usage.CompletionTokens, resp.Usage.TotalTokens, resp.Usage.CachedInputTokens, resp.Usage.CacheCreationInputTokens, latency)
 		slog.InfoContext(ctx, "llm: provider result",
 			slog.String("model", respModel),
 			slog.Int("prompt_tokens", resp.Usage.PromptTokens),
 			slog.Int("completion_tokens", resp.Usage.CompletionTokens),
 			slog.Int("total_tokens", resp.Usage.TotalTokens),
+			slog.Int("cached_input_tokens", resp.Usage.CachedInputTokens),
+			slog.Int("cache_creation_input_tokens", resp.Usage.CacheCreationInputTokens),
+			slog.String("stable_prompt_digest", plan.StablePromptDigest),
+			slog.String("dynamic_suffix_digest", plan.DynamicSuffixDigest),
+			slog.String("tool_schema_digest", plan.ToolSchemaDigest),
 			slog.Int64("latency_ms", latency.Milliseconds()))
 		// Opt-in trace/training capture: record the assembled prompt + response.
 		// Best-effort — a recorder failure must never fail the turn.

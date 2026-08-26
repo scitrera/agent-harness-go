@@ -26,12 +26,29 @@ func (m *model) addThinking(taskID string) {
 	if taskID == "" {
 		return
 	}
+	for i := range m.rows {
+		if m.rows[i].Kind == rowThinking && m.rows[i].TaskID == taskID {
+			return
+		}
+	}
 	m.rows = append(m.rows, chatRow{
 		Kind:   rowThinking,
 		ID:     thinkingRowID(taskID),
 		TaskID: taskID,
 		Text:   thinkingFrames[m.thinkingFrame%len(thinkingFrames)],
 	})
+}
+
+func (m *model) syncThinking(taskID string) {
+	if taskID == "" {
+		return
+	}
+	activity, active := m.turns[taskID]
+	if !active || !m.activityOnCurrentThread(activity) || activity.Phase != "thinking" {
+		m.removeThinking(taskID)
+		return
+	}
+	m.addThinking(taskID)
 }
 
 func (m *model) removeThinking(taskID string) {
@@ -81,7 +98,7 @@ func (m *model) advanceThinking() bool {
 	}
 	for callID, activity := range m.subagents {
 		if activity.Phase == "working" {
-			m.upsertToolishRow(callID, m.renderSubagentActivity(activity))
+			m.upsertToolishRow(callID, m.renderSubagentActivity(activity), true)
 		}
 	}
 	m.refreshViewport()

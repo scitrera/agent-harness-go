@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+
+	spec "github.com/scitrera/ecosystem-messaging-spec/go"
 )
 
 // MemoryHit is a single recalled memory.
@@ -86,12 +88,14 @@ func RegisterMemory(reg *Registry, recaller MemoryRecaller) error {
 		Description: "Semantically search durable memory for relevant facts, decisions, and context from past turns.",
 		Parameters:  json.RawMessage(`{"type":"object","properties":{"query":{"type":"string","description":"What to recall"},"limit":{"type":"integer","description":"Max results (default 10)"}},"required":["query"]}`),
 		Concurrency: ConcurrencyParallelSafe,
+		Effect:      spec.ToolEffectRead,
 	})
 	reg.Describe(Descriptor{
 		Name:        "memory_get",
 		Description: "Fetch a memory by id (from memory_search results) with full detail: content, type/subtype, tags, timestamps, and metadata — including source provenance (e.g. source_filename, source_document_id, page_number) for memories ingested from documents.",
 		Parameters:  json.RawMessage(`{"type":"object","properties":{"id":{"type":"string"}},"required":["id"]}`),
 		Concurrency: ConcurrencyParallelSafe,
+		Effect:      spec.ToolEffectRead,
 	})
 	return nil
 }

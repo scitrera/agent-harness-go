@@ -12,6 +12,11 @@ models:
   - name: replace-with-strong-text-model-id
     tier: strong
     capabilities: {tools: true, vision: false}
+    # Reasoning is a per-request setting, not another model entry. Uncomment
+    # only values supported by the exact upstream model.
+    # reasoning:
+    #   default_effort: high
+    #   allowed_efforts: [medium, high, xhigh, max]
 
   - name: replace-with-vision-model-id
     tier: vision
@@ -25,7 +30,15 @@ models:
 #     base_url: https://api.openai.com/v1
 #     api_key_env: OPENAI_API_KEY
 #     format: openai
+#     # Use "responses" to call /v1/responses through the shared protocol client.
 #   - name: openrouter
 #     base_url: https://openrouter.ai/api/v1
 #     api_key_env: OPENROUTER_API_KEY
 #     format: openai
+#   # ChatGPT Plus/Pro uses the Sahara OSS credential broker instead of an API
+#   # key or configurable URL. From the repository root, run
+#   # `./local-test-oss-e2e.sh auth login --profile personal` after `up`.
+#   - name: chatgpt-subscription
+#     kind: openai_subscription
+#     auth_profile: personal
+#     format: responses

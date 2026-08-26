@@ -19,6 +19,7 @@ var workspaceToolNames = map[string]struct{}{
 	"read_file":    {},
 	"write_file":   {},
 	"edit_file":    {},
+	"apply_patch":  {},
 	"list_dir":     {},
 	"inspect_file": {},
 	"shell":        {},

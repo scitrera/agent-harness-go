@@ -3,6 +3,8 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 
 	"github.com/scitrera/agent-harness-go/pkg/catalog"
 	"github.com/scitrera/agent-harness-go/pkg/sysprompt"
@@ -34,4 +36,16 @@ func env(key, def string) string {
 		return v
 	}
 	return def
+}
+
+func envBool(key string, def bool) bool {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return def
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return def
+	}
+	return parsed
 }

@@ -7,6 +7,7 @@ import (
 
 	"github.com/scitrera/agent-harness-go/pkg/commands"
 	"github.com/scitrera/agent-harness-go/pkg/harness"
+	modelpkg "github.com/scitrera/agent-harness-go/pkg/model"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 )
 
@@ -42,8 +43,9 @@ func (r *Runner) resolveCommand(ctx context.Context, addr protocol.MessageAddres
 // runBuiltin handles a reserved built-in command, returning the synthesized
 // assistant reply (also published via the streamer for Aether egress).
 func (r *Runner) runBuiltin(ctx context.Context, addr protocol.MessageAddress, user protocol.ChatMessage, name, args string) (protocol.ChatMessage, error) {
-	switch commands.CanonicalKey(name) {
-	case "help", "commands":
+	canonical, _ := commands.CanonicalBuiltin(name)
+	switch canonical {
+	case "help":
 		return r.emitReply(ctx, addr, r.helpText())
 	case "clear":
 		var err error
@@ -56,15 +58,17 @@ func (r *Runner) runBuiltin(ctx context.Context, addr protocol.MessageAddress, u
 			return protocol.ChatMessage{}, fmt.Errorf("clear history: %w", err)
 		}
 		return r.emitReply(ctx, addr, "Thread history cleared.")
-	case "model", "models":
+	case "model":
 		return r.runModelCommand(ctx, addr, args)
+	case "reasoning":
+		return r.runReasoningCommand(ctx, addr, args)
 	case "schedules", "runs":
 		if r.scheduledOperations == nil {
 			return r.emitReply(ctx, addr, "Scheduled operations are unavailable: this runtime is not connected to Aether WorkflowEngine.")
 		}
-		text, err := r.scheduledOperations.RunScheduledOperationsCommand(ctx, addr, user, commands.CanonicalKey(name), args)
+		text, err := r.scheduledOperations.RunScheduledOperationsCommand(ctx, addr, user, canonical, args)
 		if err != nil {
-			return protocol.ChatMessage{}, fmt.Errorf("/%s: %w", commands.CanonicalKey(name), err)
+			return protocol.ChatMessage{}, fmt.Errorf("/%s: %w", canonical, err)
 		}
 		return r.emitReply(ctx, addr, text)
 	case "refinements":
@@ -94,23 +98,37 @@ func (r *Runner) runBuiltin(ctx context.Context, addr protocol.MessageAddress, u
 func (r *Runner) helpText() string {
 	var b strings.Builder
 	b.WriteString("Available commands:\n")
-	b.WriteString("  /help          List available commands.\n")
-	b.WriteString("  /commands      List available commands.\n")
-	b.WriteString("  /clear         Clear this thread's history.\n")
-	b.WriteString("  /model         List models, or /model MODEL_NAME to switch.")
-	b.WriteString("\n  /models        List models (alias for /model).")
-	if r.scheduledOperations != nil {
-		b.WriteString("\n  /schedules     Inspect authoritative scheduled-turn definitions.")
-		b.WriteString("\n  /runs          Inspect runs; use /runs --help for filters and cursors.")
-	}
-	if r.refinementAudit != nil {
-		b.WriteString("\n  /refinements   Browse the bounded authoritative refinement audit.")
-	}
-	if r.executionLedger != nil {
-		b.WriteString("\n  /ledger        Browse bounded branch-aware execution events.")
+	for _, definition := range commands.Definitions(commands.SurfaceRunner) {
+		canonical := definition.Name
+		if definition.AliasFor != "" {
+			canonical = definition.AliasFor
+		}
+		switch canonical {
+		case "schedules", "runs":
+			if r.scheduledOperations == nil {
+				continue
+			}
+		case "refinements":
+			if r.refinementAudit == nil {
+				continue
+			}
+		case "ledger":
+			if r.executionLedger == nil {
+				continue
+			}
+		}
+		b.WriteString("  /")
+		b.WriteString(definition.Name)
+		if definition.ArgumentHint != "" {
+			b.WriteString(" ")
+			b.WriteString(definition.ArgumentHint)
+		}
+		b.WriteString("  — ")
+		b.WriteString(definition.Description)
+		b.WriteString("\n")
 	}
 	for _, c := range r.commands.List() {
-		b.WriteString("\n  /")
+		b.WriteString("  /")
 		b.WriteString(c.Name)
 		if c.ArgumentHint != "" {
 			b.WriteString(" ")
@@ -120,8 +138,9 @@ func (r *Runner) helpText() string {
 			b.WriteString("  — ")
 			b.WriteString(c.Description)
 		}
+		b.WriteString("\n")
 	}
-	return b.String()
+	return strings.TrimRight(b.String(), "\n")
 }
 
 // emitReply builds an assistant text message, publishes the start+finalize
@@ -140,6 +159,7 @@ func (r *Runner) emitReply(ctx context.Context, addr protocol.MessageAddress, te
 		Addr:          addr,
 		Content:       []protocol.ContentPart{part},
 	}
+	modelpkg.StampActiveModel(&msg, r.activeModelName(addr))
 	streamer := newTurnStreamer(r.publisher, addr, id, r.now, r.streamFlush)
 	if err := streamer.start(ctx); err != nil {
 		return protocol.ChatMessage{}, fmt.Errorf("publish message_started: %w", err)

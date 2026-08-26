@@ -15,13 +15,27 @@ import (
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 )
 
-// DeltaFunc receives streamed text tokens as they arrive.
-type DeltaFunc func(text string) error
+// DeltaKind identifies which streamed channel a token belongs to. Both channels
+// share ONE ordered callback so the consumer can place them in true content
+// order (reasoning normally precedes the answer text of the same call).
+type DeltaKind int
 
-// ChatStream issues a streaming chat request. Text tokens are delivered to
-// onDelta as they arrive; the accumulated final message (text + tool calls) is
-// returned. If the endpoint does not respond with SSE, it falls back to
-// decoding a normal JSON response (emitting the full text as one delta).
+const (
+	// DeltaText is the model's answer text (OpenAI `delta.content`).
+	DeltaText DeltaKind = iota
+	// DeltaReasoning is the model's thinking trace (`delta.reasoning_content` /
+	// `delta.reasoning`), emitted by reasoning models ahead of the answer.
+	DeltaReasoning
+)
+
+// DeltaFunc receives streamed tokens as they arrive, tagged by channel.
+type DeltaFunc func(kind DeltaKind, text string) error
+
+// ChatStream issues a streaming chat request. Text and reasoning tokens are
+// delivered to onDelta as they arrive; the accumulated final message (reasoning
+// + text + tool calls) is returned. If the endpoint does not respond with SSE,
+// it falls back to decoding a normal JSON response (emitting each text /
+// reasoning part as one delta).
 func (c *OpenAICompatClient) ChatStream(ctx context.Context, chat ChatRequest, onDelta DeltaFunc) (ChatResponse, error) {
 	chat.Stream = true
 	// Opt-in: ask for a trailing usage-only chunk so streamed calls report token
@@ -34,6 +48,9 @@ func (c *OpenAICompatClient) ChatStream(ctx context.Context, chat ChatRequest, o
 		chat.StreamOptions = &StreamOptions{IncludeUsage: true}
 	}
 	chat.Messages = sanitizeTranscript(chat.Messages)
+	if c.sharedClient != nil {
+		return c.sharedChatStream(ctx, chat, onDelta)
+	}
 	body, err := c.encodeRequest(chat)
 	if err != nil {
 		return ChatResponse{}, fmt.Errorf("marshal chat request: %w", err)
@@ -81,8 +98,19 @@ func (c *OpenAICompatClient) ChatStream(ctx context.Context, chat ChatRequest, o
 			return ChatResponse{}, err
 		}
 		for _, part := range out.Message.Content {
+			// Replay the decoded parts as one delta each, in content order, so
+			// the consumer sees the same channel sequence a real SSE stream
+			// would have produced.
+			if part.Type() == protocol.ContentReasoning {
+				if text, ok := reasoningPartText(part); ok && text != "" {
+					if err := onDelta(DeltaReasoning, text); err != nil {
+						return ChatResponse{}, err
+					}
+				}
+				continue
+			}
 			if tp, ok := part.AsText(); ok && tp.Text != "" {
-				if err := onDelta(tp.Text); err != nil {
+				if err := onDelta(DeltaText, tp.Text); err != nil {
 					return ChatResponse{}, err
 				}
 			}
@@ -105,6 +133,7 @@ func parseSSEStream(r io.Reader, onDelta DeltaFunc, reset func(), wantUsage bool
 	var id string
 	role := protocol.RoleAssistant
 	var text strings.Builder
+	var reasoning strings.Builder
 	tools := map[int]*sseToolAccumulator{}
 	var order []int
 	var usage Usage
@@ -135,9 +164,15 @@ func parseSSEStream(r io.Reader, onDelta DeltaFunc, reset func(), wantUsage bool
 				// blocked until a late EOF / the idle-liveness timer fires.
 				FinishReason string `json:"finish_reason"`
 				Delta        struct {
-					Role      protocol.Role `json:"role"`
-					Content   string        `json:"content"`
-					ToolCalls []struct {
+					Role    protocol.Role `json:"role"`
+					Content string        `json:"content"`
+					// Thinking trace of a reasoning model. There is no OpenAI
+					// standard field: DeepSeek/vLLM/SGLang emit
+					// `reasoning_content`, others `reasoning`. Accept both —
+					// whichever arrives is forwarded on the reasoning channel.
+					ReasoningContent string `json:"reasoning_content"`
+					Reasoning        string `json:"reasoning"`
+					ToolCalls        []struct {
 						Index    int    `json:"index"`
 						ID       string `json:"id"`
 						Function struct {
@@ -173,9 +208,22 @@ func parseSSEStream(r io.Reader, onDelta DeltaFunc, reset func(), wantUsage bool
 		if delta.Role != "" {
 			role = delta.Role
 		}
+		// Reasoning first: providers emit the whole thinking trace ahead of the
+		// answer, and within a chunk the trace precedes any content tail.
+		if r := delta.ReasoningContent; r != "" {
+			reasoning.WriteString(r)
+			if err := onDelta(DeltaReasoning, r); err != nil {
+				return ChatResponse{}, err
+			}
+		} else if r := delta.Reasoning; r != "" {
+			reasoning.WriteString(r)
+			if err := onDelta(DeltaReasoning, r); err != nil {
+				return ChatResponse{}, err
+			}
+		}
 		if delta.Content != "" {
 			text.WriteString(delta.Content)
-			if err := onDelta(delta.Content); err != nil {
+			if err := onDelta(DeltaText, delta.Content); err != nil {
 				return ChatResponse{}, err
 			}
 		}
@@ -212,7 +260,17 @@ func parseSSEStream(r io.Reader, onDelta DeltaFunc, reset func(), wantUsage bool
 		return ChatResponse{}, fmt.Errorf("read stream: %w", err)
 	}
 
-	parts := make([]protocol.ContentPart, 0, len(order)+1)
+	parts := make([]protocol.ContentPart, 0, len(order)+2)
+	// Reasoning leads the assembled content, mirroring the order the deltas were
+	// emitted — the turn layer dedups the reconstruction against these parts by
+	// (type, text), so this must match what was streamed.
+	if reasoning.Len() > 0 {
+		part, err := protocol.NewReasoningPart(reasoning.String(), false)
+		if err != nil {
+			return ChatResponse{}, err
+		}
+		parts = append(parts, part)
+	}
 	if text.Len() > 0 {
 		part, err := protocol.NewTextPart(text.String())
 		if err != nil {
@@ -249,4 +307,18 @@ func parseSSEStream(r io.Reader, onDelta DeltaFunc, reset func(), wantUsage bool
 		Model:   respModel,
 		Usage:   usage,
 	}, nil
+}
+
+// reasoningPartText extracts the trace text of a reasoning content part
+// (ok=false for any other part type). The spec exposes typed accessors for
+// text/tool parts but not for reasoning, so decode the body directly.
+func reasoningPartText(p protocol.ContentPart) (string, bool) {
+	if p.Type() != protocol.ContentReasoning {
+		return "", false
+	}
+	var body protocol.ReasoningPart
+	if err := p.Decode(&body); err != nil {
+		return "", false
+	}
+	return body.Text, true
 }

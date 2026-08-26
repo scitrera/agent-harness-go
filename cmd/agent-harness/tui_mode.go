@@ -35,12 +35,17 @@ func runTUI(cfg appConfig) error {
 	modeStateDir := workspaceStateDir(cfg)
 	taskStore := store.NewTaskStateStore(modeStateDir)
 	teamStore := team.NewFileGraphStore(filepath.Join(modeStateDir, "team", "graph.json"))
+	shellPreferences, err := openTUIShellPreferences(cfg)
+	if err != nil {
+		return err
+	}
 	canceller := turncancel.New()
 	rt, err := runtime.NewRunner(tc, runner)
 	if err != nil {
 		return fmt.Errorf("runtime: %w", err)
 	}
 	rt.SetCanceller(canceller)
+	rt.SetSteering(runner.SteeringInbox())
 	var workspaceResolver tui.DirectoryWorkspaceResolver
 	if cfg.dynamicWorkspaces {
 		workspaceResolver, err = newDirectoryWorkspaceResolver(ctx, cfg.workspaceIndexDir, cfg.workspaceID, cfg.workspaceRoot)
@@ -79,6 +84,9 @@ func runTUI(cfg appConfig) error {
 		InitialWorkspaceID: cfg.workspaceID,
 		WorkspaceRoot:      cfg.workspaceRoot,
 		RetainReasoning:    cfg.tuiRetainReasoning,
+		UserID:             cfg.aetherUser,
+		ShellTriggerAgent:  cfg.tuiShellTriggerAgent,
+		ShellPreferences:   shellPreferences,
 	})
 	stop()
 	select {

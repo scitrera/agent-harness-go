@@ -11,6 +11,7 @@ import (
 	"github.com/scitrera/agent-harness-go/pkg/aetherwire"
 	"github.com/scitrera/agent-harness-go/pkg/approval"
 	"github.com/scitrera/agent-harness-go/pkg/channel"
+	modelpkg "github.com/scitrera/agent-harness-go/pkg/model"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 	workspacepkg "github.com/scitrera/agent-harness-go/pkg/workspace"
 )
@@ -223,6 +224,7 @@ func TestOnMessageUsesFinalizedMessageAddress(t *testing.T) {
 		Role: protocol.RoleAssistant,
 		Addr: protocol.MessageAddress{ThreadID: "thread-9", TaskID: "task-9"},
 	}
+	modelpkg.StampActiveModel(&final, "gpt-5.6-sol")
 	payload, err := aetherwire.StreamEnvelope(
 		aetherwire.TurnMeta{AppWorkspace: "default", ThreadID: "thread-9"},
 		spec.MessageFinalizedEvent{MessageID: final.ID, Message: final},
@@ -236,6 +238,9 @@ func TestOnMessageUsesFinalizedMessageAddress(t *testing.T) {
 	event := <-c.Events()
 	if event.Addr.ThreadID != "thread-9" || event.Addr.TaskID != "task-9" {
 		t.Fatalf("addr = %+v, want the finalized message's own address", event.Addr)
+	}
+	if event.Message == nil || modelpkg.ActiveModelFromMessage(*event.Message) != "gpt-5.6-sol" {
+		t.Fatalf("finalized message lost active model metadata: %#v", event.Message)
 	}
 }
 

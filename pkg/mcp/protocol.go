@@ -15,6 +15,23 @@ type Tool struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description,omitempty"`
 	InputSchema json.RawMessage `json:"inputSchema,omitempty"`
+	Annotations ToolAnnotations `json:"annotations,omitempty"`
+}
+
+// ToolAnnotations are the server's self-reported behavioral hints. They are
+// UNTRUSTED — a server declaring a destructive tool read-only would otherwise
+// talk its way past a read-only approval tier — so consumers may only act on
+// them in the restrictive direction: honor readOnlyHint:true as a downgrade to
+// read, and treat everything else (absent, false, or unparseable) as the
+// stricter class.
+type ToolAnnotations struct {
+	ReadOnlyHint *bool `json:"readOnlyHint,omitempty"`
+}
+
+// IsReadOnly reports an explicit readOnlyHint:true. Absent or false is not
+// read-only.
+func (a ToolAnnotations) IsReadOnly() bool {
+	return a.ReadOnlyHint != nil && *a.ReadOnlyHint
 }
 
 type Content struct {

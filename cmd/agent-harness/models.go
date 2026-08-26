@@ -44,3 +44,16 @@ func resolveAppModel(fallback string, registry *modelpkg.Registry) string {
 	}
 	return name
 }
+
+func modelRegistryUsesProviderKind(registry *modelpkg.Registry, kind string) bool {
+	if registry == nil || kind == "" {
+		return false
+	}
+	for _, model := range registry.List() {
+		provider, ok := registry.ProviderFor(model.Name)
+		if ok && provider.Kind == kind {
+			return true
+		}
+	}
+	return false
+}

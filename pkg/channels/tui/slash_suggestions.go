@@ -4,46 +4,32 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/scitrera/agent-harness-go/pkg/commands"
 )
 
-var localSlashCommandSuggestions = []selectionItem{
-	{Value: "/help", Label: "/help", Description: "List commands"},
-	{Value: "/commands", Label: "/commands", Description: "List commands"},
-	{Value: "/model", Label: "/model", Description: "List or switch models"},
-	{Value: "/models", Label: "/models", Description: "List models"},
-	{Value: "/schedules", Label: "/schedules", Description: "Inspect scheduled turns"},
-	{Value: "/runs", Label: "/runs", Description: "Inspect scheduled runs"},
-	{Value: "/refinements", Label: "/refinements", Description: "Browse refinement audit"},
-	{Value: "/thread", Label: "/thread", Description: "Manage threads"},
-	{Value: "/threads", Label: "/threads", Description: "Select a thread"},
-	{Value: "/status", Label: "/status", Description: "Show status"},
-	{Value: "/pwd", Label: "/pwd", Description: "Show working directory"},
-	{Value: "/cd", Label: "/cd", Description: "Change working directory"},
-	{Value: "/cancel", Label: "/cancel", Description: "Cancel active task"},
-	{Value: "/clear", Label: "/clear", Description: "Clear current thread"},
-	{Value: "/tools", Label: "/tools", Description: "Inspect tool activity"},
-	{Value: "/attach", Label: "/attach", Description: "Attach an image from the working directory"},
-	{Value: "/attachments", Label: "/attachments", Description: "Show queued images"},
-	{Value: "/tasks", Label: "/tasks", Description: "Manage task state"},
-	{Value: "/task", Label: "/task", Description: "Manage task state"},
-	{Value: "/team", Label: "/team", Description: "Manage team graph"},
-	{Value: "/agents", Label: "/agents", Description: "Inspect agents"},
-	{Value: "/agent", Label: "/agent", Description: "Inspect agents"},
-	{Value: "/approvals", Label: "/approvals", Description: "Review approvals"},
-	{Value: "/approve", Label: "/approve", Description: "Approve request"},
-	{Value: "/deny", Label: "/deny", Description: "Deny request"},
-	{Value: "/permissions", Label: "/permissions", Description: "Manage permissions"},
-	{Value: "/permission", Label: "/permission", Description: "Manage permissions"},
-	{Value: "/requirements", Label: "/requirements", Description: "Show requirements"},
-	{Value: "/mcp", Label: "/mcp", Description: "Show MCP state"},
-	{Value: "/hooks", Label: "/hooks", Description: "Show hooks"},
-	{Value: "/worldstate", Label: "/worldstate", Description: "Show world state"},
-	{Value: "/compact", Label: "/compact", Description: "Compact context"},
-	{Value: "/quit", Label: "/quit", Description: "Quit TUI"},
-	{Value: "/exit", Label: "/exit", Description: "Quit TUI"},
-}
+var localSlashCommandSuggestions = func() []selectionItem {
+	definitions := commands.Definitions(commands.SurfaceTUI)
+	items := make([]selectionItem, 0, len(definitions))
+	for _, definition := range definitions {
+		value := "/" + definition.Name
+		label := value
+		if definition.ArgumentHint != "" {
+			label += " " + definition.ArgumentHint
+		}
+		items = append(items, selectionItem{Value: value, Label: label, Description: definition.Description})
+	}
+	return items
+}()
 
 var slashSubcommands = map[string][]selectionItem{
+	"shell-response": {
+		{Value: "status", Label: "status", Description: "Show effective idle-shell response policy"},
+		{Value: "on", Label: "on", Description: "Enable responses for this thread"},
+		{Value: "off", Label: "off", Description: "Disable responses for this thread"},
+		{Value: "default", Label: "default", Description: "Inherit the user/global policy"},
+		{Value: "user", Label: "user", Description: "Set the per-user policy"},
+	},
 	"model": {
 		{Value: "list", Label: "list", Description: "List available models"},
 		{Value: "switch", Label: "switch", Description: "Switch model"},
@@ -219,6 +205,12 @@ func (m model) matchingSlashArguments(input string) []selectionItem {
 			subcommand = strings.ToLower(fields[1])
 		}
 		switch {
+		case command == "shell-response" && subcommand == "user":
+			candidates = []selectionItem{
+				{Value: "on", Label: "on", Description: "Enable idle-shell responses for this user"},
+				{Value: "off", Label: "off", Description: "Disable idle-shell responses for this user"},
+				{Value: "default", Label: "default", Description: "Inherit the global policy"},
+			}
 		case command == "thread" && containsString([]string{"switch", "delete", "clear", "rename"}, subcommand):
 			for _, session := range m.threads {
 				description := session.Title

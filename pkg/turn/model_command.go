@@ -139,5 +139,8 @@ func modelTags(m modelpkg.Model) string {
 	if m.Tier != "" {
 		tags = append(tags, m.Tier)
 	}
+	if m.Reasoning.DefaultEffort != "" {
+		tags = append(tags, "reasoning="+m.Reasoning.DefaultEffort)
+	}
 	return strings.Join(tags, ", ")
 }

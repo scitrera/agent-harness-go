@@ -90,6 +90,18 @@ func (r *Registry) Describe(d Descriptor) {
 	r.descriptors[d.Name] = d
 }
 
+// EffectOf returns a registered tool's declared portable effect. The bool is
+// false for an unknown tool or one registered without a descriptor/effect, so a
+// caller can distinguish "declared read" from "never said" — a policy that
+// conflated the two would auto-approve every unclassified tool.
+func (r *Registry) EffectOf(name string) (spec.ToolEffect, bool) {
+	d, ok := r.descriptors[name]
+	if !ok || d.Effect == "" {
+		return "", false
+	}
+	return d.Effect, true
+}
+
 // Descriptors returns descriptors for all registered tools, sorted by name.
 // Tools registered without an explicit descriptor get a name-only entry so the
 // model still learns they exist.

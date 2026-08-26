@@ -28,8 +28,21 @@ const (
 	EventMessageFinal   EventType = "message_final"
 	EventToolResult     EventType = "tool_result"
 	EventToolLifecycle  EventType = "tool_lifecycle"
+	EventMemoryRecall   EventType = "memory_recall"
 	EventError          EventType = "error"
 )
+
+// MemoryRecallStatus is a content-free account of one automatic memory lookup.
+// It is safe to expose to operator/UI surfaces: recalled text and memory IDs are
+// deliberately absent.
+type MemoryRecallStatus struct {
+	Provider    string `json:"provider"`
+	WorkspaceID string `json:"workspace_id,omitempty"`
+	Scope       string `json:"scope"`
+	ItemCount   int    `json:"item_count"`
+	LatencyMS   int64  `json:"latency_ms"`
+	ResultCode  string `json:"result_code"`
+}
 
 // Event is an egress stream event. Different fields are populated per Type:
 // Message for started/final; MessageID+Index+Part for part_appended;
@@ -73,6 +86,24 @@ type Enqueuer interface {
 // Publisher emits egress stream events for a turn.
 type Publisher interface {
 	PublishEvent(ctx context.Context, event Event) error
+}
+
+// SteeringRejector tells the sender that a steering message never reached the
+// turn it was aimed at.
+//
+// A steering send is an interjection into a turn already in flight. When there
+// is no such turn — it finished between the send and its arrival, or between
+// being parked and the turn's last drain — the message cannot do what the user
+// asked. Running it as a turn of its own would be a different action than the
+// one requested, and on a host where task identity carries authority it would
+// also be a turn with none: a steering send deliberately owns no task, so it has
+// no per-message grant, tool-host route, or execution binding.
+//
+// So the message is rejected and the sender is told, rather than quietly
+// becoming something else. Implementations must be non-blocking. A transport
+// that cannot reach the sender simply does not implement this.
+type SteeringRejector interface {
+	RejectSteering(ctx context.Context, in Inbound, reason string)
 }
 
 // Channel is a bidirectional transport (ingress + egress).

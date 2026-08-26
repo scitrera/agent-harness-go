@@ -98,6 +98,8 @@ func eventTypeFor(observed hooks.TurnEvent) (EventType, bool) {
 			return EventGoalReferenced, true
 		case "refinement-store":
 			return EventRefinementReferenced, true
+		case "skill-catalog":
+			return EventSkillReferenced, true
 		default:
 			return "", false
 		}

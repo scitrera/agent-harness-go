@@ -37,7 +37,7 @@ const (
 	ExecutionAuthorityDurableTask = "durable_task"
 	ExecutionUncertainInterrupt   = "interrupt_without_replay"
 
-	maxExecutionEnvelopeBytes   = 64 << 10
+	maxExecutionEnvelopeBytes   = 128 << 10
 	maxExecutionIdentifierRunes = 1024
 )
 
@@ -87,23 +87,26 @@ type ExecutionOwnership struct {
 // instructions, or authority credentials. A backend may carry the encoded
 // envelope as its task payload while retaining ordinary metadata for indexing.
 type ExecutionEnvelope struct {
-	SchemaRevision  uint32                       `json:"schema_revision"`
-	Schema          string                       `json:"schema"`
-	ExecutionID     string                       `json:"execution_id"`
-	WorkspaceID     string                       `json:"workspace_id"`
-	ParentSessionID string                       `json:"parent_session_id"`
-	ChildSessionID  string                       `json:"child_session_id"`
-	ParentTaskID    string                       `json:"parent_task_id,omitempty"`
-	ParentMessageID string                       `json:"parent_message_id,omitempty"`
-	InvocationID    string                       `json:"invocation_id,omitempty"`
-	Depth           int                          `json:"depth"`
-	Background      bool                         `json:"background,omitempty"`
-	ExecutionScope  *workspacepkg.ExecutionScope `json:"execution_scope,omitempty"`
-	Input           ExecutionArtifactRef         `json:"input"`
-	Result          ExecutionArtifactRef         `json:"result"`
-	Checkpoint      ExecutionArtifactRef         `json:"checkpoint"`
-	Policy          ExecutionPolicy              `json:"policy"`
-	Ownership       ExecutionOwnership           `json:"ownership"`
+	SchemaRevision     uint32                       `json:"schema_revision"`
+	Schema             string                       `json:"schema"`
+	ExecutionID        string                       `json:"execution_id"`
+	WorkspaceID        string                       `json:"workspace_id"`
+	CatalogRevision    string                       `json:"catalog_revision,omitempty"`
+	OutputSchema       json.RawMessage              `json:"output_schema,omitempty"`
+	OutputSchemaDigest string                       `json:"output_schema_digest,omitempty"`
+	ParentSessionID    string                       `json:"parent_session_id"`
+	ChildSessionID     string                       `json:"child_session_id"`
+	ParentTaskID       string                       `json:"parent_task_id,omitempty"`
+	ParentMessageID    string                       `json:"parent_message_id,omitempty"`
+	InvocationID       string                       `json:"invocation_id,omitempty"`
+	Depth              int                          `json:"depth"`
+	Background         bool                         `json:"background,omitempty"`
+	ExecutionScope     *workspacepkg.ExecutionScope `json:"execution_scope,omitempty"`
+	Input              ExecutionArtifactRef         `json:"input"`
+	Result             ExecutionArtifactRef         `json:"result"`
+	Checkpoint         ExecutionArtifactRef         `json:"checkpoint"`
+	Policy             ExecutionPolicy              `json:"policy"`
+	Ownership          ExecutionOwnership           `json:"ownership"`
 }
 
 // NewExecutionEnvelope builds the immutable descriptor used by both the local
@@ -111,6 +114,16 @@ type ExecutionEnvelope struct {
 func NewExecutionEnvelope(req Request, workspaceID, childSessionID string, background bool) (ExecutionEnvelope, error) {
 	workspaceID = strings.TrimSpace(workspaceID)
 	childSessionID = strings.TrimSpace(childSessionID)
+	outputContract, err := CompileOutputSchema(req.OutputSchema)
+	if err != nil {
+		return ExecutionEnvelope{}, err
+	}
+	var outputSchema json.RawMessage
+	var outputSchemaDigest string
+	if outputContract != nil {
+		outputSchema = outputContract.Raw()
+		outputSchemaDigest = outputContract.Digest()
+	}
 	executionID := "ahx-v1-" + hashExecutionIdentity(
 		workspaceID,
 		req.Parent.ThreadID,
@@ -121,21 +134,26 @@ func NewExecutionEnvelope(req Request, workspaceID, childSessionID string, backg
 		strconv.Itoa(req.Depth),
 		strconv.FormatBool(background),
 		digestExecutionScope(req.ExecutionScope),
+		strings.TrimSpace(req.CatalogRevision),
+		outputSchemaDigest,
 	)
 	policy := executionPolicy(req)
 	envelope := ExecutionEnvelope{
-		SchemaRevision:  ExecutionEnvelopeSchemaRevision,
-		Schema:          ExecutionEnvelopeSchema,
-		ExecutionID:     executionID,
-		WorkspaceID:     workspaceID,
-		ParentSessionID: strings.TrimSpace(req.Parent.ThreadID),
-		ChildSessionID:  childSessionID,
-		ParentTaskID:    strings.TrimSpace(req.Parent.TaskID),
-		ParentMessageID: strings.TrimSpace(req.ParentMessageID),
-		InvocationID:    strings.TrimSpace(req.InvocationID),
-		Depth:           req.Depth,
-		Background:      background,
-		ExecutionScope:  cloneExecutionScope(req.ExecutionScope),
+		SchemaRevision:     ExecutionEnvelopeSchemaRevision,
+		Schema:             ExecutionEnvelopeSchema,
+		ExecutionID:        executionID,
+		WorkspaceID:        workspaceID,
+		CatalogRevision:    strings.TrimSpace(req.CatalogRevision),
+		OutputSchema:       outputSchema,
+		OutputSchemaDigest: outputSchemaDigest,
+		ParentSessionID:    strings.TrimSpace(req.Parent.ThreadID),
+		ChildSessionID:     childSessionID,
+		ParentTaskID:       strings.TrimSpace(req.Parent.TaskID),
+		ParentMessageID:    strings.TrimSpace(req.ParentMessageID),
+		InvocationID:       strings.TrimSpace(req.InvocationID),
+		Depth:              req.Depth,
+		Background:         background,
+		ExecutionScope:     cloneExecutionScope(req.ExecutionScope),
 		Input: ExecutionArtifactRef{
 			Backend:     ExecutionBackendHistory,
 			Kind:        ExecutionArtifactMessage,
@@ -194,6 +212,8 @@ func (e ExecutionEnvelope) Validate() error {
 		strconv.Itoa(e.Depth),
 		strconv.FormatBool(e.Background),
 		digestExecutionScope(e.ExecutionScope),
+		e.CatalogRevision,
+		e.OutputSchemaDigest,
 	}
 	wantExecutionID := "ahx-v1-" + hashExecutionIdentity(identity...)
 	if e.ExecutionID != wantExecutionID {
@@ -259,6 +279,22 @@ func (e ExecutionEnvelope) Validate() error {
 			return errors.New("subagent: execution scope workspace mismatch")
 		}
 	}
+	if e.CatalogRevision != "" {
+		if err := validateDigest(e.CatalogRevision); err != nil {
+			return fmt.Errorf("subagent: invalid catalog revision: %w", err)
+		}
+	}
+	outputContract, err := CompileOutputSchema(e.OutputSchema)
+	if err != nil {
+		return err
+	}
+	if outputContract == nil {
+		if e.OutputSchemaDigest != "" {
+			return errors.New("subagent: output schema digest has no schema")
+		}
+	} else if e.OutputSchemaDigest != outputContract.Digest() {
+		return errors.New("subagent: output schema digest mismatch")
+	}
 	if e.Policy.MaxTurns < 0 {
 		return errors.New("subagent: execution max turns must not be negative")
 	}
@@ -297,6 +333,20 @@ func (e ExecutionEnvelope) VerifyPolicy(req Request) error {
 	}
 	if !workspacepkg.ExecutionScopesEqual(e.ExecutionScope, req.ExecutionScope) {
 		return errors.New("subagent: workspace execution scope snapshot mismatch")
+	}
+	if e.CatalogRevision != strings.TrimSpace(req.CatalogRevision) {
+		return errors.New("subagent: catalog revision snapshot mismatch")
+	}
+	reqContract, err := CompileOutputSchema(req.OutputSchema)
+	if err != nil {
+		return err
+	}
+	reqDigest := ""
+	if reqContract != nil {
+		reqDigest = reqContract.Digest()
+	}
+	if e.OutputSchemaDigest != reqDigest {
+		return errors.New("subagent: output schema snapshot mismatch")
 	}
 	return nil
 }

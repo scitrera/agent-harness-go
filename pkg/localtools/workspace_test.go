@@ -34,6 +34,24 @@ func Test_Workspace_EditFile_changes_SOUL_name_when_user_requests_rename(t *test
 	}
 }
 
+func Test_Workspace_EditFile_rejects_ambiguous_old_text(t *testing.T) {
+	ctx := context.Background()
+	ws := newTestWorkspace(t)
+	if err := ws.WriteFile(ctx, "repeated.txt", "same\nsame\n"); err != nil {
+		t.Fatal(err)
+	}
+
+	err := ws.EditFile(ctx, "repeated.txt", "same", "changed")
+
+	if !errors.Is(err, ErrOldTextNotUnique) {
+		t.Fatalf("expected ErrOldTextNotUnique, got %v", err)
+	}
+	got, readErr := ws.ReadFile(ctx, "repeated.txt", 0)
+	if readErr != nil || got != "same\nsame\n" {
+		t.Fatalf("ambiguous edit changed file: %q, %v", got, readErr)
+	}
+}
+
 func Test_Workspace_ReadFile_rejects_path_traversal(t *testing.T) {
 	ctx := context.Background()
 	ws := newTestWorkspace(t)
@@ -240,6 +258,24 @@ func Test_Workspace_GrantWorkspaceDirectory_allowsOnlySelectedProjectWrites(t *t
 	}
 	if err := ws.WriteFile(ctx, filepath.Join(unselected, "blocked.txt"), "no"); !errors.Is(err, ErrPathOutsideRoot) {
 		t.Fatalf("unselected project write was not rejected: %v", err)
+	}
+}
+
+func Test_Workspace_WriteFile_rejects_missing_path_below_symlink_escape(t *testing.T) {
+	ctx := context.Background()
+	ws := newTestWorkspace(t)
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(ws.root, "linked")); err != nil {
+		t.Fatal(err)
+	}
+
+	err := ws.WriteFile(ctx, "linked/new/escaped.txt", "no")
+
+	if !errors.Is(err, ErrPathOutsideRoot) {
+		t.Fatalf("expected symlink escape rejection, got %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(outside, "new", "escaped.txt")); !os.IsNotExist(statErr) {
+		t.Fatalf("escaped file unexpectedly exists: %v", statErr)
 	}
 }
 

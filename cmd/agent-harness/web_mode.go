@@ -56,6 +56,7 @@ func runWeb(cfg appConfig, addr string, openBrowser bool) error {
 		return fmt.Errorf("runtime: %w", err)
 	}
 	rt.SetCanceller(canceller)
+	rt.SetSteering(runner.SteeringInbox())
 
 	srv := web.NewWithSessionService(wc, st.history, sessions, canceller, sessionTransport.Coordinator)
 	httpSrv := &http.Server{Addr: addr, Handler: srv.Handler()}

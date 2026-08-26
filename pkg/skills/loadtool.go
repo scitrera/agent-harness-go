@@ -375,7 +375,16 @@ func LoadTool(reg *Registry) tools.HandlerFunc {
 		if realize, ok := tools.SkillRealizerFrom(ctx); ok {
 			_, _ = realize(ctx, order)
 		}
-		return jsonResult(req, res, false)
+		result, err := jsonResult(req, res, false)
+		if err != nil {
+			return tools.Result{}, err
+		}
+		for _, loaded := range out {
+			result.Metadata.References = append(result.Metadata.References, tools.ResultReference{
+				System: "skill-catalog", Kind: loaded.Role, ID: loaded.Name,
+			})
+		}
+		return result, nil
 	}
 }
 

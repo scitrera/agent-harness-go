@@ -41,6 +41,23 @@ func TestBuildRegistry_ParsesPreferredModel(t *testing.T) {
 	}
 }
 
+func TestLoadToolReturnsAuditableSkillReferences(t *testing.T) {
+	reg := BuildRegistry([]catalog.SkillSpec{{Name: "review", Content: "instructions", Enabled: true}}, t.TempDir())
+	result, err := LoadTool(reg)(context.Background(), tools.Request{
+		CallID: "load-1", Name: LoadToolName, Arguments: json.RawMessage(`{"name":"review"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Metadata.References) != 1 {
+		t.Fatalf("references = %#v", result.Metadata.References)
+	}
+	reference := result.Metadata.References[0]
+	if reference.System != "skill-catalog" || reference.Kind != "target" || reference.ID != "review" {
+		t.Fatalf("reference = %#v", reference)
+	}
+}
+
 // A MemoryLayer catalog strips SKILL.md frontmatter into a metadata field, so the
 // Content is frontmatter-less and prereqs/preferred_model arrive on the spec. Those
 // must be used (else no auto prereq load, no model switch for ML skills).

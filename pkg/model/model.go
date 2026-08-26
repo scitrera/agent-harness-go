@@ -36,6 +36,9 @@ type Model struct {
 	Capabilities Capabilities `json:"capabilities" yaml:"capabilities"`
 	Tier         string       `json:"tier,omitempty" yaml:"tier,omitempty"`
 	Provider     string       `json:"provider,omitempty" yaml:"provider,omitempty"`
+	// Reasoning declares the operator default and optional allowlist for
+	// request-scoped reasoning effort. It does not change the upstream model ID.
+	Reasoning ReasoningConfig `json:"reasoning,omitzero" yaml:"reasoning,omitempty"`
 	// Context is the model's total context window in tokens (0 = unknown). Used to
 	// budget compaction to the model actually being called — critical when a turn
 	// escalates from a large-context orchestrator to a smaller-context vision model,
@@ -45,16 +48,18 @@ type Model struct {
 
 // ProviderConfig is a named upstream a model can be routed to: a base URL, an
 // inline API key (APIKey) or the env var holding it (APIKeyEnv), and a wire
-// Format ("openai"/"native"). It is pure data — construction of an actual
+// Format ("openai"/"responses"/"native"). It is pure data — construction of an actual
 // provider client from it lives in the turn package (which imports provider),
 // keeping this package free of a provider dependency. Missing fields are filled
 // from the runner's env default by the resolver, not here.
 type ProviderConfig struct {
-	Name      string `json:"name" yaml:"name"`
-	BaseURL   string `json:"base_url,omitempty" yaml:"base_url,omitempty"`
-	APIKey    string `json:"api_key,omitempty" yaml:"api_key,omitempty"`
-	APIKeyEnv string `json:"api_key_env,omitempty" yaml:"api_key_env,omitempty"`
-	Format    string `json:"format,omitempty" yaml:"format,omitempty"`
+	Name        string `json:"name" yaml:"name"`
+	Kind        string `json:"kind,omitempty" yaml:"kind,omitempty"`
+	BaseURL     string `json:"base_url,omitempty" yaml:"base_url,omitempty"`
+	APIKey      string `json:"api_key,omitempty" yaml:"api_key,omitempty"`
+	APIKeyEnv   string `json:"api_key_env,omitempty" yaml:"api_key_env,omitempty"`
+	AuthProfile string `json:"auth_profile,omitempty" yaml:"auth_profile,omitempty"`
+	Format      string `json:"format,omitempty" yaml:"format,omitempty"`
 }
 
 // Registry is the set of available models + the default. Built from config

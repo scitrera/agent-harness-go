@@ -47,3 +47,48 @@ func TestMergeSkillsFilesystemOverrideWinsWithoutReordering(t *testing.T) {
 		t.Fatal("merged catalog retained caller-owned slice")
 	}
 }
+
+func TestComputedRevisionIgnoresPriorRevisionAndTracksContent(t *testing.T) {
+	first, err := WithComputedRevision(Catalog{Revision: "stale", Skills: []SkillSpec{{Name: "alpha", Content: "one", Enabled: true}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := WithComputedRevision(Catalog{Revision: "different", Skills: []SkillSpec{{Name: "alpha", Content: "one", Enabled: true}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed, err := WithComputedRevision(Catalog{Skills: []SkillSpec{{Name: "alpha", Content: "two", Enabled: true}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Revision == "" || first.Revision != second.Revision || first.Revision == changed.Revision {
+		t.Fatalf("revisions: first=%q second=%q changed=%q", first.Revision, second.Revision, changed.Revision)
+	}
+	ctx := WithRevision(context.Background(), first.Revision)
+	if got, ok := RevisionFrom(ctx); !ok || got != first.Revision {
+		t.Fatalf("bound revision = %q, %v", got, ok)
+	}
+}
+
+func TestComputedRevisionTracksAuthoritativeResourceRevision(t *testing.T) {
+	first, err := WithComputedRevision(Catalog{Skills: []SkillSpec{{
+		Name: "alpha", Content: "same", Enabled: true,
+		Source: &ResourceRevision{System: "memorylayer", ID: "skill-a", Revision: 1, ETag: "etag-1", ManifestDigest: "manifest"},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := first
+	second.Revision = ""
+	second.Skills = append([]SkillSpec(nil), first.Skills...)
+	source := *second.Skills[0].Source
+	source.ETag = "etag-2"
+	second.Skills[0].Source = &source
+	second, err = WithComputedRevision(second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Revision == second.Revision {
+		t.Fatalf("catalog revision did not rotate on authoritative ETag change: %q", first.Revision)
+	}
+}

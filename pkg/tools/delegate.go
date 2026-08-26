@@ -20,6 +20,14 @@ type FileDelegate interface {
 	EditFile(ctx context.Context, path, oldText, newText string) error
 }
 
+// PatchFileDelegate is an optional extension for transports that can preserve
+// apply_patch's multi-file validation and commit semantics. When a FileDelegate
+// is present without this extension, apply_patch fails closed instead of
+// bypassing the editor/remote filesystem and mutating the local workspace.
+type PatchFileDelegate interface {
+	ApplyPatch(ctx context.Context, operations []localtools.PatchOperation) ([]localtools.PatchChange, error)
+}
+
 // CommandDelegate overrides RunCommand for a turn: when one is on ctx
 // (WithCommandDelegate), the shell/python handlers run the command through it
 // (e.g. the ACP terminal/* client capability) instead of cfg.Workspace. The

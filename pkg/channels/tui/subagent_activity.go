@@ -84,7 +84,7 @@ func (m *model) applySubagentPart(taskID string, part protocol.SubagentPart) {
 		activity.Phase = "working"
 	}
 	m.subagents[activity.CallID] = activity
-	m.upsertToolishRow(activity.CallID, m.renderSubagentActivity(activity))
+	m.upsertToolishRow(activity.CallID, m.renderSubagentActivity(activity), true)
 }
 
 func (m *model) applySubagentChildEvent(event channel.Event, childTool *tools.ToolEvent) {
@@ -134,7 +134,7 @@ func (m *model) applySubagentChildEvent(event channel.Event, childTool *tools.To
 		activity.Latest = "child turn error"
 	}
 	m.subagents[callID] = activity
-	m.upsertToolishRow(callID, m.renderSubagentActivity(activity))
+	m.upsertToolishRow(callID, m.renderSubagentActivity(activity), true)
 }
 
 func (m model) findSubagentActivity(taskID, threadID string) (string, subagentActivity) {

@@ -12,6 +12,7 @@ import (
 	"github.com/scitrera/agent-harness-go/pkg/compaction"
 	"github.com/scitrera/agent-harness-go/pkg/harness"
 	"github.com/scitrera/agent-harness-go/pkg/hooks"
+	modelpkg "github.com/scitrera/agent-harness-go/pkg/model"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 	"github.com/scitrera/agent-harness-go/pkg/subagent"
 	"github.com/scitrera/agent-harness-go/pkg/telemetry"
@@ -60,6 +61,21 @@ func (r *Runner) runProviderLoop(ctx context.Context, session *harness.Session, 
 	// assistant message so the persisted turn carries its own accounting.
 	var tu turnUsage
 	for {
+		// Deliver any message the user sent while this turn was running. This is
+		// the input-assembly boundary: the previous iteration's tool results are
+		// already appended, so a user-role message added here lands after them —
+		// the ordering providers require — and the next provider call sees it.
+		//
+		// Steering never cancels work in flight; tool calls already issued ran to
+		// completion above. A user who wants them abandoned uses cancel.
+		escalate, err := r.deliverSteering(ctx, session, addr, required)
+		if err != nil {
+			return protocol.ChatMessage{}, err
+		}
+		if escalate && !required.Vision {
+			required.Vision = true
+			model = r.escalateModel(ctx, addr, user, required, model)
+		}
 		if err := execution.providerPending(ctx, toolIterations); err != nil {
 			return protocol.ChatMessage{}, err
 		}
@@ -100,6 +116,11 @@ func (r *Runner) runProviderLoop(ctx context.Context, session *harness.Session, 
 		if assistant.Addr.ThreadID == "" {
 			assistant.Addr = addr
 		}
+		// The model pin/default is worker-owned state. Carry it on every assistant
+		// message so remote clients can render the authoritative per-thread model
+		// rather than their own registry default. Stamp before Session.Append so
+		// history snapshots retain it as well as the live finalized event.
+		modelpkg.StampActiveModel(&assistant, r.activeModelName(addr))
 		// Stamp the per-turn world-state (turn counter + invoked skills) onto the
 		// assistant message so it persists in history and survives compaction. The
 		// final assistant of the turn carries the complete skill set (tools, incl.
@@ -240,6 +261,7 @@ func (r *Runner) runProviderLoop(ctx context.Context, session *harness.Session, 
 			r.notifyToolStarted(toolCtx, hc)
 			result, err := r.invokeTool(toolCtx, session, addr, call, tt)
 			r.notifyToolFinished(toolCtx, hc, err != nil, err)
+			r.notifyToolResult(toolCtx, hc, result, err)
 			if err == nil && !result.IsError {
 				messageID, _ := tools.MessageIDFrom(toolCtx)
 				for index := range result.Metadata.References {

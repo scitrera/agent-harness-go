@@ -32,11 +32,16 @@ const (
 type DecisionReason string
 
 const (
-	ReasonActiveGoal         DecisionReason = "active_goal"
-	ReasonVerifierRevision   DecisionReason = "verifier_revision"
-	ReasonVerifierSatisfied  DecisionReason = "verifier_satisfied"
-	ReasonVerifierFailed     DecisionReason = "verifier_failed"
-	ReasonTokenBudget        DecisionReason = "token_budget"
+	ReasonActiveGoal        DecisionReason = "active_goal"
+	ReasonVerifierRevision  DecisionReason = "verifier_revision"
+	ReasonVerifierSatisfied DecisionReason = "verifier_satisfied"
+	ReasonVerifierFailed    DecisionReason = "verifier_failed"
+	ReasonTokenBudget       DecisionReason = "token_budget"
+	// ReasonTokenBudgetWrapUp is the single final round granted when the token
+	// budget runs out: the goal is not cut off mid-thought, it is asked to land.
+	// Exactly one such round is ever planned per goal, after which the budget
+	// blocks under ReasonTokenBudget.
+	ReasonTokenBudgetWrapUp  DecisionReason = "token_budget_wrap_up"
 	ReasonMaxContinuations   DecisionReason = "max_continuations"
 	ReasonGoalTerminal       DecisionReason = "goal_terminal"
 	ReasonEnqueueUnavailable DecisionReason = "enqueue_unavailable"
@@ -263,7 +268,7 @@ func validateDecisionRecord(record DecisionRecord) error {
 	}
 	if !slices.Contains([]DecisionReason{
 		ReasonActiveGoal, ReasonVerifierRevision, ReasonVerifierSatisfied, ReasonVerifierFailed,
-		ReasonTokenBudget, ReasonMaxContinuations, ReasonGoalTerminal,
+		ReasonTokenBudget, ReasonTokenBudgetWrapUp, ReasonMaxContinuations, ReasonGoalTerminal,
 		ReasonEnqueueUnavailable, ReasonEnqueueFailed, ReasonAdmissionFailed,
 	}, record.Reason) {
 		return fmt.Errorf("goal: invalid continuation reason %q", record.Reason)

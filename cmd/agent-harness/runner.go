@@ -19,14 +19,17 @@ import (
 	modelpkg "github.com/scitrera/agent-harness-go/pkg/model"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
 	"github.com/scitrera/agent-harness-go/pkg/provider"
+	"github.com/scitrera/agent-harness-go/pkg/providerauth"
 	"github.com/scitrera/agent-harness-go/pkg/refinement"
 	"github.com/scitrera/agent-harness-go/pkg/skills"
+	"github.com/scitrera/agent-harness-go/pkg/steering"
 	"github.com/scitrera/agent-harness-go/pkg/subagent"
 	"github.com/scitrera/agent-harness-go/pkg/tools"
 	"github.com/scitrera/agent-harness-go/pkg/turn"
 )
 
 func buildRunner(cfg appConfig, st stores, pub channel.Publisher, approvals approval.Awaiter, subagentTasks subagent.TaskBackend, notifier channel.Enqueuer, continuationBackend goal.ContinuationBackend, authorityHandoff *authhandoff.Store, decorator func(context.Context, protocol.MessageAddress) context.Context, scheduledOperations turn.ScheduledOperationsCommandProvider) (*turn.Runner, *localtools.Workspace, error) {
+	steeringInbox := steering.New()
 	if st.subagents != nil {
 		var err error
 		if taskRecovery, ok := st.subagents.(subagent.TaskRecoveryRegistry); ok && subagentTasks != nil {
@@ -108,6 +111,28 @@ func buildRunner(cfg appConfig, st stores, pub channel.Publisher, approvals appr
 		}
 	}
 
+	var authResolver turn.ProviderAuthResolver
+	if modelRegistryUsesProviderKind(cfg.modelRegistry, providerauth.KindOpenAISubscription) {
+		authDir, authErr := providerauth.DefaultDir()
+		if authErr != nil {
+			return nil, nil, fmt.Errorf("provider auth: %w", authErr)
+		}
+		broker, authErr := providerauth.New(providerauth.Config{
+			Dir: authDir, IssuerURL: os.Getenv("SAHARA_OPENAI_OAUTH_ISSUER"),
+			ClientID: os.Getenv("SAHARA_OPENAI_OAUTH_CLIENT_ID"), Originator: "sahara",
+		})
+		if authErr != nil {
+			return nil, nil, fmt.Errorf("provider auth: %w", authErr)
+		}
+		authResolver = broker
+	}
+	providerResolver := turn.NewProviderResolver(
+		cfg.modelRegistry,
+		modelpkg.ProviderConfig{BaseURL: cfg.baseURL, APIKey: os.Getenv("SAHARA_LLM_API_KEY"), Format: cfg.llmFormat},
+		nil,
+		turn.WithProviderAuthResolver(authResolver),
+	)
+
 	auth := ""
 	if k := os.Getenv("SAHARA_LLM_API_KEY"); k != "" {
 		auth = "Bearer " + k
@@ -116,12 +141,24 @@ func buildRunner(cfg appConfig, st stores, pub channel.Publisher, approvals appr
 	// sends a terminal `[DONE]`/usage chunk, so request streamed token usage for
 	// trace/export. (Distributions behind a proxy that omits `[DONE]` leave it off.)
 	wireFormat := provider.FormatOpenAI
-	if cfg.llmFormat == "native" {
+	switch cfg.llmFormat {
+	case "native":
 		wireFormat = provider.FormatNative
+	case "responses":
+		wireFormat = provider.FormatResponses
 	}
-	prov, err := provider.NewOpenAICompatClient(provider.OpenAICompatConfig{BaseURL: cfg.baseURL, AuthHeader: auth, Format: wireFormat, StreamUsage: true})
-	if err != nil {
-		return nil, nil, fmt.Errorf("provider: %w", err)
+	var prov turn.Provider
+	if cfg.baseURL != "" {
+		prov, err = provider.NewOpenAICompatClient(provider.OpenAICompatConfig{BaseURL: cfg.baseURL, AuthHeader: auth, Format: wireFormat, StreamUsage: true})
+		if err != nil {
+			return nil, nil, fmt.Errorf("provider: %w", err)
+		}
+	} else {
+		var ok bool
+		prov, ok = providerResolver.ProviderForModel(cfg.model)
+		if !ok {
+			return nil, nil, fmt.Errorf("provider: model %q has no usable configured provider", cfg.model)
+		}
 	}
 
 	workspaceSkillDirs := cfg.skillsDirs
@@ -199,17 +236,11 @@ func buildRunner(cfg appConfig, st stores, pub channel.Publisher, approvals appr
 			Model:              cfg.model,
 			Now:                time.Now,
 		}),
-		Model:         cfg.model,
-		ModelRegistry: cfg.modelRegistry,
-		ProviderResolver: turn.NewProviderResolver(
-			cfg.modelRegistry,
-			modelpkg.ProviderConfig{
-				BaseURL: cfg.baseURL,
-				APIKey:  os.Getenv("SAHARA_LLM_API_KEY"),
-				Format:  cfg.llmFormat,
-			},
-			nil,
-		),
+		Model:              cfg.model,
+		ReasoningEffort:    cfg.reasoningEffort,
+		Steering:           steeringInbox,
+		ModelRegistry:      cfg.modelRegistry,
+		ProviderResolver:   providerResolver,
 		DefaultWorkspaceID: cfg.workspaceID,
 		Streaming:          true,
 		// Semantic recall from MemoryLayer, when configured. Auto-commit stays

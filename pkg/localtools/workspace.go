@@ -13,6 +13,9 @@ import (
 type Workspace struct {
 	root string
 	mu   sync.RWMutex
+	// patchMu serializes multi-file patch transactions so validation and commit
+	// observe one coherent workspace state.
+	patchMu sync.Mutex
 	// readRoots are additional absolute, symlink-evaluated roots that read-only
 	// operations (ReadFile/ReadBytes/InspectFile via resolveExisting) may read
 	// from when given an ABSOLUTE path within one — e.g. image-baked system skills
@@ -226,12 +229,21 @@ func (w *Workspace) WriteFile(ctx context.Context, relPath string, content strin
 }
 
 func (w *Workspace) EditFile(ctx context.Context, relPath string, oldText string, newText string) error {
+	if oldText == "" {
+		return fmt.Errorf("%w: old text must not be empty", ErrInvalidFile)
+	}
 	current, err := w.ReadFile(ctx, relPath, 0)
 	if err != nil {
 		return err
 	}
-	if !strings.Contains(current, oldText) {
+	switch strings.Count(current, oldText) {
+	case 0:
 		return ErrOldTextNotFound
+	case 1:
+		// Exactly one match is required so the model cannot accidentally edit the
+		// wrong occurrence in a large file.
+	default:
+		return ErrOldTextNotUnique
 	}
 	updated := strings.Replace(current, oldText, newText, 1)
 	if err := w.WriteFile(ctx, relPath, updated); err != nil {
@@ -257,24 +269,47 @@ func (w *Workspace) resolveExisting(relPath string) (string, error) {
 }
 
 func (w *Workspace) resolveForWrite(relPath string) (string, error) {
-	// Writes are confined to the workspace root — never a read-only root.
+	// Writes are confined to the launch root or an explicitly granted writable
+	// root. Walk to the nearest existing ancestor before evaluating symlinks so
+	// a missing directory below a symlink cannot escape containment.
 	candidate, err := w.join(relPath, false)
 	if err != nil {
 		return "", err
 	}
-	parent := filepath.Dir(candidate)
-	evaluatedParent, err := filepath.EvalSymlinks(parent)
-	if err != nil {
-		if os.IsNotExist(err) {
-			evaluatedParent = parent
-		} else {
-			return "", fmt.Errorf("resolve parent %s: %w", relPath, err)
+	if info, statErr := os.Lstat(candidate); statErr == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return "", fmt.Errorf("%w: refusing to write through symlink %s", ErrInvalidFile, relPath)
 		}
+	} else if !os.IsNotExist(statErr) {
+		return "", fmt.Errorf("stat %s: %w", relPath, statErr)
 	}
-	if !w.containedInWritable(evaluatedParent) {
+
+	ancestor := filepath.Dir(candidate)
+	missing := make([]string, 0, 4)
+	for {
+		if _, statErr := os.Lstat(ancestor); statErr == nil {
+			break
+		} else if !os.IsNotExist(statErr) {
+			return "", fmt.Errorf("stat parent %s: %w", relPath, statErr)
+		}
+		parent := filepath.Dir(ancestor)
+		if parent == ancestor {
+			return "", fmt.Errorf("%w: no existing parent for %s", ErrInvalidFile, relPath)
+		}
+		missing = append(missing, filepath.Base(ancestor))
+		ancestor = parent
+	}
+	evaluatedAncestor, err := filepath.EvalSymlinks(ancestor)
+	if err != nil {
+		return "", fmt.Errorf("resolve parent %s: %w", relPath, err)
+	}
+	if !w.containedInWritable(evaluatedAncestor) {
 		return "", fmt.Errorf("%w: %s", ErrPathOutsideRoot, relPath)
 	}
-	return candidate, nil
+	for i := len(missing) - 1; i >= 0; i-- {
+		evaluatedAncestor = filepath.Join(evaluatedAncestor, missing[i])
+	}
+	return filepath.Join(evaluatedAncestor, filepath.Base(candidate)), nil
 }
 
 func (w *Workspace) join(relPath string, allowReadRoots bool) (string, error) {

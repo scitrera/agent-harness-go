@@ -47,6 +47,8 @@ the browser, the terminal UI, or stdout in `--cli` mode).
 For the full OSS local stack—AetherLite transport, MemoryLayer persistence, a
 containerized agent worker, a host TUI, and a capability-aware multi-model
 `config/models.yaml`—follow the [OSS E2E getting-started guide](e2e/README.md).
+The reference CLI can also use an OpenAI Plus/Pro ChatGPT subscription through
+the OSS credential broker; see [OpenAI subscription authentication](docs/openai-subscription-auth.md).
 Operators deploying the Aether live tool catalog can configure reviewed,
 per-tool downstream caller authority using the
 [tool catalog service guide](docs/tool-catalog-service.md).
@@ -70,7 +72,10 @@ per-tool downstream caller authority using the
 | `--commands-dirs` | `SAHARA_COMMANDS_DIRS` | `commands,.agent-harness-commands` | comma-separated replacement list of workspace-relative slash-command roots |
 | `--system-commands-dirs` | `SAHARA_SYSTEM_COMMANDS_DIRS` | — | comma-separated absolute operator command roots appended after workspace roots |
 | `--models-file` | `SAHARA_MODELS_FILE` | `config/models.yaml` | explicit absolute or workspace-relative model registry; an explicitly selected missing file is an error |
+| `--reasoning-effort` | `SAHARA_REASONING_EFFORT` | provider/model default | process-wide reasoning preference; model allowlists can narrow it and `/reasoning` can override it per thread and model |
 | `--tui-retain-reasoning` | `SAHARA_TUI_RETAIN_REASONING` | `false` | retain `reasoning>` rows after the response or tool action they led to; by default they are visible only while current |
+| `--tui-shell-trigger-agent` | `SAHARA_TUI_SHELL_TRIGGER_AGENT` | `false` | process-wide default for whether an idle `!command` starts an agent response after recording its result |
+| `--tui-shell-preferences-file` | `SAHARA_TUI_SHELL_PREFERENCES_FILE` | user config dir | persistent per-user and per-workspace/thread overrides for idle shell responses |
 | `--serve` | — | `false` | run as a headless agent worker over Aether |
 | `--aether` | `AETHER_ADDR` | — | Aether gateway address, e.g. `127.0.0.1:50051` |
 | `--aether-standalone` | — | `false` | run the worker and the terminal UI in one process |
@@ -112,6 +117,15 @@ against the workspace. The conventional `config/models.yaml` remains optional,
 but an explicit flag/env path fails fast when missing so an operator typo cannot
 silently restore single-model behavior. These inputs are process-local
 configuration and do not add ecosystem messaging protocol fields.
+
+Reasoning effort is request-scoped, so variants such as `high` and `xhigh` do
+not require duplicate model entries. A registry entry can declare
+`reasoning.default_effort` and `reasoning.allowed_efforts`; the runner resolves
+the effective value from a `/reasoning` thread override, the process preference,
+the model default, and finally the provider default. `/reasoning default` clears
+the current thread/model override. See the
+[OpenAI subscription guide](docs/openai-subscription-auth.md#configure-reasoning-effort)
+for an example.
 
 ### Project workspaces
 
@@ -588,10 +602,24 @@ worker's checkout.
 Referenced images are sent inline; other references are normalized to
 workspace-relative or absolute granted paths. Press `Ctrl+C` or `Ctrl+D` twice
 within one second to quit. `Ctrl+Left`/`Ctrl+Right` move the composer by words;
-mouse reporting stays disabled so the terminal can perform native text
-selection and copying. The mouse wheel scrolls transcript history in compatible
-terminals without changing that selection behavior; Up/Down provide the same
-three-line scrolling while the composer is empty.
+mouse reporting is enabled so the wheel scrolls transcript history independently
+of composer message recall. Hold Shift while dragging to use terminal-native
+text selection and copying. Up/Down continue to move through composer and sent
+message history.
+
+Prefix input with `!` to execute it explicitly through `/bin/bash -lc` in the
+current `/pwd`, for example `!git status`. The TUI shows a `shell>` row and
+records the command, working directory, exit status, and combined output as a
+user-context message (transcript output is capped at 1 MiB). If a model turn is
+active when the command completes, the result is delivered as steering at the
+next model-action boundary. Otherwise the resolved shell-response preference
+commits the context without calling the provider by default, or starts a normal
+agent turn when enabled. Resolution is thread override, then user override,
+then the process flag/environment default. Use `/shell-response status`, `/shell-response
+on|off|default` for the current thread, or `/shell-response user
+on|off|default` for the current user. Preferences are shared by local and
+Aether-client TUI modes. Because `!` is an explicit user shell action, it does
+not use the model-tool approval policy.
 
 The web server has **no authentication** and is intended for **localhost use
 only** — do not bind it beyond loopback. State-changing endpoints enforce a

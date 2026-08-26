@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
+	llmclient "github.com/scitrera/go-llm/client"
+	llmprotocol "github.com/scitrera/go-llm/protocol"
 )
 
 var (
@@ -32,6 +34,9 @@ const (
 	// FormatOpenAI sends OpenAI-style {role, content} messages, for talking to
 	// an OpenAI-compatible provider directly (sidecar-less testing).
 	FormatOpenAI WireFormat = "openai"
+	// FormatResponses uses the OpenAI Responses API through the shared Scitrera
+	// protocol/client modules.
+	FormatResponses WireFormat = "responses"
 )
 
 // Guard validates provider configuration before a client is built; a non-nil
@@ -43,9 +48,15 @@ type Guard func(base *url.URL, authHeader string) error
 type OpenAICompatConfig struct {
 	BaseURL    string
 	AuthHeader string
+	// Auth supplies dynamic credentials (for example a renewable OAuth profile).
+	// It is mutually exclusive with AuthHeader. The host owns credential storage.
+	Auth       llmclient.Authenticator
 	ChatPath   string
 	Format     WireFormat
 	HTTPClient *http.Client
+	// PrepareRequest applies an optional provider-specific request profile after
+	// neutral protocol conversion and before encoding.
+	PrepareRequest func(*llmprotocol.Request)
 	// StreamFirstChunk bounds the wait for the FIRST streamed chunk (time-to-first-
 	// token — long for big-context reasoning). StreamIdle bounds the gap between
 	// SUBSEQUENT chunks (once tokens flow, gaps are short). Neither is a total-duration
@@ -85,15 +96,19 @@ type OpenAICompatClient struct {
 	streamIdle       time.Duration
 	promptCaching    bool
 	streamUsage      bool
+	sharedClient     *llmclient.Client
+	sharedBackend    llmclient.Backend
+	prepareRequest   func(*llmprotocol.Request)
 }
 
 type ChatRequest struct {
-	Model       string                 `json:"model,omitempty"`
-	Messages    []protocol.ChatMessage `json:"messages"`
-	Tools       []ToolSpec             `json:"tools,omitempty"`
-	Stream      bool                   `json:"stream,omitempty"`
-	Temperature float64                `json:"temperature,omitempty"`
-	MaxTokens   int                    `json:"max_tokens,omitempty"`
+	Model           string                 `json:"model,omitempty"`
+	Messages        []protocol.ChatMessage `json:"messages"`
+	Tools           []ToolSpec             `json:"tools,omitempty"`
+	Stream          bool                   `json:"stream,omitempty"`
+	Temperature     float64                `json:"temperature,omitempty"`
+	MaxTokens       int                    `json:"max_tokens,omitempty"`
+	ReasoningEffort string                 `json:"reasoning_effort,omitempty"`
 	// StreamOptions carries OpenAI streaming options; ChatStream sets
 	// include_usage so the final chunk reports token usage. Omitted on non-stream
 	// requests (the usage block is always present in a non-stream response).
@@ -109,9 +124,59 @@ type StreamOptions struct {
 // Usage is the provider-reported token accounting for one chat completion. Fields
 // are best-effort: a provider that omits usage yields a zero Usage.
 type Usage struct {
-	PromptTokens     int `json:"prompt_tokens,omitempty"`
-	CompletionTokens int `json:"completion_tokens,omitempty"`
-	TotalTokens      int `json:"total_tokens,omitempty"`
+	PromptTokens             int `json:"prompt_tokens,omitempty"`
+	CompletionTokens         int `json:"completion_tokens,omitempty"`
+	TotalTokens              int `json:"total_tokens,omitempty"`
+	CachedInputTokens        int `json:"cached_input_tokens,omitempty"`
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
+}
+
+// UnmarshalJSON accepts both normalized usage fields and the nested OpenAI
+// prompt/input-token detail shapes. Providers differ on whether cache creation
+// is called creation or write; normalize both names.
+func (u *Usage) UnmarshalJSON(data []byte) error {
+	type plain Usage
+	var wire struct {
+		plain
+		CacheReadInputTokens  int `json:"cache_read_input_tokens"`
+		CacheWriteInputTokens int `json:"cache_write_input_tokens"`
+		PromptTokensDetails   struct {
+			CachedTokens        int `json:"cached_tokens"`
+			CacheCreationTokens int `json:"cache_creation_tokens"`
+			CacheWriteTokens    int `json:"cache_write_tokens"`
+		} `json:"prompt_tokens_details"`
+		InputTokensDetails struct {
+			CachedTokens        int `json:"cached_tokens"`
+			CacheCreationTokens int `json:"cache_creation_tokens"`
+			CacheWriteTokens    int `json:"cache_write_tokens"`
+		} `json:"input_tokens_details"`
+	}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	*u = Usage(wire.plain)
+	if u.CachedInputTokens == 0 {
+		u.CachedInputTokens = firstNonZero(wire.CacheReadInputTokens, wire.PromptTokensDetails.CachedTokens, wire.InputTokensDetails.CachedTokens)
+	}
+	if u.CacheCreationInputTokens == 0 {
+		u.CacheCreationInputTokens = firstNonZero(
+			wire.CacheWriteInputTokens,
+			wire.PromptTokensDetails.CacheCreationTokens,
+			wire.PromptTokensDetails.CacheWriteTokens,
+			wire.InputTokensDetails.CacheCreationTokens,
+			wire.InputTokensDetails.CacheWriteTokens,
+		)
+	}
+	return nil
+}
+
+func firstNonZero(values ...int) int {
+	for _, value := range values {
+		if value != 0 {
+			return value
+		}
+	}
+	return 0
 }
 
 // ToolSpec is a tool exposed to the model. It marshals to the OpenAI
@@ -148,6 +213,9 @@ type ChatResponse struct {
 }
 
 func NewOpenAICompatClient(cfg OpenAICompatConfig) (*OpenAICompatClient, error) {
+	if cfg.Auth != nil && cfg.AuthHeader != "" {
+		return nil, fmt.Errorf("%w: Auth and AuthHeader are mutually exclusive", ErrInvalidProviderConfig)
+	}
 	parsed, err := url.ParseRequestURI(cfg.BaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("%w: base url: %w", ErrInvalidProviderConfig, err)
@@ -175,15 +243,48 @@ func NewOpenAICompatClient(cfg OpenAICompatConfig) (*OpenAICompatClient, error) 
 	if streamIdle <= 0 {
 		streamIdle = 15 * time.Second // once tokens flow, gaps are short
 	}
-	chatPath := cfg.ChatPath
-	if chatPath == "" {
-		chatPath = "/v1/chat/completions"
-	}
 	format := cfg.Format
 	if format == "" {
 		format = FormatNative
 	}
-	return &OpenAICompatClient{baseURL: parsed, chatPath: chatPath, authHeader: cfg.AuthHeader, format: format, client: client, streamClient: streamClient, streamFirstChunk: streamFirstChunk, streamIdle: streamIdle, promptCaching: cfg.PromptCaching, streamUsage: cfg.StreamUsage}, nil
+	if format != FormatNative && format != FormatOpenAI && format != FormatResponses {
+		return nil, fmt.Errorf("%w: unsupported wire format %q", ErrInvalidProviderConfig, format)
+	}
+	chatPath := cfg.ChatPath
+	if chatPath == "" {
+		chatPath = "/v1/chat/completions"
+		if format == FormatResponses {
+			chatPath = "/v1/responses"
+		}
+	}
+	result := &OpenAICompatClient{baseURL: parsed, chatPath: chatPath, authHeader: cfg.AuthHeader, format: format, client: client, streamClient: streamClient, streamFirstChunk: streamFirstChunk, streamIdle: streamIdle, promptCaching: cfg.PromptCaching, streamUsage: cfg.StreamUsage, prepareRequest: cfg.PrepareRequest}
+	if format != FormatNative {
+		protocolFormat := llmprotocol.FormatOpenAIChat
+		if format == FormatResponses {
+			protocolFormat = llmprotocol.FormatOpenAIResponses
+		}
+		includeUsage := cfg.StreamUsage
+		result.sharedClient = llmclient.New(llmclient.Options{
+			HTTPClient:         client,
+			Policy:             llmprotocol.StrictPolicy(),
+			FirstEventTimeout:  streamFirstChunk,
+			StreamIdleTimeout:  streamIdle,
+			IncludeStreamUsage: &includeUsage,
+		})
+		sharedAuth := attributedAuthenticator{auth: cfg.Auth, authHeader: cfg.AuthHeader}
+		var authenticator llmclient.Authenticator = sharedAuth
+		if recoverer, ok := cfg.Auth.(llmclient.UnauthorizedRecoverer); ok {
+			authenticator = recoveringAttributedAuthenticator{attributedAuthenticator: sharedAuth, recoverer: recoverer}
+		}
+		result.sharedBackend = llmclient.Backend{
+			Name:    "sahara",
+			Format:  protocolFormat,
+			BaseURL: cfg.BaseURL,
+			Path:    chatPath,
+			Auth:    authenticator,
+		}
+	}
+	return result, nil
 }
 
 func (c *OpenAICompatClient) BaseURL() string {
@@ -192,6 +293,18 @@ func (c *OpenAICompatClient) BaseURL() string {
 
 func (c *OpenAICompatClient) Chat(ctx context.Context, chat ChatRequest) (ChatResponse, error) {
 	chat.Messages = sanitizeTranscript(chat.Messages)
+	if c.sharedClient != nil {
+		request, err := sharedProtocolRequest(chat)
+		if err != nil {
+			return ChatResponse{}, fmt.Errorf("encode chat request: %w", err)
+		}
+		c.prepareSharedRequest(&request)
+		result, err := c.sharedClient.Call(ctx, c.sharedBackend, request)
+		if err != nil {
+			return ChatResponse{}, classifySharedClientError(err)
+		}
+		return sharedProtocolResponse(result.Response)
+	}
 	body, err := c.encodeRequest(chat)
 	if err != nil {
 		return ChatResponse{}, fmt.Errorf("marshal chat request: %w", err)
@@ -220,6 +333,32 @@ func (c *OpenAICompatClient) Chat(ctx context.Context, chat ChatRequest) (ChatRe
 	return decodeChatResponse(data)
 }
 
+type attributedAuthenticator struct {
+	auth       llmclient.Authenticator
+	authHeader string
+}
+
+func (a attributedAuthenticator) Apply(ctx context.Context, request *http.Request) error {
+	if a.auth != nil {
+		if err := a.auth.Apply(ctx, request); err != nil {
+			return err
+		}
+	} else if a.authHeader != "" {
+		request.Header.Set("Authorization", a.authHeader)
+	}
+	applyAttributionHeaders(ctx, request)
+	return nil
+}
+
+type recoveringAttributedAuthenticator struct {
+	attributedAuthenticator
+	recoverer llmclient.UnauthorizedRecoverer
+}
+
+func (a recoveringAttributedAuthenticator) RecoverUnauthorized(ctx context.Context) error {
+	return a.recoverer.RecoverUnauthorized(ctx)
+}
+
 func (c *OpenAICompatClient) encodeRequest(chat ChatRequest) ([]byte, error) {
 	if c.format == FormatOpenAI {
 		// The openai wire path has no provider prompt-cache breakpoint concept and
@@ -237,11 +376,11 @@ func (c *OpenAICompatClient) encodeRequest(chat ChatRequest) ([]byte, error) {
 // with a cache breakpoint the sidecar lowers to an Anthropic
 // cache_control:{type:"ephemeral"} block. It rides the existing spec Meta
 // `scitrera.cache.stable_prefix_chars` convention (no new cross-package fields):
-// stable_prefix_chars is the length of the stable prefix, so setting it to the
-// full system-prompt length places the breakpoint at the prompt's end. The last
-// system message is stamped (the boundary of the stable system prefix). Returns
-// a copy with that one message cloned+stamped; the caller's messages are never
-// mutated in place.
+// stable_prefix_chars is a byte boundary supplied by sysprompt. When a valid
+// boundary is already present it is authoritative; otherwise a system-only
+// message falls back to its complete byte length. The last system message is
+// stamped. Returns a copy with that one message cloned+stamped; the caller's
+// messages are never mutated in place.
 func stampPromptCacheBreakpoint(msgs []protocol.ChatMessage) []protocol.ChatMessage {
 	idx := -1
 	for i, m := range msgs {
@@ -252,7 +391,11 @@ func stampPromptCacheBreakpoint(msgs []protocol.ChatMessage) []protocol.ChatMess
 	if idx < 0 {
 		return msgs
 	}
-	prefix := len([]rune(messageText(msgs[idx])))
+	content := messageText(msgs[idx])
+	prefix, ok := stablePrefixBytes(msgs[idx], content)
+	if !ok {
+		prefix = len(content)
+	}
 	if prefix == 0 {
 		return msgs
 	}
@@ -261,7 +404,16 @@ func stampPromptCacheBreakpoint(msgs []protocol.ChatMessage) []protocol.ChatMess
 		// Preserve any other keys already in the scitrera namespace.
 		_ = json.Unmarshal(raw, &sc)
 	}
-	sc["cache"] = json.RawMessage(fmt.Sprintf(`{"stable_prefix_chars":%d}`, prefix))
+	cache := map[string]json.RawMessage{}
+	if raw, ok := sc["cache"]; ok && len(raw) > 0 {
+		_ = json.Unmarshal(raw, &cache)
+	}
+	cache["stable_prefix_chars"] = json.RawMessage(fmt.Sprintf(`%d`, prefix))
+	cacheBlob, err := json.Marshal(cache)
+	if err != nil {
+		return msgs
+	}
+	sc["cache"] = cacheBlob
 	blob, err := json.Marshal(sc)
 	if err != nil {
 		return msgs
