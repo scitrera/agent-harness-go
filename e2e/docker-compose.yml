@@ -1,19 +1,18 @@
 # A self-contained agent stack: an Aether gateway, the harness serving on it, and
 # MemoryLayer holding the conversations.
 #
-#   ./build.sh          # build the images (see IMAGES below)
 #   cp .env.example .env && $EDITOR .env   # point at your LLM endpoint
-#   docker compose up -d
+#   ./run.sh up         # pull current published images and start the stack
 #   agent-harness --tui --aether 127.0.0.1:50051 --aether-specifier e2e
 #
 # The terminal UI runs on the HOST and attaches over Aether — that is the point
 # of the split, and it means the UI needs no container of its own. Several can
 # attach at once; with MemoryLayer wired they share one conversation.
 #
-# IMAGES. Service images and the harness are built locally by build.sh while
-# published images are unavailable. The harness build resolves released Go
-# modules rather than depending on sibling Go source trees. Image tags remain
-# variables, so published images can be selected through .env.
+# IMAGES. Published multi-architecture images are the default. `run.sh up`
+# explicitly refreshes them before startup; `run.sh up --local` builds and
+# selects the :local developer images instead. Every reference remains an
+# environment variable so release tags or digests can be pinned when needed.
 
 name: agent-harness-e2e
 
@@ -40,7 +39,8 @@ services:
   # image owns those security defaults; Compose supplies only stack-specific
   # configuration.
   aether:
-    image: ${AETHERLITE_IMAGE:-scitrera/aetherlite:dev-local}
+    image: ${AETHERLITE_IMAGE:-ghcr.io/scitrera/aetherlite:dev-latest}
+    pull_policy: ${E2E_PULL_POLICY:-always}
     command:
       - --config=/etc/aether/aetherlite.yaml
       - --data-dir=/data
@@ -64,7 +64,8 @@ services:
 
   # ── MemoryLayer: threads, transcripts, and the memories distilled from them ──
   memorylayer:
-    image: ${MEMORYLAYER_IMAGE:-scitrera/memorylayer-server:local}
+    image: ${MEMORYLAYER_IMAGE:-ghcr.io/scitrera/memorylayer-server:latest}
+    pull_policy: ${E2E_PULL_POLICY:-always}
     environment:
       MEMORYLAYER_SERVER_HOST: "0.0.0.0"
       MEMORYLAYER_SERVER_PORT: "61001"
@@ -117,12 +118,13 @@ services:
 
   # ── Deterministic live tool catalog ──────────────────────────────────────
   #
-  # The catalog and agent worker share the locally built Go image but run
+  # The catalog and agent worker share the published Go image but run
   # separate binaries and Aether identities. The checked-in policy contains
   # only the immutable model-free E2E provider used by the opt-in authority
   # test; normal providers still forward no caller authority by default.
   tool-catalog:
-    image: ${AGENT_HARNESS_IMAGE:-agent-harness:local}
+    image: ${AGENT_HARNESS_IMAGE:-ghcr.io/scitrera/agent-harness:latest}
+    pull_policy: ${E2E_PULL_POLICY:-always}
     entrypoint: ["tool-catalog-service"]
     environment:
       # Stable only within this loopback development stack. Real deployments
@@ -141,7 +143,8 @@ services:
 
   # ── The agent worker ──────────────────────────────────────────────────────
   agent:
-    image: ${AGENT_HARNESS_IMAGE:-agent-harness:local}
+    image: ${AGENT_HARNESS_IMAGE:-ghcr.io/scitrera/agent-harness:latest}
+    pull_policy: ${E2E_PULL_POLICY:-always}
     command:
       - --serve
       - --aether=aether:50051
@@ -196,7 +199,8 @@ services:
   # on a FRESH memorylayer-data volume — the vector width is fixed at creation.
   embed-server:
     profiles: ["embed"]
-    image: ${MEMORYLAYER_EMBED_IMAGE:-scitrera/memorylayer-embed-server:local}
+    image: ${MEMORYLAYER_EMBED_IMAGE:-ghcr.io/scitrera/memorylayer-embed-server:latest}
+    pull_policy: ${E2E_PULL_POLICY:-always}
     environment:
       # The image runs the Aether proxy-sidecar as PID 1 for mesh deployments;
       # inside a compose network that indirection buys nothing.

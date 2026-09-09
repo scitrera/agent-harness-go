@@ -667,13 +667,13 @@ uses Aether tasks and their lifecycle instead.
 `versions.yaml` is the single source of truth for this repo's version and the
 baseline Go CI/release jobs. `version-check.yml` is generated directly from it
 by [scitrera-repo-tools](https://github.com/scitrera/repo-tools).
-`test-go.yml` and `publish-go.yml` start from that baseline but deliberately
+`test-go.yml`, `publish-go.yml`, and `build-docker.yml` start from that baseline but deliberately
 retain repository-specific secret scanning, workflow linting, strict tag
 checks, and dependency-license packaging that the current generator does not
-model. Consequently, a raw generated-CI drift check is expected to report
-those two files. Refresh the baseline deliberately, restore the clearly marked
-custom jobs, review the complete diff, and validate the result with
-`actionlint`.
+model, plus required shell-quoting fixes in the Docker workflow. Consequently,
+a raw generated-CI drift check is expected to report those three files. Refresh
+the baseline deliberately, restore the clearly marked customizations, review
+the complete diff, and validate the result with `actionlint`.
 
 ```bash
 python scripts/update-versions.py --check    # versions.yaml vs. the tree
@@ -686,7 +686,9 @@ linux/amd64, linux/arm64, windows/amd64, windows/arm64 and darwin/arm64, and
 attaches the archives plus a `checksums.txt` to the GitHub release. Each archive
 carries the binary, `LICENSE`, `NOTICE`, this file, and discovered dependency
 license texts under `third_party_licenses/`; Windows ships as `.zip` and
-everything else as `.tar.gz`. `agent-harness --version` reports the release
+everything else as `.tar.gz`. The same tag publishes the multi-architecture
+reference container to `ghcr.io/scitrera/agent-harness`; it includes both the
+worker and `tool-catalog-service`. `agent-harness --version` reports the release
 version and the commit it was built from.
 
 Bump the version in `versions.yaml`, run `python scripts/update-versions.py` to

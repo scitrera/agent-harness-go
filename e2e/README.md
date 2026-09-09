@@ -5,17 +5,21 @@ conversations — enough to run the harness the way it is meant to be deployed
 (UI and agent in different processes, sharing durable history) without any
 platform.
 
-The stack uses only OSS components. The local agent image resolves the released
-ecosystem-spec, Aether, MemoryLayer, and go-llm Go modules from the public module
-proxy. Aether and MemoryLayer service images are still built from local source
-checkouts until those images are published.
+The stack uses only OSS components. By default, it pulls the latest published
+multi-architecture agent-harness, AetherLite, MemoryLayer, and CPU embed-server
+images from GHCR. This exercises the artifacts an outside user receives and
+requires no sibling source checkouts. Developers changing these projects can
+instead pass `--local` to rebuild the complete stack from local source; the
+local harness build still resolves its Go dependencies from the public module
+proxy.
 
 ## 1. Prerequisites
 
 - Docker with Compose v2 and BuildKit support.
-- The agent-harness, Aether OSS, and MemoryLayer OSS checkouts. Point the
-  ignored `.local-deps/aether` and `.local-deps/memorylayer` symlinks at the
-  service checkouts, or override `AETHER_REPO` and `MEMORYLAYER_REPO`.
+- This agent-harness checkout. Local-source mode additionally needs the Aether
+  OSS and MemoryLayer OSS checkouts. Point the ignored `.local-deps/aether` and
+  `.local-deps/memorylayer` symlinks at them, or override `AETHER_REPO` and
+  `MEMORYLAYER_REPO`.
 - An OpenAI-compatible model endpoint with a tool-capable model.
 - Go only for the host TUI. Use the version required by `go.mod`; the Go
   toolchain may automatically select a newer compatible patch release.
@@ -160,18 +164,20 @@ broker in the agent container, where it shares the worker's `sahara-auth` named
 volume. The volume survives ordinary `down`/`up` and agent recreation; using
 `docker compose down -v` removes it along with the other E2E data volumes.
 
-## 3. Build and start the local stack
+## 3. Start the published stack
 
 ```bash
-./build.sh
-docker compose up -d
-docker compose ps
-docker compose logs -f agent
+./e2e/run.sh up
+docker compose -f e2e/docker-compose.yml ps
+docker compose -f e2e/docker-compose.yml logs -f agent
 ```
 
-The first build can take several minutes. The default MemoryLayer `hash`
-embedding provider avoids a model download; it is suitable for lifecycle and
-API testing, not semantic-retrieval quality.
+The wrapper refreshes the published images before replacing the previous stack,
+then enables the CPU embed server and semantic embeddings. The first start can
+take several minutes while Docker pulls images and the embed server downloads
+its model. Use `E2E_SOURCE_MODE=local` or `./e2e/run.sh up --local` to build the
+same stack from the current harness checkout and the configured sibling
+checkouts. `--published` explicitly overrides a persisted local mode.
 
 Changing `workspace/config/models.yaml` or `.env` does not require an image
 build, but the worker reads them at startup, so recreate it:
@@ -346,9 +352,11 @@ when testing provider separation.
   request without routing the invocation through Sahara or Platform Bridge;
 - the OSS executable loads `config/models.yaml`, supports `/model` pins, routes
   images by declared capability, and can resolve a provider per model;
-- the agent image builds against the same published Go dependency graph used by
-  a clean OSS checkout, while the Aether and MemoryLayer services run from the
-  selected local source checkouts.
+- the default path interoperates across the latest published agent-harness,
+  AetherLite, MemoryLayer, and embed-server containers;
+- the explicit local path builds the agent against the same published Go
+  dependency graph used by a clean OSS checkout while selecting the configured
+  Aether and MemoryLayer source checkouts.
 
 It does not prove production authentication, semantic retrieval quality with the
 default lexical embedder, model execution for a scheduled prompt, or recovery
@@ -356,7 +364,7 @@ across a deliberately interrupted scheduled turn. The catalog test returns a
 VFS-shaped reference stored as MemoryLayer metadata; it does not replace the
 enterprise data-connector/materialization E2E.
 
-Run that focused live test after `up` has rebuilt the local agent image:
+Run that focused live test after `up` has started the stack:
 
 ```bash
 AETHER_CATALOG_E2E=1 AETHER_E2E_ADDR=127.0.0.1:50051 \
@@ -373,27 +381,36 @@ AETHER_CATALOG_E2E=1 AETHER_E2E_ADDR=127.0.0.1:50051 \
 | `memorylayer` | 61001 | threads, transcripts, and the memories distilled from them |
 | `tool-catalog` | — | deterministic catalog service with one reviewed model-free E2E authority profile |
 | `agent` | — | the harness, `--serve`; dials out, exposes nothing |
-| `embed-server` | — | opt-in, real embeddings (`--profile embed`) |
+| `embed-server` | — | real embeddings; enabled by `run.sh up`, opt-in with raw Compose |
 
-## Local images and future releases
+## Published images and local source mode
 
-Not all OSS images are published yet, so `build.sh` builds the services and
-harness image locally. The harness uses published Go dependencies. Aether is
-layered locally as `aether:local` → `aetherlite:local` →
-`aetherlite:dev-local`; the other images use `:local`:
+The Compose defaults track these published GHCR tags:
+
+```dotenv
+AETHERLITE_IMAGE=ghcr.io/scitrera/aetherlite:dev-latest
+MEMORYLAYER_IMAGE=ghcr.io/scitrera/memorylayer-server:latest
+MEMORYLAYER_EMBED_IMAGE=ghcr.io/scitrera/memorylayer-embed-server:latest
+AGENT_HARNESS_IMAGE=ghcr.io/scitrera/agent-harness:latest
+```
+
+`run.sh up` explicitly pulls the resolved references before startup. Set any of
+the image variables in `.env` to pin a version or digest while retaining the
+published-image path.
+
+For coordinated development across repositories, use:
+
+```bash
+./e2e/run.sh up --local
+```
+
+That invokes `build.sh`, layering Aether locally as `aether:local` →
+`aetherlite:local` → `aetherlite:dev-local`, and builds MemoryLayer, the CPU
+embed server, and agent-harness with `:local` tags. Its default source layout is:
 
 ```
 <this-repo>/.local-deps/aether       <- $AETHER_REPO
 <this-repo>/.local-deps/memorylayer  <- $MEMORYLAYER_REPO
-```
-
-Every image reference in `docker-compose.yml` is a variable, so when the images
-ship this stops being a build step and becomes an `.env` edit:
-
-```bash
-AETHERLITE_IMAGE=scitrera/aetherlite:dev-0.2.3
-MEMORYLAYER_IMAGE=scitrera/memorylayer-server:0.2.0
-AGENT_HARNESS_IMAGE=scitrera/agent-harness:0.1.0
 ```
 
 The AetherLite development tag owns the `aetherlite` entrypoint and enables
@@ -403,14 +420,17 @@ real deployment.
 
 ## Embeddings
 
-The default is MemoryLayer's `hash` provider, which is **lexical** — it matches
-shared words, not meaning. That is fine for exercising the API and seeing recall
-wired end to end, and it keeps first-run to a couple of minutes.
+`run.sh up` enables the published CPU embed server and configures MemoryLayer's
+384-dimensional semantic provider. Raw `docker compose up` retains
+MemoryLayer's lightweight `hash` provider unless the embed profile and matching
+environment values are selected explicitly; `hash` is lexical and is useful
+for fast lifecycle/API checks, not retrieval-quality evaluation.
 
 For real semantic embeddings (all-MiniLM-L6-v2, 384-d, CPU):
 
 ```bash
-./build.sh --embed
+cd e2e
+docker compose --profile embed pull
 # in .env:
 #   MEMORYLAYER_EMBEDDING_PROVIDER=embed_server
 docker compose --profile embed up -d

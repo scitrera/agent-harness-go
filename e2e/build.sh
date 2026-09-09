@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 #
-# Build the stack's images from local source.
-#
-# TEMPORARY. The OSS service images are not all published yet, so the stack
-# builds Aether, MemoryLayer, and the harness locally and tags them `:local`.
-# The harness itself consumes published Go modules.
+# Explicit developer path for building every stack image from local source.
+# The normal `run.sh up` path pulls published images; use `run.sh up --local`
+# (or invoke this script directly) while changing the participating projects.
+# The harness itself still consumes published Go modules.
 #
 # Default ignored dependency layout (override with the env vars below):
 #

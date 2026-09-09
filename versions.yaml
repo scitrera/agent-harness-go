@@ -28,6 +28,8 @@ ci:
   # test-go.yml and publish-go.yml also contain repository-specific secret
   # scanning, strict tag checks, and third-party-license packaging. The current
   # generator does not model those jobs; preserve them when regenerating.
+  # build-docker.yml additionally quotes two generated shell expansions so the
+  # workflow passes actionlint.
   # Pinned deliberately: a bare `scitrera-repo-tools` floats to the newest
   # release, so a change to the generator would surface as workflow drift on an
   # unrelated PR. `ci.go.binaries` below requires >= 0.1.25; 0.1.30 is the
@@ -40,6 +42,15 @@ ci:
   test_branches: [ main ]
   # The release binaries are attached to the tag's GitHub release.
   github_release: true
+  # This produces the generator's Go-test prerequisite. The checked-in Docker
+  # workflow deliberately replaces it with the complete reusable OSS test and
+  # release gate. The Dockerfile performs its own linked-license audit as well.
+  docker:
+    default_platforms: [ linux/amd64, linux/arm64 ]
+    platform_runners:
+      linux/amd64: ubuntu-latest
+      linux/arm64: ubuntu-24.04-arm
+    test_prereqs: [ go ]
   go:
     # The latest patch of the pinned minor rather than the exact `go 1.25.14`
     # in go.mod: patch releases are security fixes and the published binaries
@@ -73,3 +84,14 @@ ci:
           - windows/arm64
           - darwin/arm64
         extra_files: [ LICENSE, NOTICE, README.md ]
+
+# The reference runtime image contains both the worker and the deterministic
+# tool-catalog service used by the OSS E2E. Release tags publish versioned,
+# major/minor, commit, and latest aliases to GHCR.
+docker:
+  ghcr: scitrera
+  images:
+    agent-harness:
+      context: .
+      dockerfile: Dockerfile
+      version_from: agent-harness-go

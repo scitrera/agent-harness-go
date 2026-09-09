@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Build, run, and attach to the local OSS end-to-end stack.
+# Run and attach to the OSS end-to-end stack.
 #
 # Usage:
-#   ./e2e/run.sh up
+#   ./e2e/run.sh up             # latest published images
+#   ./e2e/run.sh up --local     # rebuild from local checkouts
 #   ./e2e/run.sh tui [agent-harness flags...]
 #   ./e2e/run.sh auth login [--profile personal]
 #   ./e2e/run.sh check
@@ -19,8 +20,9 @@ usage() {
 Usage: ./e2e/run.sh <command> [arguments]
 
 Commands:
-  up       Stop the old stack, rebuild all local images including the CPU
-           embed server, then start it with semantic embeddings enabled.
+  up       Pull the latest published images, then start the stack with semantic
+           embeddings enabled. Pass --local to rebuild from local checkouts;
+           pass --published to override E2E_SOURCE_MODE=local.
   tui      Launch the host TUI and attach it to the deployed E2E worker.
            Additional arguments are passed to agent-harness.
   auth     Manage the worker's persisted ChatGPT subscription login.
@@ -34,6 +36,7 @@ Commands:
 Environment overrides:
   GO_BIN             Go executable used by `tui` and `check`.
   E2E_WAIT_TIMEOUT   Seconds `up` waits for stack health (default: 600).
+  E2E_SOURCE_MODE    Image source for `up`: published (default) or local.
   AETHER_WORKSPACE   Aether workspace used by `tui` (otherwise read from .env).
   AETHER_SPECIFIER   Agent specifier used by `tui` (otherwise read from .env).
 EOF
@@ -77,6 +80,44 @@ dotenv_value() {
   printf '%s' "$value"
 }
 
+# Shell environment wins over .env, and both win over the published default.
+# Reading only these non-secret keys keeps the wrapper from sourcing arbitrary
+# or credential-bearing shell content.
+image_value() {
+  local key="$1"
+  local fallback="$2"
+  local value="${!key:-}"
+
+  if [[ -z "$value" ]]; then
+    value="$(dotenv_value "$key")"
+  fi
+  printf '%s' "${value:-$fallback}"
+}
+
+configure_stack_source() {
+  local source_mode="$1"
+
+  case "$source_mode" in
+    published)
+      export AETHERLITE_IMAGE="$(image_value AETHERLITE_IMAGE ghcr.io/scitrera/aetherlite:dev-latest)"
+      export MEMORYLAYER_IMAGE="$(image_value MEMORYLAYER_IMAGE ghcr.io/scitrera/memorylayer-server:latest)"
+      export MEMORYLAYER_EMBED_IMAGE="$(image_value MEMORYLAYER_EMBED_IMAGE ghcr.io/scitrera/memorylayer-embed-server:latest)"
+      export AGENT_HARNESS_IMAGE="$(image_value AGENT_HARNESS_IMAGE ghcr.io/scitrera/agent-harness:latest)"
+      export E2E_PULL_POLICY=always
+      ;;
+    local)
+      export AETHERLITE_IMAGE=scitrera/aetherlite:dev-local
+      export MEMORYLAYER_IMAGE=scitrera/memorylayer-server:local
+      export MEMORYLAYER_EMBED_IMAGE=scitrera/memorylayer-embed-server:local
+      export AGENT_HARNESS_IMAGE=agent-harness:local
+      export E2E_PULL_POLICY=never
+      ;;
+    *)
+      die "unknown E2E source mode: $source_mode (expected published or local)"
+      ;;
+  esac
+}
+
 compose() {
   (
     cd "$e2e_dir"
@@ -99,16 +140,34 @@ action="${1:-help}"
 
 case "$action" in
   up)
-    [[ $# -eq 0 ]] || die "up does not accept arguments"
     require_e2e_env
     command -v docker >/dev/null 2>&1 || die "docker is not installed or not on PATH"
+
+    source_mode="${E2E_SOURCE_MODE:-$(dotenv_value E2E_SOURCE_MODE)}"
+    source_mode="${source_mode:-published}"
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --local) source_mode=local ;;
+        --published) source_mode=published ;;
+        *) die "unknown up argument: $1 (expected --local or --published)" ;;
+      esac
+      shift
+    done
+    configure_stack_source "$source_mode"
+
+    if [[ "$source_mode" == "local" ]]; then
+      echo "==> Building the local OSS E2E images (embed profile included)"
+      "$e2e_dir/build.sh" --embed
+    else
+      echo "==> Pulling the latest published OSS E2E images"
+      compose pull
+      # Keep startup on the manifests just resolved by the explicit pull.
+      export E2E_PULL_POLICY=never
+    fi
 
     echo "==> Stopping the previous OSS E2E stack (volumes are preserved)"
     compose stop --timeout 30 agent tool-catalog memorylayer
     compose down --remove-orphans
-
-    echo "==> Building the local OSS E2E images (embed profile included)"
-    "$e2e_dir/build.sh" --embed
 
     echo "==> Recreating the OSS E2E stack with semantic embeddings enabled"
     export MEMORYLAYER_EMBEDDING_PROVIDER=embed_server

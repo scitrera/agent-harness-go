@@ -62,7 +62,8 @@ if [[ -z "$licenses_bin" ]]; then
 else
   report_file="$(mktemp)"
   log_file="$(mktemp)"
-  if ! "$licenses_bin" report ./cmd/agent-harness \
+  if ! "$licenses_bin" report \
+    ./cmd/agent-harness ./cmd/tool-catalog-service \
     --ignore github.com/scitrera/agent-harness-go >"$report_file" 2>"$log_file"; then
     sed -n '1,120p' "$log_file" >&2
     fail "third-party license discovery failed"
