@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Scitrera LLC
+
 // Package aether is the Aether transport for the harness: the agent-side half of
 // a channel whose two halves are split across a broker instead of a Go channel.
 //

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Scitrera LLC
+
 // Package hooks defines in-process extension points for the turn loop. Today it
 // covers tool gating (approve/deny) and tool lifecycle observation; the
 // interfaces are deliberately transport-agnostic so an external implementation

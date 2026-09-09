@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Scitrera LLC
+
 // Package promptnotes defines the backend-neutral read contract for reusable,
 // workspace-scoped prompt supplements.
 package promptnotes

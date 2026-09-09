@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Scitrera LLC
+
 // Package steering delivers a user's mid-turn chat message INTO the turn that
 // is already running, instead of making it wait for that turn to finish.
 //

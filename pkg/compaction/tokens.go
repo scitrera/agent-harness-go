@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Scitrera LLC
+
 package compaction
 
 import "github.com/scitrera/agent-harness-go/pkg/protocol"

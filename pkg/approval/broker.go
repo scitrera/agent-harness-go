@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Scitrera LLC
+
 // Package approval is the human-in-the-loop tool-approval seam: a turn that
 // hits a not-pre-authorized tool emits an approval_request and blocks on the
 // Broker until an inbound approve/deny control resolves it (or the turn's

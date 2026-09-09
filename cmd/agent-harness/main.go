@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Scitrera LLC
+
 // Command agent-harness is the reference CLI for the OSS agent-harness-go core.
 package main
 

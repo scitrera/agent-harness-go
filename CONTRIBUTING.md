@@ -4,7 +4,8 @@ Contributions should be narrowly scoped, tested, and safe to publish.
 
 Before opening a pull request:
 
-1. Run `gofmt` on changed Go files.
+1. Keep the Apache-2.0 SPDX and Scitrera copyright header at the top of every
+   Go source file, then run `gofmt` on changed Go files.
 2. Run `go vet ./...`, `go test -race -count=1 ./...`, and
    `golangci-lint run --timeout=5m`.
 3. Run `actionlint` and resolve all workflow findings.

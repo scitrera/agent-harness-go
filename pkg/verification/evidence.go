@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Scitrera LLC
+
 // Package verification records bounded, content-free evidence from admitted
 // tool results. It is an optional development-profile composition: merely
 // constructing an Observer does not alter tool policy or turn completion.

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Scitrera LLC
+
 // Command tool-catalog-service exposes pkg/catalog's deterministic Go live
 // catalog as the workspace-less Aether service sv::tool-catalog.
 package main

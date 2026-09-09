@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Scitrera LLC
+
 // Package turncancel provides a small registry that maps an in-flight turn
 // (keyed by task id) to its cancel func, so an out-of-band cancel control can
 // abort the running turn's context. It has no dependencies on the runtime or

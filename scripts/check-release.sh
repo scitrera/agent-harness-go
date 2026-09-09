@@ -28,6 +28,15 @@ if grep -Eq '^[[:space:]]*replace[[:space:]]' go.mod; then
 fi
 
 while IFS= read -r path; do
+  spdx_line="$(sed -n '1p' "$path")"
+  copyright_line="$(sed -n '2p' "$path")"
+  if [[ "$spdx_line" != "// SPDX-License-Identifier: Apache-2.0" ||
+        "$copyright_line" != "// Copyright 2026 Scitrera LLC" ]]; then
+    fail "Go source is missing the required SPDX/copyright header: $path"
+  fi
+done < <(git ls-files '*.go')
+
+while IFS= read -r path; do
   case "$path" in
     *.env.example) ;;
     .env|*/.env|*.env.*|*/.env.*|*.pem|*.key|*.p12|*.pfx|*.jks|*.keystore|id_rsa|*/id_rsa|id_dsa|*/id_dsa|id_ecdsa|*/id_ecdsa|id_ed25519|*/id_ed25519|.netrc|*/.netrc|.npmrc|*/.npmrc|.pypirc|*/.pypirc|.aws/*|*/.aws/*|.azure/*|*/.azure/*|.kube/*|*/.kube/*|.config/gcloud/*|*/.config/gcloud/*|.terraform/*|*/.terraform/*|*.tfstate|*.tfstate.*|*.log|*.db|*.sqlite|*.sqlite3|auth/*|*/auth/*|credentials/*|*/credentials/*|credentials.json|*/credentials.json|service-account*.json|*/service-account*.json|auth.json|*/auth.json|tokens.json|*/tokens.json)

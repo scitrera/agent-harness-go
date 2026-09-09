@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Scitrera LLC
+
 // Package subagent defines the contract for delegating a bounded sub-task to a
 // nested agent. The in-process implementation (internal/turn) runs an ephemeral
 // turn; the interface is intentionally backend-agnostic so a future Aether-task

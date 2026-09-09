@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Scitrera LLC
+
 // Package protocol is a thin compatibility shim over the authoritative
 // github.com/scitrera/ecosystem-messaging-spec/go module. The harness consumes the spec types
 // through these aliases so there is a single wire model across the platform;

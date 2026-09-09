@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Scitrera LLC
+
 // Package authhandoff provides a small, in-process, single-use token→authority
 // registry. It exists so a TRUSTED in-process producer — a background sub-agent's
 // completion, which needs to wake a fresh parent turn — can hand the parent's OBO

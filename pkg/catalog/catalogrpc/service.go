@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Scitrera LLC
+
 // Package catalogrpc exposes the Go live catalog through a small private
 // service boundary. Its payloads compose the portable ecosystem catalog types;
 // trusted mutation bindings and caller identity remain transport-owned and are

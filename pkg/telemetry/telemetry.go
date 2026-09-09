@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Scitrera LLC
+
 // Package telemetry instruments the turn loop with OpenTelemetry spans at the
 // key points (turn, LLM request, tool execution, sub-agent). It uses only the
 // OTel API: with no TracerProvider/exporter configured (the default) every span

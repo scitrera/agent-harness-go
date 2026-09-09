@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Scitrera LLC
+
 // Package plugin defines the transport-neutral admission contract for Sahara
 // extensions. It does not load or execute code; WASM and MCP runtimes consume an
 // admitted Manifest only after operator policy has bounded its capabilities.

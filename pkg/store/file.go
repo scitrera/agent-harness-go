@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Scitrera LLC
+
 // Package store provides filesystem reference implementations of the core
 // memory seams: a durable per-thread history store and a workspace bootstrap
 // loader. These are the OSS defaults; distributions may supply remote stores.

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Scitrera LLC
+
 // Package turnjournal provides durable, workspace-scoped checkpoints for an
 // in-progress parent model/tool loop. It is deliberately separate from chat
 // history: history records what was said, while this journal records which

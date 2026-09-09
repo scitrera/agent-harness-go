@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Scitrera LLC
+
 // Package goal provides durable, workspace-isolated goal lifecycle storage.
 package goal
 

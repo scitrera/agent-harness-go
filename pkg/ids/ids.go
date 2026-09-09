@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Scitrera LLC
+
 // Package ids generates short random identifiers for threads, sessions, and
 // similar keys. One implementation shared by the UI transports and the turn
 // runner (previously hand-rolled separately in threadindex and turn).

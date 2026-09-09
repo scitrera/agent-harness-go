@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Scitrera LLC
+
 // Package skills discovers workspace skills from the filesystem: a skill is a
 // folder containing a SKILL.md, mirroring OpenClaw's skills-folder model. The
 // SKILL.md body is loaded lazily by the model (via read_file on the returned

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Scitrera LLC
+
 // Package scheduleconfig owns the strict, credential-free YAML declaration
 // shape shared by OSS and embedded Sahara distributions.
 package scheduleconfig

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Scitrera LLC
+
 // Package casblob defines the backend-neutral atomic blob contract used by
 // distributed OSS state stores. A backend compares complete byte values rather
 // than exposing its own revision, transaction, or lock representation.

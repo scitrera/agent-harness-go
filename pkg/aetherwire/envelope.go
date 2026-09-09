@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Scitrera LLC
+
 // Package aetherwire is the Aether transport binding for the chat-stream
 // protocol: the task-message topic and the message envelope that wraps a spec
 // stream event. It is the shared, authoritative encoder/decoder for this wire

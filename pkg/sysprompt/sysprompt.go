@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Scitrera LLC
+
 // Package sysprompt builds the agent's system prompt: a hardcoded base
 // instruction block, the workspace bootstrap files (framed, ordered, capped),
 // an optional tool catalog, and a per-turn runtime line. The result is split

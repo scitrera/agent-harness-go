@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Scitrera LLC
+
 // Package cli is a reference egress implementation of the transport seam: a
 // channel.Publisher that renders a turn's stream events to a writer (e.g.
 // stdout). Pair it with a stdin REPL that calls turn.Runner.Run directly — the

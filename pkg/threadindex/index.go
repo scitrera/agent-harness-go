@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Scitrera LLC
+
 // Package threadindex persists lightweight chat-thread metadata shared by UI
 // transports. Transcript content remains in the history store.
 package threadindex

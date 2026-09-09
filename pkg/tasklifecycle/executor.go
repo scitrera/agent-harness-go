@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Scitrera LLC
+
 // Package tasklifecycle decorates a turn executor with an authoritative task's
 // claim and terminal transitions. It is transport-neutral; Aether is one host.
 package tasklifecycle

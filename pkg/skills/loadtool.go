@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Scitrera LLC
+
 // load_skill tool: the model loads a skill by NAME (not a guessed path). The
 // tool resolves it against the configured skill roots, reads the SKILL.md body,
 // and — following the skill's metadata.scitrera.prereq_skills frontmatter — also

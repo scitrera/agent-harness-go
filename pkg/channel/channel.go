@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Scitrera LLC
+
 // Package channel is the transport seam: how inbound turns arrive (Receiver)
 // and how streaming events leave (Publisher). The Aether transport and the CLI
 // are implementations. The types here are protocol-neutral (built only from

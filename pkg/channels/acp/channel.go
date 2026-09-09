@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Scitrera LLC
+
 // Package acp is a reference Agent Client Protocol (ACP) v1 input channel for
 // the OSS agent-harness. It speaks JSON-RPC 2.0 over a stdio reader/writer pair
 // (an editor/IDE launches the harness and drives it over the ACP wire): client

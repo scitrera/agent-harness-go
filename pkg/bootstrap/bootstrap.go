@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Scitrera LLC
+
 // Package bootstrap defines workspace bootstrap context files (SOUL.md,
 // AGENTS.md, IDENTITY.md, …) injected into the system prompt, and the Loader
 // seam that supplies them. The type is protocol-neutral; the core loads them

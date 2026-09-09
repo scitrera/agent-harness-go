@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Scitrera LLC
+
 // Package otlpexport installs a global OpenTelemetry tracer + OTLP/HTTP exporter so
 // the harness's pkg/telemetry spans (turn/tool/LLM) are exported to MLflow. It is a
 // SEPARATE package from pkg/telemetry on purpose: importing the span helpers stays

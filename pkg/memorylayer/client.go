@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Scitrera LLC
+
 // Package memorylayer stores chat threads and transcripts in MemoryLayer
 // instead of on local disk, so every process that shares a MemoryLayer sees the
 // same conversation — the agent worker and any number of attached frontends.

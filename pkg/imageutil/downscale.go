@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Scitrera LLC
+
 // Package imageutil holds shared image transforms for the model-bound image path.
 // The one transform today is Downscale: cap an image's longest edge before it is
 // inlined as a data_uri, so a full-resolution screenshot/PDF-page render doesn't

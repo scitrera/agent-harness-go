@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Scitrera LLC
+
 package main
 
 // record.go provides the opt-in trace/training recorder for the reference CLI: a

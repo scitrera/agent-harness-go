@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Scitrera LLC
+
 // Package configpath defines the operator-supplied path conventions shared by
 // the OSS executable and distributions built on it.
 package configpath

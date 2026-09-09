@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Scitrera LLC
+
 // Package model defines a neutral model registry + per-turn model-selection seam.
 //
 // It is policy-free: oss ships a Registry (the available models + a default) and

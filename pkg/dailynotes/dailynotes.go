@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Scitrera LLC
+
 // Package dailynotes loads recent workspace daily notes (memory/YYYY-MM-DD.md
 // and YYYY-MM-DD-<label>.md) and formats them as an UNTRUSTED background-context
 // block to inject at the start of a new conversation, mirroring OpenClaw's

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Scitrera LLC
+
 package commands
 
 // Surface identifies a command presentation or dispatch surface.

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Scitrera LLC
+
 // Package web is a reference web transport for the OSS agent-harness: a
 // browser chat UI served by an in-process net/http server, wired into the
 // transport seam. The Channel implements channel.Channel — browser POSTs become

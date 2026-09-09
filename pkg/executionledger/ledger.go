@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Scitrera LLC
+
 // Package executionledger provides a bounded, branch-aware record of turn
 // execution. It is deliberately separate from transcript/session streaming:
 // MemoryLayer (or another HistoryStore) owns what was said, while this ledger

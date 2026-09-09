@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Scitrera LLC
+
 // Package autonomy is the in-process foundation for proactive (cron-like)
 // agent behavior. It runs registered jobs on a fixed interval. It is gated OFF
 // by default at the config layer (host-configured; off unless the embedder enables it); the ecosystem

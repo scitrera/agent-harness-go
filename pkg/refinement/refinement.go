@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Scitrera LLC
+
 // Package refinement defines backend-neutral continual-refinement plans,
 // append-only audit records, and an approval-aware workflow over authoritative
 // resource editors. Task lifecycle and distributed recovery remain host-owned.

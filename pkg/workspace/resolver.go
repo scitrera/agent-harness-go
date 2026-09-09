@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Scitrera LLC
+
 // Package workspace resolves local programming projects to stable OSS
 // workspace identities. Explicit and deployment-pinned identities take
 // precedence; automatic discovery uses a canonical Git root or directory and

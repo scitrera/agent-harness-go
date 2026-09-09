@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Scitrera LLC
+
 // Package catalog is the tool/skill/MCP discovery seam: where the set of
 // available tools, skills, and MCP servers comes from. The core ships a fixed
 // (Static) and filesystem-backed provider; pkg/memorylayer supplies a

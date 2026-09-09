@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Scitrera LLC
+
 // Package shellcontext identifies user-requested shell executions that should
 // be preserved as conversational context. It is a dependency-free leaf so the
 // TUI, remote transports, and turn runner share one wire representation.

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Scitrera LLC
+
 // Package atomicfile writes a file durably. Content is written to a temp file in
 // the destination directory, then renamed into place, so a concurrent reader
 // never observes a partial file. Parent directories are created and the temp file

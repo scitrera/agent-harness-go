@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Scitrera LLC
+
 // Package sessionlog provides the OSS reference implementation of resumable
 // session state. Wire contracts live in ecosystem-messaging-spec; this package
 // owns only bounded storage, snapshot coordination, and channel adaptation.
