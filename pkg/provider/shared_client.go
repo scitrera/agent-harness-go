@@ -258,7 +258,7 @@ func (c *OpenAICompatClient) sharedChatStream(
 	if err != nil {
 		return ChatResponse{}, classifySharedClientError(err)
 	}
-	defer stream.Close()
+	defer func() { _ = stream.Close() }()
 	for {
 		event, nextErr := stream.Next(ctx)
 		if errors.Is(nextErr, io.EOF) {

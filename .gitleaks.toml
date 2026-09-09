@@ -1,0 +1,12 @@
+title = "agent-harness-go secret scanning"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Refinement record keys are public resource paths, not credentials"
+targetRules = ["generic-api-key"]
+regexTarget = "match"
+regexes = [
+  '''(?i)key["']?\s*:\s*["']refinements?/[-a-z0-9._/]+["']''',
+]

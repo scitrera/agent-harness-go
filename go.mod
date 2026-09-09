@@ -1,6 +1,6 @@
 module github.com/scitrera/agent-harness-go
 
-go 1.25.13
+go 1.25.14
 
 require (
 	charm.land/bubbles/v2 v2.1.0
@@ -9,29 +9,16 @@ require (
 	charm.land/lipgloss/v2 v2.0.4
 	github.com/charmbracelet/x/ansi v0.11.7
 	github.com/scitrera/ecosystem-messaging-spec/go v1.3.0
-	github.com/scitrera/go-llm v0.2.0
+	github.com/scitrera/go-llm v0.3.0
 	github.com/scitrera/memorylayer/memorylayer-sdk-go v0.2.0
-	github.com/scitrera/memorylayer/memorylayer-sdk-go/aether v0.0.0
+	github.com/scitrera/memorylayer/memorylayer-sdk-go/aether v0.2.0
 	go.opentelemetry.io/otel v1.43.0
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp v1.43.0
 	go.opentelemetry.io/otel/sdk v1.43.0
 	go.opentelemetry.io/otel/trace v1.43.0
-	golang.org/x/image v0.43.0
+	golang.org/x/image v0.45.0
 	gopkg.in/yaml.v3 v3.0.1
 )
-
-// Local integration until ecosystem-messaging-spec v1.3.0 is published.
-replace github.com/scitrera/ecosystem-messaging-spec/go => ../../scitrera-ecosystem-messaging-spec/go
-
-// Local integration until the standalone Apache LLM module is published. Its
-// protocol and client packages were separate modules until they merged into
-// github.com/scitrera/go-llm, which releases them together.
-replace github.com/scitrera/go-llm => ../../llm-gateway/go-llm
-
-// Local integration until the typed prompt-note SDK surface is published.
-replace github.com/scitrera/memorylayer/memorylayer-sdk-go => ../../../scitrera-memorylayer-ai-cc/oss/memorylayer-sdk-go
-
-replace github.com/scitrera/memorylayer/memorylayer-sdk-go/aether => ../../../scitrera-memorylayer-ai-cc/oss/memorylayer-sdk-go/aether
 
 require (
 	github.com/bradenaw/juniper v0.10.0 // indirect
@@ -74,16 +61,11 @@ require (
 	go.opentelemetry.io/otel/metric v1.43.0 // indirect
 	go.opentelemetry.io/proto/otlp v1.10.0 // indirect
 	golang.org/x/net v0.55.0 // indirect
-	golang.org/x/sync v0.21.0 // indirect
-	golang.org/x/sys v0.45.0 // indirect
-	golang.org/x/text v0.39.0 // indirect
+	golang.org/x/sync v0.22.0 // indirect
+	golang.org/x/sys v0.47.0 // indirect
+	golang.org/x/text v0.41.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260526163538-3dc84a4a5aaa // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260526163538-3dc84a4a5aaa // indirect
 	google.golang.org/grpc v1.82.1 // indirect
 	google.golang.org/protobuf v1.36.11
 )
-
-// Local integration until the current Aether SDK/API changes are published.
-replace github.com/scitrera/aether/sdk/go => ../../../scitrera-aether3-go/oss-repo/sdk/go
-
-replace github.com/scitrera/aether/api => ../../../scitrera-aether3-go/oss-repo/api

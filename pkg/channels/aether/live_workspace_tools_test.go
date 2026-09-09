@@ -141,7 +141,7 @@ func liveAetherAdminRequest(ctx context.Context, method, endpoint string, body [
 	if err != nil {
 		return 0, nil, err
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	raw, err := io.ReadAll(io.LimitReader(response.Body, 64<<10))
 	return response.StatusCode, raw, err
 }
@@ -379,7 +379,11 @@ func TestLiveAetherCatalogAgentMemoryLayerOBO(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer user.Close()
+	t.Cleanup(func() {
+		if err := user.Close(); err != nil {
+			t.Errorf("close user client: %v", err)
+		}
+	})
 	caller, err := sdk.NewAgentClient(sdk.AgentOptions{
 		ClientOptions: sdk.ClientOptions{ServerAddr: serverAddr},
 		Workspace:     catalogWorkspace, Implementation: "catalog-e2e-caller", Specifier: suffix,
@@ -387,7 +391,11 @@ func TestLiveAetherCatalogAgentMemoryLayerOBO(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer caller.Close()
+	t.Cleanup(func() {
+		if err := caller.Close(); err != nil {
+			t.Errorf("close caller client: %v", err)
+		}
+	})
 	provider, err := sdk.NewAgentClient(sdk.AgentOptions{
 		ClientOptions: sdk.ClientOptions{ServerAddr: serverAddr},
 		Workspace:     catalogWorkspace, Implementation: "catalog-e2e-provider", Specifier: "memorylayer-e2e",
@@ -395,7 +403,11 @@ func TestLiveAetherCatalogAgentMemoryLayerOBO(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer provider.Close()
+	t.Cleanup(func() {
+		if err := provider.Close(); err != nil {
+			t.Errorf("close provider client: %v", err)
+		}
+	})
 
 	catalogClient, err := aetherchan.NewCatalogClient(aetherchan.CatalogClientConfig{
 		Route: caller.Topic(), Sender: caller,
@@ -415,7 +427,11 @@ func TestLiveAetherCatalogAgentMemoryLayerOBO(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer mlClient.Close()
+	t.Cleanup(func() {
+		if err := mlClient.Close(); err != nil {
+			t.Errorf("close MemoryLayer client: %v", err)
+		}
+	})
 	registry := tools.NewRegistry()
 	seenAuthority := make(chan tools.MemoryAuthority, 1)
 	if err := registry.Register("remember_to_vfs", tools.HandlerFunc(func(callCtx context.Context, request tools.Request) (tools.Result, error) {

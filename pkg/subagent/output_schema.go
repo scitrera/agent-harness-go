@@ -365,7 +365,8 @@ func jsonEqual(left, right any) bool {
 
 func childPath(parent, name string) string {
 	if strings.IndexFunc(name, func(r rune) bool {
-		return !(r == '_' || r == '-' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9')
+		letterOrDigit := r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9'
+		return r != '_' && r != '-' && !letterOrDigit
 	}) < 0 {
 		return parent + "." + name
 	}

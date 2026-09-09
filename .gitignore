@@ -1,17 +1,60 @@
 .codegraph/
 .omo/
 .omc/
+.agent/
+.agent-harness/
 test.env
 
 .local-test/
+.local-test-*/
+.local-deps/
+
+# Credentials and machine-local configuration. Examples may be committed only
+# when they contain placeholders and use the conventional .env.example name.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+id_rsa
+id_dsa
+id_ecdsa
+id_ed25519
+.netrc
+.npmrc
+.pypirc
+.aws/
+.azure/
+.kube/
+.config/gcloud/
+.terraform/
+*.tfstate
+*.tfstate.*
+credentials.json
+credentials-*.json
+*_credentials.json
+service-account*.json
+auth.json
+tokens.json
+.credential-*
+/auth/
+/credentials/
+/sahara/auth/
 
 # Runtime dirs created by cmd/agent-harness when run from the repo
 /workspace/
-.agent-harness/
 
 # Build / editor
 *.test
 *.out
+*.log
+*.db
+*.sqlite
+*.sqlite3
 /bin/
 # Where the release workflow stages cross-compiled archives.
 /dist/

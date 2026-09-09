@@ -5,22 +5,20 @@ conversations — enough to run the harness the way it is meant to be deployed
 (UI and agent in different processes, sharing durable history) without any
 platform.
 
-The stack uses only the OSS components. The local agent image is deliberately
-built with the sibling ecosystem-spec, Aether, MemoryLayer, and go-llm source
-trees, so it exercises the current `replace` graph before coordinated releases
-exist.
+The stack uses only OSS components. The local agent image resolves the released
+ecosystem-spec, Aether, MemoryLayer, and go-llm Go modules from the public module
+proxy. Aether and MemoryLayer service images are still built from local source
+checkouts until those images are published.
 
 ## 1. Prerequisites
 
 - Docker with Compose v2 and BuildKit support.
-- The agent-harness, ecosystem messaging spec, Aether OSS, MemoryLayer OSS, and
-  go-llm checkouts. `build.sh` defaults to the layout used by this monorepo;
-  override `ECOSYSTEM_SPEC_REPO`, `AETHER_REPO`, `MEMORYLAYER_REPO`, or
-  `GO_LLM_REPO` if yours differs.
+- The agent-harness, Aether OSS, and MemoryLayer OSS checkouts. Point the
+  ignored `.local-deps/aether` and `.local-deps/memorylayer` symlinks at the
+  service checkouts, or override `AETHER_REPO` and `MEMORYLAYER_REPO`.
 - An OpenAI-compatible model endpoint with a tool-capable model.
-- Go only for the host TUI. In this checkout, the known toolchain is
-  `/home/drew/sdk/go1.25.10/bin/go`; Go may auto-select the newer patch version
-  required by `go.mod`.
+- Go only for the host TUI. Use the version required by `go.mod`; the Go
+  toolchain may automatically select a newer compatible patch release.
 
 ## 2. Configure the provider and models
 
@@ -152,9 +150,9 @@ For a provider with `kind: openai_subscription`, start the stack and log in
 through the repository wrapper:
 
 ```bash
-./local-test-oss-e2e.sh up
-./local-test-oss-e2e.sh auth login --profile personal
-./local-test-oss-e2e.sh auth status --profile personal
+./e2e/run.sh up
+./e2e/run.sh auth login --profile personal
+./e2e/run.sh auth status --profile personal
 ```
 
 Run those commands from the repository root. The wrapper executes the auth
@@ -162,7 +160,7 @@ broker in the agent container, where it shares the worker's `sahara-auth` named
 volume. The volume survives ordinary `down`/`up` and agent recreation; using
 `docker compose down -v` removes it along with the other E2E data volumes.
 
-## 3. Build and start the local replacement graph
+## 3. Build and start the local stack
 
 ```bash
 ./build.sh
@@ -247,7 +245,7 @@ to an authorized catalog or remote tool service.
 In a second terminal, from the OSS repository root (`oss/`):
 
 ```bash
-/home/drew/sdk/go1.25.10/bin/go run ./cmd/agent-harness \
+go run ./cmd/agent-harness \
   --tui \
   --workspace ./e2e/workspace \
   --aether 127.0.0.1:50051 \
@@ -270,11 +268,10 @@ model execution and policy, while file/shell/Python calls return over Aether to
 the client checkout named by the turn's logical execution binding.
 
 To verify this transport deterministically without depending on a model to
-choose a tool, run from the parent `agent-harness/` directory while the stack is
-up:
+choose a tool, run from the repository root while the stack is up:
 
 ```bash
-./local-test-oss-e2e.sh check
+./e2e/run.sh check
 ```
 
 The check creates conflicting `identity.txt` files on a temporary client root
@@ -349,7 +346,9 @@ when testing provider separation.
   request without routing the invocation through Sahara or Platform Bridge;
 - the OSS executable loads `config/models.yaml`, supports `/model` pins, routes
   images by declared capability, and can resolve a provider per model;
-- the build consumes the untagged sibling source graph used during development.
+- the agent image builds against the same published Go dependency graph used by
+  a clean OSS checkout, while the Aether and MemoryLayer services run from the
+  selected local source checkouts.
 
 It does not prove production authentication, semantic retrieval quality with the
 default lexical embedder, model execution for a scheduled prompt, or recovery
@@ -362,7 +361,7 @@ Run that focused live test after `up` has rebuilt the local agent image:
 ```bash
 AETHER_CATALOG_E2E=1 AETHER_E2E_ADDR=127.0.0.1:50051 \
   AETHER_E2E_ADMIN_URL=http://127.0.0.1:31880 \
-  /home/drew/sdk/go1.25.10/bin/go test ./pkg/channels/aether \
+  go test ./pkg/channels/aether \
   -run TestLiveAetherCatalogAgentMemoryLayerOBO -count=1 -v
 ```
 
@@ -378,18 +377,14 @@ AETHER_CATALOG_E2E=1 AETHER_E2E_ADDR=127.0.0.1:50051 \
 
 ## Local images and future releases
 
-None of the OSS images are published yet, so `build.sh` builds all of them from
-sibling checkouts. Aether is layered locally as `aether:local` →
-`aetherlite:local` → `aetherlite:dev-local`; the other images use `:local`:
+Not all OSS images are published yet, so `build.sh` builds the services and
+harness image locally. The harness uses published Go dependencies. Aether is
+layered locally as `aether:local` → `aetherlite:local` →
+`aetherlite:dev-local`; the other images use `:local`:
 
 ```
-<root>/scitrera-app-monorepo2/agent-harness/oss   <- this repo
-<root>/scitrera-app-monorepo2/scitrera-ecosystem-messaging-spec
-                                                   <- $ECOSYSTEM_SPEC_REPO
-<root>/scitrera-app-monorepo2/backend/scitrera-aether3-go/oss-repo
-                                                   <- $AETHER_REPO
-<root>/scitrera-app-monorepo2/llm-gateway/go-llm   <- $GO_LLM_REPO
-<root>/scitrera-memorylayer-ai-cc/oss             <- $MEMORYLAYER_REPO
+<this-repo>/.local-deps/aether       <- $AETHER_REPO
+<this-repo>/.local-deps/memorylayer  <- $MEMORYLAYER_REPO
 ```
 
 Every image reference in `docker-compose.yml` is a variable, so when the images

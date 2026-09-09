@@ -15,10 +15,62 @@
 **/.claude/**
 **/.codex
 **/.codex/**
+**/.agent
+**/.agent/**
+**/.agent-harness
+**/.agent-harness/**
 **/.omc
 **/.omc/**
 **/.slop
 **/.slop/**
+
+# Credentials and host-specific state must never enter a remote builder or its
+# cache, even when they are ignored by Git and absent from the final image.
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+**/*.jks
+**/*.keystore
+**/id_rsa
+**/id_dsa
+**/id_ecdsa
+**/id_ed25519
+**/.netrc
+**/.npmrc
+**/.pypirc
+**/.aws
+**/.aws/**
+**/.azure
+**/.azure/**
+**/.kube
+**/.kube/**
+**/.config/gcloud
+**/.config/gcloud/**
+**/.terraform
+**/.terraform/**
+**/*.tfstate
+**/*.tfstate.*
+**/credentials.json
+**/credentials-*.json
+**/*_credentials.json
+**/service-account*.json
+**/auth.json
+**/tokens.json
+**/.credential-*
+/auth
+/credentials
+/sahara/auth
+**/test.env
+
+# Local E2E and runtime workspaces can contain transcripts, model registries,
+# OAuth profiles, customer material, and tool outputs. They are not inputs to
+# the production image build.
+/e2e
+/workspace
+/.local-test
+/.local-test-*
+/.local-deps
 
 # Generated outputs and local dependency/cache trees.
 **/node_modules
@@ -26,6 +78,10 @@
 **/.venv
 **/.venv/**
 **/coverage.out
+**/*.log
+**/*.db
+**/*.sqlite
+**/*.sqlite3
 **/dist
 **/dist/**
 **/build

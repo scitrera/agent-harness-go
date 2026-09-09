@@ -10,9 +10,10 @@
 # of the split, and it means the UI needs no container of its own. Several can
 # attach at once; with MemoryLayer wired they share one conversation.
 #
-# IMAGES. Every image is built locally from the sibling source trees (build.sh),
-# because the OSS images are not published yet. The tags are variables, so when
-# they are published this becomes an .env edit rather than a compose change.
+# IMAGES. Service images and the harness are built locally by build.sh while
+# published images are unavailable. The harness build resolves released Go
+# modules rather than depending on sibling Go source trees. Image tags remain
+# variables, so published images can be selected through .env.
 
 name: agent-harness-e2e
 

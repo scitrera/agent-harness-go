@@ -63,7 +63,7 @@ func NewScheduledOperationsCommands(
 	timeout time.Duration,
 ) (*ScheduledOperationsCommands, error) {
 	if c == nil {
-		return nil, errors.New("Aether channel is required")
+		return nil, errors.New("aether channel is required")
 	}
 	reader, err := c.ScheduledRunReader(journal, threads, timeout)
 	if err != nil {
@@ -118,7 +118,7 @@ func (c *ScheduledOperationsCommands) RunScheduledOperationsCommand(
 		}
 		if page.NextPageToken != "" {
 			if err := validateScheduledRunsCursor(page.NextPageToken); err != nil {
-				return "", fmt.Errorf("Aether returned an invalid next-page cursor: %w", err)
+				return "", fmt.Errorf("aether returned an invalid next-page cursor: %w", err)
 			}
 		}
 		return renderScheduledRunPage(page, query.Limit, statusNames), nil

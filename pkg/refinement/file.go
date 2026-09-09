@@ -234,7 +234,7 @@ func (s *FileStore) load(workspaceID string) ([]fileEntry, error) {
 	if err != nil {
 		return nil, fmt.Errorf("refinement: open %s: %w", path, err)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 64<<10), maxAuditLineBytes)
 	var entries []fileEntry

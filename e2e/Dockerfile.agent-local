@@ -1,8 +1,7 @@
 # syntax=docker/dockerfile:1
 #
-# Local-replacement build for the OSS E2E stack. The release Dockerfile expects
-# published module versions; this one supplies the sibling source trees at the
-# absolute paths targeted by the development-time replace directives in go.mod.
+# Local image build for the OSS E2E stack. Go dependencies resolve from their
+# published module versions; only the harness source comes from this checkout.
 
 ARG GO_IMAGE=golang:1.25
 
@@ -12,13 +11,6 @@ ARG TARGETOS=linux
 ARG TARGETARCH
 
 WORKDIR /src
-
-COPY --from=ecosystem_spec . /scitrera-ecosystem-messaging-spec
-COPY --from=aether_oss . /scitrera-aether3-go/oss-repo
-COPY --from=memorylayer_sdk . /scitrera-memorylayer-ai-cc/oss/memorylayer-sdk-go
-# go.mod resolves github.com/scitrera/go-llm from ../../llm-gateway/go-llm.
-# Stage that named context at the matching absolute path before downloading.
-COPY --from=go_llm . /llm-gateway/go-llm
 
 COPY go.mod go.sum ./
 RUN go mod download

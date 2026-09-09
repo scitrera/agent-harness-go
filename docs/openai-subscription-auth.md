@@ -32,9 +32,9 @@ command runs in the worker container and reads or writes the same credential
 store as the serving process:
 
 ```sh
-./local-test-oss-e2e.sh auth login --profile personal
-./local-test-oss-e2e.sh auth status --profile personal
-./local-test-oss-e2e.sh auth logout --profile personal
+./e2e/run.sh auth login --profile personal
+./e2e/run.sh auth status --profile personal
+./e2e/run.sh auth logout --profile personal
 ```
 
 The wrapper requires the E2E stack to be running. Its `sahara-auth` named

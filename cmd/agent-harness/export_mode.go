@@ -218,10 +218,6 @@ type openAIExport struct {
 	Usage     exportUsage  `json:"usage"`
 }
 
-func toOpenAIExport(thread string, msgs []protocol.ChatMessage) openAIExport {
-	return toOpenAIWorkspaceExport("", thread, msgs)
-}
-
 func toOpenAIWorkspaceExport(workspace, thread string, msgs []protocol.ChatMessage) openAIExport {
 	out := make([]oaiMessage, 0, len(msgs))
 	for _, m := range msgs {
@@ -277,10 +273,6 @@ type traceExport struct {
 	Thread    string                 `json:"thread"`
 	Messages  []protocol.ChatMessage `json:"messages"`
 	Usage     exportUsage            `json:"usage"`
-}
-
-func toTraceExport(thread string, msgs []protocol.ChatMessage) traceExport {
-	return toTraceWorkspaceExport("", thread, msgs)
 }
 
 func toTraceWorkspaceExport(workspace, thread string, msgs []protocol.ChatMessage) traceExport {

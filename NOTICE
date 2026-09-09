@@ -5,6 +5,9 @@ This product includes software developed at Scitrera LLC
 
 Licensed under the Apache License, Version 2.0. See the LICENSE file.
 
-This product uses Scitrera LLM Protocol for Go and Scitrera LLM Client for Go.
-Copyright 2026 Scitrera LLC. Both modules are licensed under the Apache
-License, Version 2.0.
+This product uses github.com/scitrera/go-llm.
+Copyright 2026 Scitrera LLC. The module is licensed under the Apache License,
+Version 2.0.
+
+Binary distributions include applicable dependency license texts in the
+third_party_licenses directory.

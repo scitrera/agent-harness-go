@@ -26,17 +26,6 @@ func rowsFromHistoryWithReasoning(messages []protocol.ChatMessage, retainReasoni
 	return rows
 }
 
-func rowsForMessage(message protocol.ChatMessage) []chatRow {
-	rows := make([]chatRow, 0, len(message.Content)+1)
-	for _, row := range rawRowsForMessage(message) {
-		if rowConsumesReasoning(row) {
-			rows = removeReasoningRows(rows, row.TaskID)
-		}
-		rows = appendOrReplaceToolRow(rows, row)
-	}
-	return rows
-}
-
 func rawRowsForMessage(message protocol.ChatMessage) []chatRow {
 	switch message.Role {
 	case protocol.RoleUser:

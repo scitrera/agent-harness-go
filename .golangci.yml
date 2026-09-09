@@ -31,3 +31,7 @@ linters:
         # starts carrying the wrong field — the moment either one gains a member.
         # Naming the field is the point, not boilerplate.
         - -S1016
+        # Explicit selectors on embedded wire/domain records document which
+        # schema owns a field. Flattening them makes validation and hashing
+        # code terser but obscures that boundary.
+        - -QF1008

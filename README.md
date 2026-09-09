@@ -53,6 +53,16 @@ Operators deploying the Aether live tool catalog can configure reviewed,
 per-tool downstream caller authority using the
 [tool catalog service guide](docs/tool-catalog-service.md).
 
+## Release verification
+
+Tags are held to stricter rules than local coordinated development. Before a
+tag can publish, `./scripts/check-release.sh` requires a full-history secret
+scan, discoverable licenses for every linked dependency, a tidy verified module,
+and no local `replace` directives. Development branches may temporarily use
+sibling replacements while coordinated OSS modules are being prepared, but a
+release must resolve entirely from published module versions. Binary archives
+and the reference container include the discovered third-party license texts.
+
 ### Interfaces
 
 | Flag | Env | Default | Notes |
@@ -654,22 +664,29 @@ uses Aether tasks and their lifecycle instead.
 
 ## Releases
 
-`versions.yaml` is the single source of truth for this repo's version, its CI,
-and its release artifacts; the files under `.github/workflows/` are generated
-from it by [scitrera-repo-tools](https://github.com/scitrera/repo-tools) and
-carry a "do not edit by hand" header for that reason.
+`versions.yaml` is the single source of truth for this repo's version and the
+baseline Go CI/release jobs. `version-check.yml` is generated directly from it
+by [scitrera-repo-tools](https://github.com/scitrera/repo-tools).
+`test-go.yml` and `publish-go.yml` start from that baseline but deliberately
+retain repository-specific secret scanning, workflow linting, strict tag
+checks, and dependency-license packaging that the current generator does not
+model. Consequently, a raw generated-CI drift check is expected to report
+those two files. Refresh the baseline deliberately, restore the clearly marked
+custom jobs, review the complete diff, and validate the result with
+`actionlint`.
 
 ```bash
 python scripts/update-versions.py --check    # versions.yaml vs. the tree
-python scripts/generate-ci-gha.py            # workflows vs. versions.yaml
-python scripts/generate-ci-gha.py --force    # apply after editing versions.yaml
+python scripts/generate-ci-gha.py --force    # refresh baseline; restore custom jobs
+actionlint                                   # validate all resulting workflows
 ```
 
 Pushing a `vX.Y.Z` tag runs the Go tests, cross-compiles `agent-harness` for
 linux/amd64, linux/arm64, windows/amd64, windows/arm64 and darwin/arm64, and
 attaches the archives plus a `checksums.txt` to the GitHub release. Each archive
-carries the binary, `LICENSE`, `NOTICE` and this file; Windows ships as `.zip`
-and everything else as `.tar.gz`. `agent-harness --version` reports the release
+carries the binary, `LICENSE`, `NOTICE`, this file, and discovered dependency
+license texts under `third_party_licenses/`; Windows ships as `.zip` and
+everything else as `.tar.gz`. `agent-harness --version` reports the release
 version and the commit it was built from.
 
 Bump the version in `versions.yaml`, run `python scripts/update-versions.py` to
@@ -677,5 +694,5 @@ propagate it into `pkg/version/version.go`, then tag.
 
 ## Status
 
-Extracted from a working internal runtime. APIs may shift before a tagged
-release. Apache-2.0 licensed.
+Active development. APIs may shift before a stable release. Apache-2.0
+licensed.

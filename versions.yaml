@@ -23,12 +23,16 @@ project_rules:
     - { type: gomod,      path: go.mod }
     - { type: go_version, path: pkg/version/version.go }
 
-# GitHub Actions generation. Run: generate-ci-gha [--check|--force]
+# GitHub Actions baseline generation. See README.md before refreshing it.
 ci:
+  # test-go.yml and publish-go.yml also contain repository-specific secret
+  # scanning, strict tag checks, and third-party-license packaging. The current
+  # generator does not model those jobs; preserve them when regenerating.
   # Pinned deliberately: a bare `scitrera-repo-tools` floats to the newest
   # release, so a change to the generator would surface as workflow drift on an
-  # unrelated PR. `ci.go.binaries` below requires >= 0.1.25.
-  repo_tools_source: "scitrera-repo-tools==0.1.25"
+  # unrelated PR. `ci.go.binaries` below requires >= 0.1.25; 0.1.30 is the
+  # current reviewed baseline.
+  repo_tools_source: "scitrera-repo-tools==0.1.30"
   # `main` is the only branch. `push_branches` is left unset, which means it
   # follows this list — so a PR from a feature branch fires only the
   # pull_request event and a post-merge push to main fires only the push event.
@@ -37,7 +41,7 @@ ci:
   # The release binaries are attached to the tag's GitHub release.
   github_release: true
   go:
-    # The latest patch of the pinned minor rather than the exact `go 1.25.12`
+    # The latest patch of the pinned minor rather than the exact `go 1.25.14`
     # in go.mod: patch releases are security fixes and the published binaries
     # should carry them. The floor matters too — go.mod's directive is what
     # keeps GO-2026-5856 (crypto/tls, fixed in go1.25.12) out of a local build.

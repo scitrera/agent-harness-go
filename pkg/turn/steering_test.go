@@ -210,7 +210,7 @@ func Test_Steering_delivers_a_burst_as_one_batch_in_order(t *testing.T) {
 	if first < 0 || middle < 0 || last < 0 {
 		t.Fatalf("not every steering message was delivered:\n%s", second)
 	}
-	if !(first < middle && middle < last) {
+	if first >= middle || middle >= last {
 		t.Fatalf("steering burst arrived out of send order:\n%s", second)
 	}
 }

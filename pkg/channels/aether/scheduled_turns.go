@@ -542,7 +542,7 @@ func (e *ScheduledTurnExecutor) forget(taskID string) { e.clearSeen(taskID) }
 func (e *ScheduledTurnExecutor) reject(ctx context.Context, taskID string, cause error) error {
 	response, finishErr := e.tasks.FailTask(context.WithoutCancel(ctx), taskID, boundedTaskReason(cause.Error()), e.timeout)
 	if finishErr == nil && (response == nil || !response.Success) {
-		finishErr = errors.New("Aether rejected scheduled turn task failure")
+		finishErr = errors.New("aether rejected scheduled turn task failure")
 	}
 	if finishErr != nil {
 		finishErr = fmt.Errorf("aether: fail assigned scheduled turn task: %w", finishErr)

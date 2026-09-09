@@ -98,7 +98,7 @@ func (p *FileProvider) loadDocument(ctx context.Context, workspaceID string) (fi
 	if err != nil {
 		return fileDocument{}, false, fmt.Errorf("promptnotes: open %s: %w", path, err)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	limited := io.LimitReader(file, maxFileBytes+1)
 	raw, err := io.ReadAll(limited)

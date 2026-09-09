@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -32,7 +33,7 @@ func main() {
 	}
 }
 
-func run() error {
+func run() (runErr error) {
 	address := flag.String("aether", envOr("AETHER_ADDR", envOr("AETHER_GATEWAY", "127.0.0.1:50051")), "Aether gateway host:port")
 	implementation := flag.String("implementation", envOr("TOOL_CATALOG_IMPLEMENTATION", "tool-catalog"), "Aether service implementation")
 	specifier := flag.String("specifier", envOr("AETHER_SERVICE_SPECIFIER", hostname()), "Aether service specifier")
@@ -66,7 +67,9 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("construct Aether service client: %w", err)
 	}
-	defer client.Close()
+	defer func() {
+		runErr = errors.Join(runErr, client.Close())
+	}()
 
 	authorizer, err := catalogrpc.NewAetherEntryAuthorizer(client)
 	if err != nil {

@@ -24,8 +24,16 @@ RUN go mod download
 
 COPY . .
 
-RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
-    go build -ldflags="-s -w" -o /out/agent-harness ./cmd/agent-harness
+RUN GOBIN=/tmp/release-tools \
+    go install github.com/google/go-licenses/v2@v2.0.1 && \
+    /tmp/release-tools/go-licenses report ./cmd/agent-harness \
+      --ignore github.com/scitrera/agent-harness-go > /tmp/third-party-licenses.csv && \
+    ! grep -Eq ',Unknown$' /tmp/third-party-licenses.csv && \
+    /tmp/release-tools/go-licenses save ./cmd/agent-harness \
+      --ignore github.com/scitrera/agent-harness-go \
+      --save_path /out/third_party_licenses && \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+      go build -trimpath -ldflags="-s -w" -o /out/agent-harness ./cmd/agent-harness
 
 FROM alpine:3.23.4
 
@@ -35,6 +43,8 @@ RUN apk add --no-cache ca-certificates tzdata python3 && \
     mkdir -p /workspace && chown harness:harness /workspace
 
 COPY --from=builder /out/agent-harness /usr/local/bin/agent-harness
+COPY --from=builder /src/LICENSE /src/NOTICE /usr/share/licenses/agent-harness/
+COPY --from=builder /out/third_party_licenses /usr/share/licenses/agent-harness/third_party/
 
 USER harness
 WORKDIR /workspace

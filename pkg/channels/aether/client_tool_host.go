@@ -149,11 +149,6 @@ func (h *ClientToolHost) invoke(ctx context.Context, access ClientToolAccessRequ
 	return h.local.invokeBound(ctx, binding, tools.RequestFromEnvelope(envelope))
 }
 
-func toolEnvelopeBinding(envelope spec.ToolInvokeEnvelope) (spec.ExecutionBinding, error) {
-	scope, err := toolEnvelopeExecutionScope(envelope)
-	return scope.Binding, err
-}
-
 func toolEnvelopeExecutionScope(envelope spec.ToolInvokeEnvelope) (workspacepkg.ExecutionScope, error) {
 	raw := envelope.Meta[spec.ExecutionBindingMetaKey]
 	if len(raw) == 0 {

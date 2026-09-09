@@ -356,7 +356,6 @@ func (r *Runtime) AfterTurn(ctx context.Context, addr protocol.MessageAddress, t
 				verifierFailure = fmt.Sprintf("%s (%d of %d consecutive failures before the goal blocks)",
 					detail, streak, r.verifierFailureStreak)
 			case result.Satisfied:
-				verification = &result
 				evidence := append([]string(nil), result.Evidence...)
 				evidence = append(evidence, verifierEvidencePrefix+"satisfied")
 				completed, updateErr := r.service.UpdateGoal(ctx, workspaceID, sessionID, UpdateInput{

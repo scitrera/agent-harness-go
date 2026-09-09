@@ -2,20 +2,14 @@
 #
 # Build the stack's images from local source.
 #
-# TEMPORARY. The OSS images are not published yet, so everything is built from
-# the sibling checkouts and tagged `:local`. When they ship, delete nothing —
-# just point the *_IMAGE variables in .env at the published tags and stop running
-# this. The compose file already reads them.
+# TEMPORARY. The OSS service images are not all published yet, so the stack
+# builds Aether, MemoryLayer, and the harness locally and tags them `:local`.
+# The harness itself consumes published Go modules.
 #
-# Layout assumed (override with the env vars below):
+# Default ignored dependency layout (override with the env vars below):
 #
-#   <root>/scitrera-app-monorepo2/agent-harness/oss   <- this repo
-#   <root>/scitrera-app-monorepo2/scitrera-ecosystem-messaging-spec
-#                                                    <- ECOSYSTEM_SPEC_REPO
-#   <root>/scitrera-app-monorepo2/backend/scitrera-aether3-go/oss-repo
-#                                                    <- AETHER_REPO
-#   <root>/scitrera-app-monorepo2/llm-gateway/go-llm <- GO_LLM_REPO
-#   <root>/scitrera-memorylayer-ai-cc/oss             <- MEMORYLAYER_REPO
+#   <this-repo>/.local-deps/aether       <- AETHER_REPO
+#   <this-repo>/.local-deps/memorylayer  <- MEMORYLAYER_REPO
 #
 # Usage:
 #   ./build.sh              # aetherlite-dev + memorylayer + agent-harness
@@ -26,12 +20,25 @@ set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 oss_repo="$(cd "$here/.." && pwd)"
-monorepo_root="$(cd "$oss_repo/../.." && pwd)"
+local_deps_root="$oss_repo/.local-deps"
 
-ECOSYSTEM_SPEC_REPO="${ECOSYSTEM_SPEC_REPO:-$monorepo_root/scitrera-ecosystem-messaging-spec}"
-AETHER_REPO="${AETHER_REPO:-$monorepo_root/backend/scitrera-aether3-go/oss-repo}"
-MEMORYLAYER_REPO="${MEMORYLAYER_REPO:-$HOME/scitrera-memorylayer-ai-cc/oss}"
-GO_LLM_REPO="${GO_LLM_REPO:-$monorepo_root/llm-gateway/go-llm}"
+AETHER_REPO="${AETHER_REPO:-$local_deps_root/aether}"
+MEMORYLAYER_REPO="${MEMORYLAYER_REPO:-$local_deps_root/memorylayer}"
+
+usage() {
+  cat <<'EOF'
+Usage: ./e2e/build.sh [--embed] [--only COMPONENT]
+
+Build local OSS E2E images. Aether and MemoryLayer source default to the
+ignored .local-deps layout and can be overridden with AETHER_REPO and
+MEMORYLAYER_REPO.
+
+Options:
+  --embed             Also build the CPU embedding server.
+  --only COMPONENT    Build only aether, memorylayer, agent, or embed.
+  -h, --help          Show this help.
+EOF
+}
 
 want_embed=0
 only=""
@@ -39,7 +46,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --embed) want_embed=1; shift ;;
     --only)  only="${2:-}"; shift 2 ;;
-    -h|--help) sed -n '2,26p' "$0"; exit 0 ;;
+    -h|--help) usage; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -115,31 +122,23 @@ if build aether yes; then
 fi
 
 if build memorylayer yes; then
-  [[ -d "$MEMORYLAYER_REPO/memorylayer-core-python" ]] || fail_missing "the memorylayer oss repo" "$MEMORYLAYER_REPO" MEMORYLAYER_REPO
-  echo "==> memorylayer-server"
-  docker build -t scitrera/memorylayer-server:local -f "$MEMORYLAYER_REPO/Dockerfile" "$MEMORYLAYER_REPO"
+	[[ -d "$MEMORYLAYER_REPO/memorylayer-core-python" ]] || fail_missing "the memorylayer oss repo" "$MEMORYLAYER_REPO" MEMORYLAYER_REPO
+	echo "==> memorylayer-server"
+	docker build -t scitrera/memorylayer-server:local -f "$MEMORYLAYER_REPO/Dockerfile" "$MEMORYLAYER_REPO"
 fi
 
 if build agent yes; then
-  [[ -d "$ECOSYSTEM_SPEC_REPO/go" ]] || fail_missing "the ecosystem messaging spec repo" "$ECOSYSTEM_SPEC_REPO" ECOSYSTEM_SPEC_REPO
-  [[ -d "$AETHER_REPO/sdk/go" ]] || fail_missing "the aether repo" "$AETHER_REPO" AETHER_REPO
-  [[ -d "$MEMORYLAYER_REPO/memorylayer-sdk-go" ]] || fail_missing "the memorylayer oss repo" "$MEMORYLAYER_REPO" MEMORYLAYER_REPO
-  [[ -f "$GO_LLM_REPO/go.mod" ]] || fail_missing "the go-llm repo" "$GO_LLM_REPO" GO_LLM_REPO
   echo "==> agent-harness"
   docker build \
-    --build-context ecosystem_spec="$ECOSYSTEM_SPEC_REPO" \
-    --build-context aether_oss="$AETHER_REPO" \
-    --build-context memorylayer_sdk="$MEMORYLAYER_REPO/memorylayer-sdk-go" \
-    --build-context go_llm="$GO_LLM_REPO" \
     -f "$here/Dockerfile.agent-local" \
     -t agent-harness:local \
     "$oss_repo"
 fi
 
 if build embed "$([[ $want_embed == 1 || "$only" == embed ]] && echo yes || echo no)"; then
-  echo "==> memorylayer-embed-server (CPU) — this one is large"
-  docker build -t scitrera/memorylayer-embed-server:local \
-    -f "$MEMORYLAYER_REPO/memorylayer-embed-server/Dockerfile.cpu" "$MEMORYLAYER_REPO"
+	echo "==> memorylayer-embed-server (CPU) — this one is large"
+	docker build -t scitrera/memorylayer-embed-server:local \
+		-f "$MEMORYLAYER_REPO/memorylayer-embed-server/Dockerfile.cpu" "$MEMORYLAYER_REPO"
 fi
 
 echo

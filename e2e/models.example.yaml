@@ -37,7 +37,7 @@ models:
 #     format: openai
 #   # ChatGPT Plus/Pro uses the Sahara OSS credential broker instead of an API
 #   # key or configurable URL. From the repository root, run
-#   # `./local-test-oss-e2e.sh auth login --profile personal` after `up`.
+#   # `./e2e/run.sh auth login --profile personal` after `up`.
 #   - name: chatgpt-subscription
 #     kind: openai_subscription
 #     auth_profile: personal

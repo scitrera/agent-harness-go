@@ -39,13 +39,14 @@ func (m model) prepareQueuedMessage(kind outboundKind, input string, attachments
 	}
 	messageText := input
 	var referencedImages []referencedImage
-	if kind == outboundMetaCommand {
+	switch kind {
+	case outboundMetaCommand:
 		if strings.HasPrefix(messageText, "/models") {
 			messageText = "/model" + strings.TrimPrefix(messageText, "/models")
 		}
 		prepared.DisplayText = messageText
 		attachments = nil
-	} else if kind == outboundConversation {
+	case outboundConversation:
 		withAttachments := m
 		withAttachments.attachments = cloneAttachments(attachments)
 		resolved, images, err := withAttachments.resolveAtReferences(messageText)
