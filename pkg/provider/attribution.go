@@ -6,6 +6,7 @@ package provider
 import (
 	"context"
 	"net/http"
+	"strings"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
@@ -19,12 +20,14 @@ import (
 //	ThreadID  → X-Scitrera-Thread-Id → mlflow.trace.session
 //	TaskID    → X-Scitrera-Task-Id   → scitrera.task_id
 //
+// UserID is the authenticated caller of this turn, including on shared workers.
 // Only the values that change per turn belong here. Sandbox-static
-// attribution (tenant/source/user) is injected by the sidecar from its
+// attribution (tenant/source) is injected by the sidecar from its
 // proxy_config projection, not by the harness — so it stays authoritative
 // and unspoofable. Empty fields are omitted, so a non-sandbox / non-gateway
 // run stamps nothing.
 type Attribution struct {
+	UserID    string
 	Workspace string
 	ThreadID  string
 	TaskID    string
@@ -63,6 +66,9 @@ func applyAttributionHeaders(ctx context.Context, req *http.Request) {
 	a, ok := attributionFromContext(ctx)
 	if !ok {
 		return
+	}
+	if a.UserID != "" {
+		setHeaderIfAbsent(req.Header, "X-Scitrera-User", "user:"+strings.TrimPrefix(a.UserID, "user:"))
 	}
 	setHeaderIfAbsent(req.Header, "X-Scitrera-Workspace", a.Workspace)
 	setHeaderIfAbsent(req.Header, "X-Scitrera-Thread-Id", a.ThreadID)

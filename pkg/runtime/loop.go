@@ -161,7 +161,7 @@ func (r *Runner) runLoopConcurrent(ctx context.Context, cfg LoopConfig) (LoopSta
 // opaque IDs cannot make two composite (workspace, thread) pairs share a lane.)
 func threadKey(env channel.Inbound) string {
 	addr := turnAddress(env)
-	return steering.Key(addr.WorkspaceID, addr.ThreadID)
+	return steering.ConversationKey(addr)
 }
 
 func normalizeLoopConfig(cfg LoopConfig) LoopConfig {

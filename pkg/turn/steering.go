@@ -27,7 +27,7 @@ func (r *Runner) deliverSteering(ctx context.Context, session *harness.Session, 
 	if r.steering == nil {
 		return false, nil
 	}
-	parked := r.steering.Drain(steering.Key(addr.WorkspaceID, addr.ThreadID))
+	parked := r.steering.Drain(steering.AddressKey(addr))
 	if len(parked) == 0 {
 		return false, nil
 	}

@@ -105,6 +105,29 @@ func Key(workspaceID, threadID string) string {
 	return strconv.Itoa(len(workspaceID)) + ":" + workspaceID + threadID
 }
 
+// AddressKey isolates steering by tenant, caller, ownership and conversation.
+// Empty identity fields retain the legacy key used by standalone transports.
+func AddressKey(addr protocol.MessageAddress) string {
+	if addr.TenantID == "" && addr.UserID == "" && addr.Ownership == "" {
+		return Key(addr.WorkspaceID, addr.ThreadID)
+	}
+	ownership := addr.Ownership
+	if ownership == "" {
+		ownership = "user"
+	}
+	return Key(addr.TenantID, Key(strings.TrimPrefix(addr.UserID, "user:"),
+		Key(ownership, Key(addr.WorkspaceID, addr.ThreadID))))
+}
+
+// ConversationKey serializes writers of a workspace-owned shared transcript,
+// while user-owned conversations remain independent.
+func ConversationKey(addr protocol.MessageAddress) string {
+	if addr.Ownership == "workspace" {
+		addr.UserID = ""
+	}
+	return AddressKey(addr)
+}
+
 // entry is one lane's parked messages. The Inbox keys by lane but compares
 // identity by POINTER on close, so a turn that has already been replaced cannot
 // clear its successor's queue.
