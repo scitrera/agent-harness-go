@@ -6,11 +6,11 @@ package turn
 import (
 	"context"
 	"fmt"
-	"strconv"
 	"strings"
 
 	modelpkg "github.com/scitrera/agent-harness-go/pkg/model"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
+	"github.com/scitrera/agent-harness-go/pkg/steering"
 )
 
 // stickyModel returns the model pinned for a workspace/thread via /model
@@ -127,7 +127,7 @@ func (r *Runner) modelListText(addr protocol.MessageAddress) string {
 }
 
 func modelThreadKey(addr protocol.MessageAddress) string {
-	return strconv.Itoa(len(addr.WorkspaceID)) + ":" + addr.WorkspaceID + addr.ThreadID
+	return steering.AddressKey(addr)
 }
 
 // modelTags renders a short capability/tier hint for the model list.

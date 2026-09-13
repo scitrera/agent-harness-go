@@ -1169,10 +1169,11 @@ func (r *Runner) Run(ctx context.Context, addr protocol.MessageAddress, user pro
 	ctx, span := telemetry.StartTurn(ctx, addr)
 	defer telemetry.Finish(span, &err)
 	// Stamp per-turn attribution onto outbound LLM requests. The sidecar
-	// injects the sandbox-static set (tenant/source/user) from its projection;
+	// injects the sandbox-static set (tenant/source) from its projection;
 	// these ids only exist on the live turn address, so the provider request
 	// builder reads them off the context. Empty ids are omitted downstream.
 	ctx = provider.WithAttribution(ctx, provider.Attribution{
+		UserID:    addr.UserID,
 		Workspace: addr.WorkspaceID,
 		ThreadID:  addr.ThreadID,
 		TaskID:    addr.TaskID,

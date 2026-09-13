@@ -6,6 +6,8 @@ package provider
 import (
 	"context"
 	"net/http"
+	"strings"
+	"sync"
 	"testing"
 )
 
@@ -73,4 +75,25 @@ func TestApplyAttributionHeadersNeverOverwrites(t *testing.T) {
 	if got := req.Header.Get("X-Scitrera-Workspace"); got != "ws-preset" {
 		t.Fatalf("workspace header = %q, want preset value preserved", got)
 	}
+}
+
+func TestConcurrentTurnUserAttribution(t *testing.T) {
+	var pending sync.WaitGroup
+	for _, user := range []string{"alice", "bob", "user:alice", "user:bob"} {
+		pending.Add(1)
+		go func(user string) {
+			defer pending.Done()
+			ctx := WithAttribution(context.Background(), Attribution{UserID: user, ThreadID: user})
+			req, _ := http.NewRequest(http.MethodPost, "http://llm.local/v1", nil)
+			applyAttributionHeaders(ctx, req)
+			want := user
+			if !strings.HasPrefix(want, "user:") {
+				want = "user:" + want
+			}
+			if req.Header.Get("X-Scitrera-User") != want || req.Header.Get("X-Scitrera-Thread-Id") != user {
+				t.Errorf("cross-turn attribution for %s: %v", user, req.Header)
+			}
+		}(user)
+	}
+	pending.Wait()
 }

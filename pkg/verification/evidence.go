@@ -18,6 +18,7 @@ import (
 
 	"github.com/scitrera/agent-harness-go/pkg/hooks"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
+	"github.com/scitrera/agent-harness-go/pkg/steering"
 	"github.com/scitrera/agent-harness-go/pkg/tools"
 )
 
@@ -245,7 +246,7 @@ func (o *Observer) Records(addr protocol.MessageAddress) []Record {
 }
 
 func sessionKey(addr protocol.MessageAddress) string {
-	return addr.WorkspaceID + "\x00" + addr.ThreadID
+	return steering.AddressKey(addr)
 }
 
 func evidenceID(record Record) string {
