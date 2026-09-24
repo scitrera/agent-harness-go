@@ -6,11 +6,11 @@ package turn
 import (
 	"context"
 	"fmt"
-	"github.com/scitrera/agent-harness-go/pkg/steering"
 	"strings"
 
 	modelpkg "github.com/scitrera/agent-harness-go/pkg/model"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
+	"github.com/scitrera/agent-harness-go/pkg/steering"
 )
 
 // stickyModel returns the model pinned for a workspace/thread via /model

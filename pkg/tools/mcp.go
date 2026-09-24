@@ -37,11 +37,7 @@ func RegisterMCPTool(reg *Registry, cfg MCPToolConfig) error {
 		if err != nil {
 			return Result{}, fmt.Errorf("invoke mcp tool: %w", err)
 		}
-		payload, err := json.Marshal(result)
-		if err != nil {
-			return Result{}, fmt.Errorf("marshal mcp result: %w", err)
-		}
-		return NewJSONResult(req.CallID, req.Name, payload)
+		return resultFromMCP(req, result)
 	}))
 }
 

@@ -1,8 +1,12 @@
+// Copyright 2026 Scitrera LLC
+// SPDX-License-Identifier: Apache-2.0
+
 package steering
 
 import (
-	"github.com/scitrera/agent-harness-go/pkg/protocol"
 	"testing"
+
+	"github.com/scitrera/agent-harness-go/pkg/protocol"
 )
 
 func TestAddressKeyIsolatesUsersAndSharedConversationWriters(t *testing.T) {

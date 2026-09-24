@@ -11,7 +11,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
-	"github.com/scitrera/agent-harness-go/pkg/steering"
 	"sort"
 	"strings"
 	"sync"
@@ -19,6 +18,7 @@ import (
 
 	"github.com/scitrera/agent-harness-go/pkg/hooks"
 	"github.com/scitrera/agent-harness-go/pkg/protocol"
+	"github.com/scitrera/agent-harness-go/pkg/steering"
 	"github.com/scitrera/agent-harness-go/pkg/tools"
 )
 
