@@ -118,7 +118,7 @@ func (r *Runner) classifySteering(envelope channel.Inbound) steeringOutcome {
 		return notSteering
 	}
 	addr := turnAddress(envelope)
-	if r.steering.Park(steering.Key(addr.WorkspaceID, addr.ThreadID), envelope.Message) {
+	if r.steering.Park(steering.AddressKey(addr), envelope.Message) {
 		return steeringParked
 	}
 	return steeringMissed
@@ -161,7 +161,7 @@ func (r *Runner) runTask(ctx context.Context, envelope channel.Inbound) (protoco
 	// rejected; structured shell context takes its explicitly configured idle
 	// fallback so command output is never lost. Closing BEFORE the error check
 	// matters: a failed turn must not strand a user's message in the inbox.
-	closeSteering := r.steering.Begin(steering.Key(addr.WorkspaceID, addr.ThreadID))
+	closeSteering := r.steering.Begin(steering.AddressKey(addr))
 	assistant, err := r.executor.Run(turnCtx, addr, envelope.Message)
 	for _, missed := range closeSteering() {
 		missedEnvelope := channel.Inbound{Addr: missed.Addr, Message: missed}

@@ -11,6 +11,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"github.com/scitrera/agent-harness-go/pkg/steering"
 	"sort"
 	"strings"
 	"sync"
@@ -245,7 +246,7 @@ func (o *Observer) Records(addr protocol.MessageAddress) []Record {
 }
 
 func sessionKey(addr protocol.MessageAddress) string {
-	return addr.WorkspaceID + "\x00" + addr.ThreadID
+	return steering.AddressKey(addr)
 }
 
 func evidenceID(record Record) string {

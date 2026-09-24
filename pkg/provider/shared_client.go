@@ -42,7 +42,7 @@ func sharedProtocolRequest(chat ChatRequest) (llmprotocol.Request, error) {
 			Parameters:  parameters,
 		})
 	}
-	for _, source := range chat.Messages {
+	for _, source := range expandToolResultMessages(chat.Messages) {
 		message, err := sharedProtocolMessage(source)
 		if err != nil {
 			return llmprotocol.Request{}, err
@@ -57,6 +57,52 @@ func sharedProtocolRequest(chat ChatRequest) (llmprotocol.Request, error) {
 		request.Messages = append(request.Messages, message)
 	}
 	return request, nil
+}
+
+// expandToolResultMessages projects persisted UI messages into model turns.
+// A single assistant bubble may contain several call/result cycles. Chat
+// completions requires one tool message per result, with assistant segments
+// before and after it. Keep content order and the persisted input unchanged.
+func expandToolResultMessages(messages []protocol.ChatMessage) []protocol.ChatMessage {
+	out := make([]protocol.ChatMessage, 0, len(messages))
+	for _, source := range messages {
+		hasResult := false
+		for _, part := range source.Content {
+			if part.Type() == protocol.ContentToolResult {
+				hasResult = true
+				break
+			}
+		}
+		if !hasResult {
+			out = append(out, source)
+			continue
+		}
+		segment := source
+		segment.Content = nil
+		index := 0
+		flush := func() {
+			if len(segment.Content) == 0 {
+				return
+			}
+			segment.ID = fmt.Sprintf("%s-model-%d", source.ID, index)
+			index++
+			out = append(out, segment)
+			segment = source
+			segment.Content = nil
+		}
+		for _, part := range source.Content {
+			if part.Type() == protocol.ContentToolResult {
+				flush()
+				segment.Role = protocol.RoleToolResult
+				segment.Content = []protocol.ContentPart{part}
+				flush()
+			} else {
+				segment.Content = append(segment.Content, part)
+			}
+		}
+		flush()
+	}
+	return out
 }
 
 func (c *OpenAICompatClient) prepareSharedRequest(request *llmprotocol.Request) {
